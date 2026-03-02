@@ -29,6 +29,9 @@ class TestIsScreenshotText(unittest.TestCase):
     def test_slash_command_with_body(self):
         self.assertTrue(is_screenshot_text("/screenshot 看看桌面"))
 
+    def test_slash_command_with_task_style_body(self):
+        self.assertFalse(is_screenshot_text("/screenshot 命令误判修复"))
+
     def test_jieping(self):
         self.assertTrue(is_screenshot_text("截屏"))
 

@@ -302,8 +302,19 @@ def is_screenshot_text(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low:
         return False
-    # 1) Explicit slash command is always treated as screenshot intent.
+    # 1) Slash command usually means screenshot intent.
+    #    But "/screenshot 命令误判修复" is a task description, not an action.
     if low.startswith("/screenshot"):
+        tail = low[len("/screenshot"):].strip()
+        if not tail:
+            return True
+        if re.match(
+            r"^(命令|command|功能|feature|模块|module|问题|issue|误判|任务|task|"
+            r"报告|report|日志|log|流程|flow|逻辑|logic|修复|fix|排查|检查|优化|"
+            r"失败|异常|debug|bug)",
+            tail,
+        ):
+            return False
         return True
     # 2) Guard against task descriptions that start with screenshot keywords.
     #    Examples: "截图命令误判修复", "screenshot command misclassification fix"
