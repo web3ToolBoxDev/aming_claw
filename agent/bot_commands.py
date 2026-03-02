@@ -98,6 +98,11 @@ from workspace_queue import (
     promote_next_queued_task,
     remove_from_queue,
 )
+from task_retry import (
+    retry_task,
+    build_retry_summary,
+    get_max_retry_iterations,
+)
 
 
 def workspace_pick_state_file() -> Path:
@@ -791,6 +796,20 @@ def handle_callback_query(cb: Dict) -> None:
                     reply_markup=cancel_keyboard(),
                 )
                 answer_callback_query(cb_id, "请输入拒绝原因")
+            return
+        if data.startswith("retry:"):
+            ref = data.split(":", 1)[1].strip()
+            if _requires_acceptance_2fa():
+                set_pending_action(chat_id, user_id, "retry_otp", {"task_ref": ref})
+                send_text(
+                    chat_id,
+                    "重新开发任务 [{}] 需要2FA认证。\n请输入: <OTP> [补充说明]".format(ref),
+                    reply_markup=cancel_keyboard(),
+                )
+                answer_callback_query(cb_id, "请输入OTP")
+            else:
+                handle_command(chat_id, user_id, "/retry {}".format(ref))
+                answer_callback_query(cb_id, "重新开发已提交")
             return
         if data.startswith("model_select:"):
             if not is_ops_allowed(chat_id, user_id):
@@ -1757,6 +1776,12 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
         handle_command(chat_id, user_id, "/reject {} {}".format(ref, t))
         return True
 
+    # -- Retry with OTP + supplement --
+    if action == "retry_otp":
+        ref = context.get("task_ref", "")
+        handle_command(chat_id, user_id, "/retry {} {}".format(ref, t))
+        return True
+
     # -- Archive Show --
     if action == "archive_show":
         handle_command(chat_id, user_id, "/archive_show {}".format(t))
@@ -2649,15 +2674,126 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         else:
             git_rollback_msg = "\nGit: 无检查点记录，跳过回退"
 
+        _reject_code = found.get("task_code", "-")
+        _reject_keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "查看状态", "callback_data": "status:{}".format(_reject_code)},
+                    {"text": "重新开发", "callback_data": "retry:{}".format(_reject_code)},
+                ],
+                [
+                    {"text": "验收通过", "callback_data": "accept:{}".format(_reject_code)},
+                    {"text": "查看事件", "callback_data": "events:{}".format(_reject_code)},
+                ],
+            ]
+        }
         send_text(
             chat_id,
-            "任务 [{code}] {task_id} 已标记为验收拒绝。\n状态: 验收拒绝\n原因: {reason}{git_msg}\n可用 /status {code} 继续跟踪；通过 /accept {code} 可改为验收通过后归档。".format(
-                code=found.get("task_code", "-"),
+            "任务 [{code}] {task_id} 已标记为验收拒绝。\n状态: 验收拒绝\n原因: {reason}{git_msg}\n可用 /retry {code} 重新开发；/accept {code} 可改为验收通过后归档。".format(
+                code=_reject_code,
                 task_id=found.get("task_id", ""),
                 reason=acceptance.get("reason", "(未提供)"),
                 git_msg=git_rollback_msg,
             ),
+            reply_markup=_reject_keyboard,
         )
+        return True
+
+    if t.startswith("/retry"):
+        raw_retry = t[len("/retry"):].strip()
+        retry_parts = raw_retry.split(None, 1)
+        if not retry_parts:
+            send_text(chat_id, "用法: /retry <task_id|代号> [补充说明]")
+            return True
+        task_ref = retry_parts[0]
+        extra_instruction = retry_parts[1] if len(retry_parts) >= 2 else ""
+
+        # 2FA check
+        if _requires_acceptance_2fa():
+            otp_parts = raw_retry.split(None, 2)
+            otp_token = otp_parts[1] if len(otp_parts) >= 2 else None
+            extra_instruction = otp_parts[2] if len(otp_parts) >= 3 else ""
+            otp_window = int(os.getenv("AUTH_OTP_WINDOW", "2"))
+            if not otp_token:
+                send_text(
+                    chat_id,
+                    "2FA is required for retry.\n"
+                    "Usage: /retry {} <6-digit OTP> [补充说明]".format(task_ref),
+                )
+                return True
+            if not verify_otp(otp_token, window=otp_window):
+                send_text(
+                    chat_id,
+                    "2FA failed: OTP invalid or expired.\n"
+                    "Retry: /retry {} <OTP> [补充说明]".format(task_ref),
+                )
+                return True
+
+        found = find_task(task_ref)
+        if not found:
+            archived = find_archive_entry(task_ref)
+            if archived:
+                send_text(
+                    chat_id,
+                    "任务已验收通过并归档，无法重新开发。\narchive_id={}\nstatus={}".format(
+                        archived.get("archive_id", ""),
+                        status_tag(archived.get("status", "unknown")),
+                    ),
+                )
+                return True
+            send_text(chat_id, "任务不存在: {}".format(task_ref))
+            return True
+
+        # AC-6: Workspace queue compatibility
+        ws_id = str(found.get("target_workspace_id", "")).strip()
+        if not ws_id:
+            ws_label = str(found.get("target_workspace", "")).strip()
+            if ws_label:
+                from workspace_registry import find_workspace_by_label
+                ws = find_workspace_by_label(ws_label)
+                if ws:
+                    ws_id = ws["id"]
+        if not ws_id:
+            from workspace_registry import get_default_workspace
+            ws = get_default_workspace()
+            if ws:
+                ws_id = ws["id"]
+
+        # Call core retry logic
+        success, msg, updated = retry_task(found, user_id, extra_instruction)
+        if not success:
+            send_text(chat_id, msg)
+            return True
+
+        # AC-6: Check workspace queue - if workspace busy, enqueue
+        if ws_id and should_queue_task(ws_id):
+            # Move the pending file back and enqueue instead
+            pending_path = task_file("pending", str(updated["task_id"]))
+            if pending_path.exists():
+                pending_path.unlink()
+            q_info = {
+                "task_id": str(updated.get("task_id", "")),
+                "task_code": str(updated.get("task_code", "")),
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "text": str(updated.get("_retry_enhanced_text") or updated.get("text", "")),
+                "action": str(updated.get("action", "codex")),
+            }
+            pos = enqueue_task(ws_id, q_info)
+            update_task_runtime(updated, status="queued", stage="pending")
+            send_text(
+                chat_id,
+                "{}\n工作区当前有任务执行中，已加入队列（位置: 第{}个）。\n前一任务完成后将自动启动。".format(msg, pos),
+                reply_markup=back_to_menu_keyboard(),
+            )
+        else:
+            send_text(
+                chat_id,
+                msg,
+                reply_markup=task_inline_keyboard(
+                    updated.get("task_code", "-"),
+                ),
+            )
         return True
 
     if t.startswith("/clear_tasks"):

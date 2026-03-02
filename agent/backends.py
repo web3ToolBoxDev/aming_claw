@@ -150,7 +150,13 @@ def run_deterministic_wait_file_task(task: Dict) -> Optional[Dict]:
 
 # ── Prompt builders ───────────────────────────────────────────────────────────
 
+def _get_task_text(task: Dict) -> str:
+    """Return enhanced text if available (retry with rejection context), else original."""
+    return str(task.get("_retry_enhanced_text") or task.get("text") or "")
+
+
 def build_codex_prompt(task: Dict) -> str:
+    text = _get_task_text(task)
     return (
         "你是 Codex 执行器，必须直接执行任务，不要复述角色，不要请求用户再补充。\n"
         "如果任务存在歧义，做最合理假设并继续执行。\n"
@@ -161,10 +167,11 @@ def build_codex_prompt(task: Dict) -> str:
         "4) 中文回复。\n\n"
         "任务ID: {task_id}\n"
         "任务内容: {text}\n"
-    ).format(task_id=task["task_id"], text=task["text"])
+    ).format(task_id=task["task_id"], text=text)
 
 
 def build_claude_prompt(task: Dict) -> str:
+    text = _get_task_text(task)
     return (
         "请立即执行以下任务（禁止回复确认语，禁止请求补充信息，直接动手）：\n\n"
         "{text}\n\n"
@@ -172,7 +179,7 @@ def build_claude_prompt(task: Dict) -> str:
         "要求：直接在工作目录修改文件或运行命令；"
         "禁止访问敏感目录（.ssh/.aws/.gnupg/私钥）；"
         "完成后输出：1) 已执行步骤 2) 修改文件列表 3) 后续建议。中文回复。"
-    ).format(task_id=task["task_id"], text=task["text"])
+    ).format(task_id=task["task_id"], text=text)
 
 
 # ── Git helpers ───────────────────────────────────────────────────────────────
@@ -656,7 +663,7 @@ def build_pipeline_stage_prompt(task: Dict, stage_name: str, context: str) -> st
     if context.strip():
         parts.append("【前序阶段输出】\n" + context.strip()[:6000])
     parts.append(
-        "【任务ID】: {}\n【任务内容】: {}".format(task["task_id"], task["text"])
+        "【任务ID】: {}\n【任务内容】: {}".format(task["task_id"], _get_task_text(task))
     )
     return "\n\n".join(parts)
 

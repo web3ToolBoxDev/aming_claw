@@ -169,6 +169,9 @@ def to_pending_acceptance(task: Dict, result: Dict) -> Dict:
     generate_docs = os.getenv("TASK_GENERATE_ACCEPTANCE_FILES", "1").strip().lower() in {"1", "true", "yes"}
     docs = write_acceptance_documents(task, result) if generate_docs else {"doc_file": "", "cases_file": ""}
     acceptance = result.get("acceptance") if isinstance(result.get("acceptance"), dict) else {}
+    # Preserve iteration_count from retry; default to 1 for first execution
+    if "iteration_count" not in acceptance:
+        acceptance["iteration_count"] = 1
     acceptance.update(
         {
             "state": "pending",
@@ -367,28 +370,31 @@ def acceptance_notice_text(result: Dict, task_id: str, task_code: str, *, detail
     execution_status = str(result.get("execution_status") or result.get("status") or "unknown")
     elapsed = (result.get("executor") or {}).get("elapsed_ms", 0)
     summary = build_task_summary(result)
+    acceptance = result.get("acceptance") if isinstance(result.get("acceptance"), dict) else {}
+    iteration = int(acceptance.get("iteration_count") or 1)
+    iteration_tag = "（第{}轮迭代）".format(iteration) if iteration > 1 else ""
     if execution_status == "failed":
         if detailed:
             return (
-                "任务 [{code}] {task_id} 执行失败，等待验收。\n"
+                "任务 [{code}] {task_id} 执行失败{iter}，等待验收。\n"
                 "状态: pending_acceptance\n"
                 "执行结果: failed\n"
                 "耗时: {elapsed} ms\n"
                 "失败摘要:\n{summary}\n\n"
                 "通过: /accept {code}\n"
                 "拒绝: /reject {code} <原因>"
-            ).format(code=task_code, task_id=task_id, elapsed=elapsed, summary=summary[:800])
+            ).format(code=task_code, task_id=task_id, elapsed=elapsed, summary=summary[:800], iter=iteration_tag)
         return (
-            "任务 [{code}] {task_id} 执行失败，等待验收。\n"
+            "任务 [{code}] {task_id} 执行失败{iter}，等待验收。\n"
             "状态: pending_acceptance\n"
             "执行结果: failed\n"
             "失败摘要: {summary}\n"
             "通过: /accept {code}\n"
             "拒绝: /reject {code} <原因>"
-        ).format(code=task_code, task_id=task_id, summary=summary[:300])
+        ).format(code=task_code, task_id=task_id, summary=summary[:300], iter=iteration_tag)
     if detailed:
         return (
-            "任务 [{code}] {task_id} 执行完成，等待验收。\n"
+            "任务 [{code}] {task_id} 执行完成{iter}，等待验收。\n"
             "状态: pending_acceptance\n"
             "执行结果: {execution_status}\n"
             "耗时: {elapsed} ms\n"
@@ -401,9 +407,10 @@ def acceptance_notice_text(result: Dict, task_id: str, task_code: str, *, detail
             execution_status=execution_status,
             elapsed=elapsed,
             summary=summary[:800],
+            iter=iteration_tag,
         )
     return (
-        "任务 [{code}] {task_id} 已处理完成，等待验收。\n"
+        "任务 [{code}] {task_id} 已处理完成{iter}，等待验收。\n"
         "状态: pending_acceptance\n"
         "执行结果: {execution_status}\n"
         "概要: {summary}\n"
@@ -414,6 +421,7 @@ def acceptance_notice_text(result: Dict, task_id: str, task_code: str, *, detail
         task_id=task_id,
         execution_status=execution_status,
         summary=summary[:300],
+        iter=iteration_tag,
     )
 
 
