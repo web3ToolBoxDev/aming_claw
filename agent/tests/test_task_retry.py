@@ -189,15 +189,14 @@ class TestRetryStateValidation(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_retry_pending_acceptance_fails(self):
-        """TC-3 step 1: pending_acceptance tasks cannot be retried."""
+    def test_retry_pending_acceptance_allowed(self):
+        """TC-3 step 1: pending_acceptance tasks can be retried."""
         task = _make_rejected_task()
         task["status"] = "pending_acceptance"
         task["acceptance"]["state"] = "pending"
 
         success, msg, _ = retry_task(task, user_id=456)
-        self.assertFalse(success)
-        self.assertIn("只能对验收拒绝的任务重新开发", msg)
+        self.assertTrue(success)
 
     def test_retry_processing_fails(self):
         """TC-3 step 2: processing tasks cannot be retried."""
@@ -206,7 +205,7 @@ class TestRetryStateValidation(unittest.TestCase):
 
         success, msg, _ = retry_task(task, user_id=456)
         self.assertFalse(success)
-        self.assertIn("只能对验收拒绝的任务重新开发", msg)
+        self.assertIn("\u53ea\u80fd\u5bf9\u9a8c\u6536\u62d2\u7edd\u6216\u5f85\u9a8c\u6536\u7684\u4efb\u52a1\u91cd\u65b0\u5f00\u53d1", msg)
 
     def test_retry_accepted_fails(self):
         """TC-3 step 3: accepted (archived) tasks cannot be retried."""
