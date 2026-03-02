@@ -477,11 +477,11 @@ def run_claude_chat(text: str) -> str:
 
 
 def run_chat(text: str) -> str:
-    """Route direct chat to the active backend (codex / claude)."""
+    """Route direct chat to the active backend (codex / claude / pipeline)."""
     backend = get_agent_backend()
-    if backend == "claude":
+    if backend in ("claude", "pipeline"):
         return run_claude_chat(text)
-    # codex / pipeline default → codex chat
+    # codex default → codex chat
     return run_codex_chat(text)
 
 

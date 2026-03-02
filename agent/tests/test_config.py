@@ -116,8 +116,8 @@ class TestGetSetBackend(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_default_backend(self):
-        # Without config file, falls back to env or "codex"
-        self.assertEqual(get_agent_backend(), "codex")
+        # Without config file, falls back to env or "pipeline"
+        self.assertEqual(get_agent_backend(), "pipeline")
 
     def test_env_override(self):
         os.environ["AGENT_BACKEND"] = "claude"

@@ -5,7 +5,7 @@ Stores the active backend (codex / claude / pipeline) in
 state/agent_config.json so it persists across restarts and can be
 changed without editing .env.
 
-Priority: agent_config.json > AGENT_BACKEND env > "codex" default
+Priority: agent_config.json > AGENT_BACKEND env > "pipeline" default
 
 Pipeline mode: when agent_backend="pipeline", pipeline_stages defines
 the ordered list of AI stages to run for each task, e.g.:
@@ -99,7 +99,7 @@ def get_agent_backend() -> str:
                 return backend
         except Exception:
             pass
-    return os.getenv("AGENT_BACKEND", "codex")
+    return os.getenv("AGENT_BACKEND", "pipeline")
 
 
 def set_agent_backend(backend: str, changed_by: Optional[int] = None) -> None:
