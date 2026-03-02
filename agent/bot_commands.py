@@ -1110,6 +1110,29 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         answer_callback_query(cb_id, "请输入OTP")
         return
 
+    # -- Workspace List: execute directly --
+    if action == "workspace_list":
+        handle_command(chat_id, user_id, "/workspace_list")
+        answer_callback_query(cb_id, "工作目录列表")
+        return
+
+    # -- Workspace Add: prompt for path --
+    if action == "workspace_add":
+        set_pending_action(chat_id, user_id, "workspace_add")
+        send_text(
+            chat_id,
+            PENDING_PROMPTS["workspace_add"],
+            reply_markup=cancel_keyboard(),
+        )
+        answer_callback_query(cb_id, "请输入路径")
+        return
+
+    # -- Dispatch Status: execute directly --
+    if action == "dispatch_status":
+        handle_command(chat_id, user_id, "/dispatch_status")
+        answer_callback_query(cb_id, "调度器状态")
+        return
+
     answer_callback_query(cb_id, "未知菜单操作")
 
 
@@ -1253,6 +1276,11 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
     # -- Pipeline Config Custom --
     if action == "pipeline_config_custom":
         handle_command(chat_id, user_id, "/set_pipeline {}".format(t))
+        return True
+
+    # -- Workspace Add --
+    if action == "workspace_add":
+        handle_command(chat_id, user_id, "/workspace_add {}".format(t))
         return True
 
     return False
@@ -2319,23 +2347,173 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             )
         return True
 
+    # ── Workspace registry commands ──────────────────────────────────────────
+
+    if t.startswith("/workspace_add"):
+        parts = t.split(maxsplit=2)
+        if len(parts) < 2:
+            send_text(chat_id, "用法: /workspace_add <路径> [标签]")
+            return True
+        raw_path = parts[1].strip()
+        label = parts[2].strip() if len(parts) >= 3 else ""
+        p = Path(raw_path).expanduser()
+        if not p.exists() or not p.is_dir():
+            send_text(chat_id, "路径不存在或不是目录: {}".format(raw_path))
+            return True
+        if is_risky_workspace(p.resolve()):
+            send_text(chat_id, "拒绝添加高风险目录: {}".format(str(p.resolve())))
+            return True
+        try:
+            from workspace_registry import add_workspace
+            ws = add_workspace(p, label=label, created_by=user_id)
+            send_text(
+                chat_id,
+                "工作目录已添加:\n"
+                "ID: {id}\n"
+                "标签: {label}\n"
+                "路径: {path}\n"
+                "默认: {default}".format(
+                    id=ws["id"],
+                    label=ws["label"],
+                    path=ws["path"],
+                    default="是" if ws.get("is_default") else "否",
+                ),
+                reply_markup=back_to_menu_keyboard(),
+            )
+        except ValueError as exc:
+            send_text(chat_id, "添加失败: {}".format(str(exc)))
+        return True
+
+    if t.startswith("/workspace_remove"):
+        parts = t.split(maxsplit=1)
+        if len(parts) < 2:
+            send_text(chat_id, "用法: /workspace_remove <工作目录ID>")
+            return True
+        ws_id = parts[1].strip()
+        from workspace_registry import remove_workspace
+        if remove_workspace(ws_id):
+            send_text(chat_id, "工作目录已移除: {}".format(ws_id), reply_markup=back_to_menu_keyboard())
+        else:
+            send_text(chat_id, "工作目录未找到: {}".format(ws_id))
+        return True
+
+    if t.startswith("/workspace_default"):
+        parts = t.split(maxsplit=1)
+        if len(parts) < 2:
+            send_text(chat_id, "用法: /workspace_default <工作目录ID>")
+            return True
+        ws_id = parts[1].strip()
+        from workspace_registry import set_default_workspace, get_workspace
+        if set_default_workspace(ws_id):
+            ws = get_workspace(ws_id)
+            send_text(
+                chat_id,
+                "默认工作目录已设置: {} ({})".format(ws_id, ws.get("label", "") if ws else ""),
+                reply_markup=back_to_menu_keyboard(),
+            )
+        else:
+            send_text(chat_id, "工作目录未找到: {}".format(ws_id))
+        return True
+
+    if t.startswith("/workspace_list") or t == "/workspaces":
+        from workspace_registry import list_workspaces as _list_ws
+        workspaces = _list_ws(include_inactive=True)
+        if not workspaces:
+            send_text(
+                chat_id,
+                "尚未注册任何工作目录。\n使用 /workspace_add <路径> [标签] 添加。",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return True
+        lines = ["注册的工作目录:"]
+        for ws in workspaces:
+            flags = []
+            if ws.get("is_default"):
+                flags.append("默认")
+            if not ws.get("active", True):
+                flags.append("停用")
+            flag_str = " [{}]".format(",".join(flags)) if flags else ""
+            lines.append(
+                "{label}{flags}\n  ID: {id}\n  路径: {path}\n  并发: {concurrent}".format(
+                    label=ws.get("label", ws["id"]),
+                    flags=flag_str,
+                    id=ws["id"],
+                    path=ws["path"],
+                    concurrent=ws.get("max_concurrent", 1),
+                )
+            )
+        send_text(chat_id, "\n\n".join(lines), reply_markup=back_to_menu_keyboard())
+        return True
+
+    if t.startswith("/workspace_status") or t == "/dispatch_status":
+        from parallel_dispatcher import get_dispatcher_status
+        status = get_dispatcher_status()
+        workers = status.get("workers", {})
+        if not workers:
+            send_text(
+                chat_id,
+                "并行调度器未运行或无工作线程。\n"
+                "确保 EXECUTOR_MODE=parallel 或有多个工作目录注册。",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return True
+        lines = ["并行调度器状态:"]
+        for ws_id, w in workers.items():
+            state = "运行中" if w.get("running") else "已停止"
+            busy = "忙碌({})".format(w.get("current_task_id", "")) if w.get("busy") else "空闲"
+            lines.append(
+                "{label} ({state})\n"
+                "  ID: {id}\n"
+                "  {busy} | 队列: {queue} | 完成: {done} | 失败: {fail}".format(
+                    label=w.get("ws_label", ws_id),
+                    state=state,
+                    id=ws_id,
+                    busy=busy,
+                    queue=w.get("queue_size", 0),
+                    done=w.get("tasks_completed", 0),
+                    fail=w.get("tasks_failed", 0),
+                )
+            )
+        send_text(chat_id, "\n\n".join(lines), reply_markup=back_to_menu_keyboard())
+        return True
+
     return False
+
+
+def _extract_workspace_target(text: str) -> Tuple[str, str]:
+    """Extract @workspace:<label> prefix from text. Returns (label, remaining_text)."""
+    if text.startswith("@workspace:"):
+        parts = text.split(None, 1)
+        if parts:
+            label = parts[0][len("@workspace:"):]
+            remaining = parts[1] if len(parts) > 1 else ""
+            return label, remaining
+    return "", text
 
 
 def create_task(chat_id: int, user_id: int, raw_text: str) -> str:
     task_id = new_task_id()
     text = parse_task_text(raw_text) or raw_text.strip()
     action = infer_action(raw_text)
+
+    # Parse workspace targeting prefix
+    target_ws_label, clean_text = _extract_workspace_target(text)
+
     task = {
         "task_id": task_id,
         "chat_id": chat_id,
         "requested_by": user_id,
         "action": action,
-        "text": text,
+        "text": clean_text if target_ws_label else text,
         "status": "pending",
         "created_at": utc_iso(),
         "updated_at": utc_iso(),
     }
+
+    # Add workspace routing info if specified
+    if target_ws_label:
+        task["target_workspace"] = target_ws_label
+
     task["task_code"] = register_task_created(task)
     save_json(task_file("pending", task_id), task)
     return task_id

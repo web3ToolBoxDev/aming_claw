@@ -167,6 +167,13 @@ def ops_menu_keyboard() -> Dict:
                 {"text": "\u21a9\ufe0f \u91cd\u7f6e\u5de5\u4f5c\u533a", "callback_data": "menu:reset_workspace"},
             ],
             [
+                {"text": "\U0001f4c1 \u5de5\u4f5c\u76ee\u5f55\u5217\u8868", "callback_data": "menu:workspace_list"},
+                {"text": "\u2795 \u6dfb\u52a0\u5de5\u4f5c\u76ee\u5f55", "callback_data": "menu:workspace_add"},
+            ],
+            [
+                {"text": "\U0001f4ca \u8c03\u5ea6\u5668\u72b6\u6001", "callback_data": "menu:dispatch_status"},
+            ],
+            [
                 {"text": "\u00ab \u8fd4\u56de\u4e3b\u83dc\u5355", "callback_data": "menu:main"},
             ],
         ]
@@ -333,6 +340,13 @@ HELP_TEXT = (
     "  /auth_init - \u521d\u59cb\u53162FA\n"
     "  /auth_status - \u67e5\u770b2FA\u72b6\u6001\n"
     "  /auth_debug <OTP> - OTP\u8c03\u8bd5\n\n"
+    "\u5de5\u4f5c\u76ee\u5f55:\n"
+    "  /workspace_add <\u8def\u5f84> [\u6807\u7b7e] - \u6dfb\u52a0\u5de5\u4f5c\u76ee\u5f55\n"
+    "  /workspace_remove <ID> - \u79fb\u9664\u5de5\u4f5c\u76ee\u5f55\n"
+    "  /workspace_list - \u67e5\u770b\u5de5\u4f5c\u76ee\u5f55\u5217\u8868\n"
+    "  /workspace_default <ID> - \u8bbe\u7f6e\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55\n"
+    "  /dispatch_status - \u67e5\u770b\u5e76\u884c\u8c03\u5ea6\u5668\u72b6\u6001\n"
+    "  @workspace:<\u6807\u7b7e> <\u4efb\u52a1> - \u6307\u5b9a\u5de5\u4f5c\u76ee\u5f55\u6267\u884c\n\n"
     "\u5176\u4ed6:\n"
     "  /screenshot [\u8bf4\u660e] - \u622a\u56fe\n"
     "  \u76f4\u63a5\u53d1\u9001\u6587\u5b57 - \u4e0eAI\u5bf9\u8bdd"
@@ -449,5 +463,12 @@ PENDING_PROMPTS = {
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "\u8bf7\u8f93\u5165\u6d41\u6c34\u7ebf\u914d\u7f6e (stage:backend \u683c\u5f0f)\n\n"
         "\u793a\u4f8b: plan:claude code:claude verify:codex"
+    ),
+    "workspace_add": (
+        "\u2795 \u6dfb\u52a0\u5de5\u4f5c\u76ee\u5f55\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u8bf7\u8f93\u5165\u5de5\u4f5c\u76ee\u5f55\u8def\u5f84\u548c\u53ef\u9009\u6807\u7b7e\n"
+        "\u683c\u5f0f: <\u8def\u5f84> [\u6807\u7b7e]\n\n"
+        "\u793a\u4f8b: C:\\Users\\me\\projects\\my-app my-app"
     ),
 }

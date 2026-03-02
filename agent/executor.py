@@ -402,12 +402,13 @@ def process_task(path: Path) -> None:
 
 
 def run() -> None:
+    """Serial executor loop (original mode). Picks tasks one at a time."""
     lock = acquire_single_instance_lock()
     if lock is None:
         print("[executor] another executor instance is already running; exit")
         return
     poll_sec = float(os.getenv("EXECUTOR_POLL_SEC", "1"))
-    print("[executor] started")
+    print("[executor] started (serial mode)")
     while True:
         try:
             pending = pick_pending_task()
@@ -421,6 +422,78 @@ def run() -> None:
         except Exception as exc:
             print("[executor] error:", exc)
             time.sleep(max(1.0, poll_sec))
+
+
+# ── Parallel mode ────────────────────────────────────────────────────────────
+
+def process_task_in_workspace(task_path: Path, workspace_info: Dict) -> None:
+    """Process a task within a specific workspace context.
+
+    This is the callback used by ParallelDispatcher's WorkspaceWorker.
+    It sets the thread-local workspace before delegating to process_task().
+    """
+    from workspace import thread_workspace_context
+    ws_path = Path(workspace_info["path"])
+    with thread_workspace_context(ws_path):
+        process_task(task_path)
+
+
+def run_parallel() -> None:
+    """Parallel executor: dispatches tasks to workspace-specific worker threads."""
+    lock = acquire_single_instance_lock()
+    if lock is None:
+        print("[executor] another executor instance is already running; exit")
+        return
+
+    from parallel_dispatcher import get_dispatcher, shutdown_dispatcher
+    from workspace_registry import list_workspaces, ensure_current_workspace_registered
+
+    # Ensure at least the current workspace is registered
+    ensure_current_workspace_registered()
+
+    workspaces = list_workspaces()
+    if not workspaces:
+        print("[executor] no workspaces registered, falling back to serial mode")
+        run()
+        return
+
+    dispatcher = get_dispatcher(task_processor=process_task_in_workspace)
+    dispatcher.start()
+
+    poll_sec = float(os.getenv("EXECUTOR_POLL_SEC", "1"))
+    refresh_interval = float(os.getenv("DISPATCHER_REFRESH_SEC", "30"))
+    last_refresh = time.time()
+
+    print("[executor] started (parallel mode, {} workspaces)".format(len(workspaces)))
+
+    try:
+        while True:
+            try:
+                pending = pick_pending_task()
+                if pending is not None:
+                    if not dispatcher.dispatch(pending):
+                        # Fallback: process in main thread if dispatch fails
+                        print("[executor] dispatch failed, processing in main thread")
+                        process_task(pending)
+                else:
+                    time.sleep(poll_sec)
+
+                # Periodically refresh workers from registry
+                now = time.time()
+                if now - last_refresh >= refresh_interval:
+                    dispatcher.refresh_workers()
+                    last_refresh = now
+
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print("[executor] error:", exc)
+                time.sleep(max(1.0, poll_sec))
+    except KeyboardInterrupt:
+        print("[executor] stopping parallel dispatcher...")
+    finally:
+        shutdown_dispatcher()
+        print("[executor] stopped")
 
 
 def acquire_single_instance_lock() -> Optional[socket.socket]:
@@ -439,4 +512,15 @@ def acquire_single_instance_lock() -> Optional[socket.socket]:
 
 
 if __name__ == "__main__":
-    run()
+    mode = os.getenv("EXECUTOR_MODE", "auto").strip().lower()
+    if mode == "parallel":
+        run_parallel()
+    elif mode == "serial":
+        run()
+    else:
+        # Auto: use parallel if multiple workspaces registered, serial otherwise
+        from workspace_registry import list_workspaces as _lw
+        if len(_lw()) > 1:
+            run_parallel()
+        else:
+            run()
