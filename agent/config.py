@@ -43,7 +43,25 @@ PIPELINE_PRESETS: Dict[str, List[Dict]] = {
         {"name": "code",   "backend": "claude"},
         {"name": "verify", "backend": "codex"},
     ],
+    "role_pipeline": [
+        {"name": "pm",   "backend": "claude"},
+        {"name": "dev",  "backend": "claude"},
+        {"name": "test", "backend": "claude"},
+        {"name": "qa",   "backend": "claude"},
+    ],
 }
+
+# ── Role pipeline definitions ────────────────────────────────────────────────
+
+# Standard role definitions for the role pipeline
+ROLE_DEFINITIONS: Dict[str, Dict] = {
+    "pm":   {"label": "产品经理", "emoji": "\U0001f4cb", "default_backend": "claude"},
+    "dev":  {"label": "开发",     "emoji": "\U0001f4bb", "default_backend": "claude"},
+    "test": {"label": "测试",     "emoji": "\U0001f9ea", "default_backend": "claude"},
+    "qa":   {"label": "QA",       "emoji": "\u2705",     "default_backend": "claude"},
+}
+
+ROLE_PIPELINE_ORDER = ["pm", "dev", "test", "qa"]
 
 
 def _config_path():
@@ -205,7 +223,90 @@ def format_pipeline_stages(stages: List[Dict]) -> str:
     """Human-readable stage list, e.g. 'plan(claude) → code(claude) → verify(codex)'"""
     if not stages:
         return "(empty)"
-    return " → ".join("{}({})".format(s.get("name", "?"), s.get("backend", "?")) for s in stages)
+    parts = []
+    for s in stages:
+        name = s.get("name", "?")
+        backend = s.get("backend", "?")
+        model = s.get("model", "")
+        if model:
+            parts.append("{}({}/{})".format(name, backend, model))
+        else:
+            parts.append("{}({})".format(name, backend))
+    return " → ".join(parts)
+
+
+# ── Role pipeline stages ─────────────────────────────────────────────────────
+
+def get_role_pipeline_stages() -> List[Dict]:
+    """Return the configured role pipeline stages, or defaults if none."""
+    p = _config_path()
+    if p.exists():
+        try:
+            data = load_json(p)
+            stages = data.get("role_pipeline_stages")
+            if isinstance(stages, list) and stages:
+                return stages
+        except Exception:
+            pass
+    # Return default role pipeline stages
+    return [
+        {"name": role, "backend": ROLE_DEFINITIONS[role]["default_backend"],
+         "model": "", "provider": ""}
+        for role in ROLE_PIPELINE_ORDER
+    ]
+
+
+def set_role_pipeline_stages(stages: List[Dict],
+                             changed_by: Optional[int] = None) -> None:
+    """Persist role pipeline stages to runtime config."""
+    p = _config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if p.exists():
+        try:
+            existing = load_json(p)
+        except Exception:
+            pass
+    existing["role_pipeline_stages"] = stages
+    existing["updated_at"] = utc_iso()
+    if changed_by is not None:
+        existing["changed_by"] = changed_by
+    save_json(p, existing)
+
+
+def set_role_stage_model(role_name: str, model: str, provider: str = "",
+                         changed_by: Optional[int] = None) -> None:
+    """Set the model for a specific role in the role pipeline."""
+    stages = get_role_pipeline_stages()
+    for stage in stages:
+        if stage.get("name") == role_name:
+            stage["model"] = model
+            stage["provider"] = provider
+            break
+    else:
+        # Role not found in stages, should not happen with valid input
+        return
+    set_role_pipeline_stages(stages, changed_by=changed_by)
+
+
+def format_role_pipeline_stages(stages: List[Dict]) -> str:
+    """Human-readable role pipeline display."""
+    if not stages:
+        return "(未配置)"
+    lines = []
+    for s in stages:
+        name = s.get("name", "?")
+        role_def = ROLE_DEFINITIONS.get(name, {})
+        emoji = role_def.get("emoji", "")
+        label = role_def.get("label", name)
+        model = s.get("model", "")
+        provider = s.get("provider", "")
+        if model:
+            tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
+            lines.append("{} {} \u2192 {} {}".format(emoji, label, model, tag).strip())
+        else:
+            lines.append("{} {} \u2192 (\u4f7f\u7528\u5168\u5c40\u6a21\u578b)".format(emoji, label))
+    return "\n".join(lines)
 
 
 # ── Workspace search roots ────────────────────────────────────────────────────

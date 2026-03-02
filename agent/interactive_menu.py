@@ -126,6 +126,9 @@ def system_menu_keyboard() -> Dict:
                 {"text": "\U0001f4ca \u6d41\u6c34\u7ebf\u72b6\u6001", "callback_data": "menu:pipeline_status"},
             ],
             [
+                {"text": "\U0001f3ad \u89d2\u8272\u6d41\u6c34\u7ebf\u914d\u7f6e", "callback_data": "menu:role_pipeline_config"},
+            ],
+            [
                 {"text": "\u00ab \u8fd4\u56de\u4e3b\u83dc\u5355", "callback_data": "menu:main"},
             ],
         ]
@@ -321,6 +324,9 @@ def pipeline_preset_keyboard() -> Dict:
                 {"text": "claude + codex", "callback_data": "pipeline_preset:claude_codex"},
             ],
             [
+                {"text": "\U0001f3ad \u89d2\u8272\u6d41\u6c34\u7ebf (pm\u2192dev\u2192test\u2192qa)", "callback_data": "pipeline_preset:role_pipeline"},
+            ],
+            [
                 {"text": "\u270f\ufe0f \u81ea\u5b9a\u4e49\u914d\u7f6e", "callback_data": "menu:pipeline_config_custom"},
             ],
             [
@@ -328,6 +334,39 @@ def pipeline_preset_keyboard() -> Dict:
             ],
         ]
     }
+
+
+def role_pipeline_config_keyboard(stages: List[Dict]) -> Dict:
+    """Keyboard showing role pipeline config with per-role model selection buttons."""
+    from config import ROLE_DEFINITIONS
+    rows: List[List[Dict]] = []
+    for stage in stages:
+        name = stage.get("name", "?")
+        role_def = ROLE_DEFINITIONS.get(name, {})
+        emoji = role_def.get("emoji", "")
+        label = role_def.get("label", name)
+        model = stage.get("model", "")
+        provider = stage.get("provider", "")
+        if model:
+            tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
+            btn_text = "{} \u914d\u7f6e{}\u6a21\u578b ({} {})".format(emoji, label, model, tag).strip()
+        else:
+            btn_text = "{} \u914d\u7f6e{}\u6a21\u578b (\u5168\u5c40)".format(emoji, label)
+        rows.append([{"text": btn_text, "callback_data": "role_cfg:{}".format(name)}])
+    rows.append([{"text": "\u00ab \u8fd4\u56de\u7cfb\u7edf\u8bbe\u7f6e", "callback_data": "menu:sub_system"}])
+    return {"inline_keyboard": rows}
+
+
+def role_model_select_keyboard(role_name: str, models: List[Dict]) -> Dict:
+    """Build a dynamic keyboard for selecting a model for a specific role."""
+    from model_registry import make_label
+    rows: List[List[Dict]] = []
+    for m in models:
+        label = make_label(m)
+        cb_data = "role_model:{}:{}:{}".format(role_name, m["provider"], m["id"])
+        rows.append([{"text": label, "callback_data": cb_data}])
+    rows.append([{"text": "\u00ab \u8fd4\u56de\u89d2\u8272\u914d\u7f6e", "callback_data": "menu:role_pipeline_config"}])
+    return {"inline_keyboard": rows}
 
 
 def cancel_keyboard() -> Dict:

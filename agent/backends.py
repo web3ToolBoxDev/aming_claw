@@ -529,7 +529,8 @@ def run_claude_with_retry(task: Dict) -> Dict:
 
 # Stage names treated as "analysis" (text output, no code execution required)
 _ANALYSIS_STAGES = {"plan", "planning", "verify", "verification", "test", "testing",
-                    "review", "check", "analyse", "analysis", "audit"}
+                    "review", "check", "analyse", "analysis", "audit",
+                    "pm", "qa"}
 
 _STAGE_ROLE_PROMPTS = {
     "plan": (
@@ -585,6 +586,49 @@ _STAGE_ROLE_PROMPTS = {
         "3) 给出总体评分和结论；\n"
         "4) 中文回复。\n"
     ),
+    # ── Role pipeline prompts ──────────────────────────────────────────────
+    "pm": (
+        "你是产品经理（PM），负责解析用户原始需求，拆分为结构化子任务，定义验收标准。\n"
+        "禁止回复确认语，禁止请求用户补充信息，直接输出需求文档。\n"
+        "如果任务存在歧义，做最合理假设并继续。\n\n"
+        "【输出要求 - 需求文档】\n"
+        "1) 需求概述：一句话描述核心目标；\n"
+        "2) 子任务列表：逐条拆分，每条包含：\n"
+        "   - 编号和标题\n"
+        "   - 具体描述（做什么、改哪里）\n"
+        "   - 验收条件（可独立验证的具体标准）\n"
+        "3) 全局约束和注意事项；\n"
+        "4) 预期影响范围（涉及的文件/模块）；\n"
+        "5) 中文回复，使用清晰的编号格式。\n"
+    ),
+    "dev": (
+        "你是开发工程师（Dev），根据产品经理产出的需求文档逐项实现代码变更。\n"
+        "禁止回复确认语，禁止请求用户补充信息，直接编写和执行代码。\n"
+        "严格按照需求文档中的子任务和验收标准进行实现。\n\n"
+        "【输出要求】\n"
+        "1) 直接在工作目录修改文件/运行命令；\n"
+        "2) 禁止访问敏感目录（.ssh、.aws、私钥等）；\n"
+        "3) 逐项实现需求文档中的子任务；\n"
+        "4) 最终输出：\n"
+        "   - 已执行步骤（含实际命令）\n"
+        "   - 修改文件列表及变更说明\n"
+        "   - 每个子任务的实现状态\n"
+        "5) 中文回复。\n"
+    ),
+    "qa": (
+        "你是QA验收专家，负责对照需求文档中的验收标准，审计代码变更和测试结果。\n"
+        "禁止回复确认语，禁止请求用户补充信息，直接输出验收报告。\n\n"
+        "【输出要求 - 验收报告】\n"
+        "1) 逐项对照验收标准检查：\n"
+        "   - 编号对应需求文档中的子任务\n"
+        "   - 每项标注：✓通过 / ✗未通过 / ⚠部分通过\n"
+        "   - 附上判断依据和证据\n"
+        "2) 代码变更审查结果（质量、安全、规范）；\n"
+        "3) 测试结果审查（覆盖率、遗漏场景）；\n"
+        "4) 总体结论：通过 / 有条件通过 / 不通过；\n"
+        "5) 如不通过，列出具体问题和修复建议；\n"
+        "6) 中文回复。\n"
+    ),
 }
 
 _DEFAULT_STAGE_PROMPT = (
@@ -622,14 +666,31 @@ def detect_stage_noop(run: Dict, stage: Dict) -> Optional[str]:
 
 
 def run_stage_with_retry(task: Dict, stage: Dict, prompt: str, stage_idx: int) -> Dict:
-    """Run one pipeline stage with noop retry logic."""
+    """Run one pipeline stage with noop retry logic.
+
+    Supports per-stage model/provider override via stage dict keys:
+      stage["model"]    - model id to use for this stage
+      stage["provider"] - provider for this stage ("anthropic"|"openai"|"")
+    """
     backend = stage.get("backend", "codex")
     stage_name = stage.get("name", "stage{}".format(stage_idx))
+    stage_model = (stage.get("model") or "").strip()
+    stage_provider = (stage.get("provider") or "").strip()
     max_noop_retries = int(os.getenv("TASK_NOOP_RETRIES", "1"))
     base_tag = "s{}_{}".format(stage_idx, stage_name)
 
     def _run(p: str, tag: str) -> Dict:
         if backend == "claude":
+            # Apply per-stage model override if configured
+            if stage_model:
+                from config import get_claude_model, get_model_provider, set_claude_model
+                orig_model = get_claude_model()
+                orig_provider = get_model_provider()
+                try:
+                    set_claude_model(stage_model, provider=stage_provider)
+                    return run_claude(task, attempt_tag=tag, prompt_override=p)
+                finally:
+                    set_claude_model(orig_model, provider=orig_provider)
             return run_claude(task, attempt_tag=tag, prompt_override=p)
         return run_codex(task, attempt_tag=tag, prompt_override=p)
 
@@ -799,24 +860,91 @@ def process_claude(task: Dict, processing: Path) -> Dict:
     return finalize_codex_task(task, processing, run, status, error=error)
 
 
+def _build_role_context(stage_name: str, stage_outputs: Dict[str, str]) -> str:
+    """Build role-aware context for a pipeline stage.
+
+    PM output is base context for all subsequent stages.
+    Dev output is added for test and qa.
+    Test output is added for qa.
+    """
+    from config import ROLE_DEFINITIONS
+    parts = []
+    role_label_map = {k: v.get("label", k) for k, v in ROLE_DEFINITIONS.items()}
+
+    if stage_name == "dev":
+        if "pm" in stage_outputs:
+            parts.append("【{} 产出 - 需求文档】\n{}".format(
+                role_label_map.get("pm", "PM"), stage_outputs["pm"]))
+    elif stage_name == "test":
+        if "pm" in stage_outputs:
+            parts.append("【{} 产出 - 需求文档】\n{}".format(
+                role_label_map.get("pm", "PM"), stage_outputs["pm"]))
+        if "dev" in stage_outputs:
+            parts.append("【{} 产出 - 代码变更】\n{}".format(
+                role_label_map.get("dev", "Dev"), stage_outputs["dev"]))
+    elif stage_name == "qa":
+        if "pm" in stage_outputs:
+            parts.append("【{} 产出 - 需求文档】\n{}".format(
+                role_label_map.get("pm", "PM"), stage_outputs["pm"]))
+        if "dev" in stage_outputs:
+            parts.append("【{} 产出 - 代码变更】\n{}".format(
+                role_label_map.get("dev", "Dev"), stage_outputs["dev"]))
+        if "test" in stage_outputs:
+            parts.append("【{} 产出 - 测试结果】\n{}".format(
+                role_label_map.get("test", "Test"), stage_outputs["test"]))
+
+    return "\n\n".join(parts)
+
+
+def _is_role_pipeline(stages: List[Dict]) -> bool:
+    """Check if stages form a role pipeline (pm → dev → test → qa)."""
+    from config import ROLE_PIPELINE_ORDER
+    names = [s.get("name", "") for s in stages]
+    return names == ROLE_PIPELINE_ORDER
+
+
 def process_pipeline(task: Dict, processing: Path) -> Dict:
-    """Execute a multi-stage pipeline: each stage feeds its output as context to the next."""
-    from config import get_pipeline_stages  # imported here to avoid circular
+    """Execute a multi-stage pipeline: each stage feeds its output as context to the next.
+
+    For role pipelines (pm → dev → test → qa), uses structured context passing
+    where each role receives targeted context from prior roles.
+    """
+    from config import get_pipeline_stages, get_role_pipeline_stages  # imported here to avoid circular
 
     stages = get_pipeline_stages()
+
+    # If stages form a role pipeline, merge in per-role model/provider config
+    if stages and _is_role_pipeline(stages):
+        role_stages = get_role_pipeline_stages()
+        role_config = {s["name"]: s for s in role_stages if "name" in s}
+        for stage in stages:
+            name = stage.get("name", "")
+            if name in role_config:
+                rc = role_config[name]
+                if rc.get("model"):
+                    stage["model"] = rc["model"]
+                    stage["provider"] = rc.get("provider", "")
     if not stages:
         # No pipeline configured — fall back to single backend
         backend = task.get("_pipeline_fallback_backend", "codex")
         return process_codex(task, processing) if backend != "claude" else process_claude(task, processing)
 
+    is_role = _is_role_pipeline(stages)
     stage_results: List[Dict] = []
-    context = ""  # accumulates prior stage outputs
+    context = ""  # accumulates prior stage outputs (generic pipeline)
+    stage_outputs: Dict[str, str] = {}  # role name → output (role pipeline)
 
     for i, stage in enumerate(stages):
         stage_name = stage.get("name", "stage{}".format(i + 1))
         backend = stage.get("backend", "codex")
 
-        prompt = build_pipeline_stage_prompt(task, stage_name, context)
+        # Build context based on pipeline type
+        if is_role:
+            role_context = _build_role_context(stage_name, stage_outputs)
+            prompt = build_pipeline_stage_prompt(task, stage_name, role_context)
+        else:
+            prompt = build_pipeline_stage_prompt(task, stage_name, context)
+
         run = run_stage_with_retry(task, stage, prompt, stage_idx=i + 1)
 
         stage_results.append({
@@ -829,6 +957,8 @@ def process_pipeline(task: Dict, processing: Path) -> Dict:
         # Accumulate output for next stage
         output = (run.get("last_message") or run.get("stdout") or "").strip()
         if output:
+            if is_role:
+                stage_outputs[stage_name] = output[:6000]
             context += "【{} 阶段 ({})】\n{}\n\n".format(stage_name, backend, output[:4000])
 
         # Abort pipeline on stage failure

@@ -21,8 +21,12 @@ from utils import (
 )
 from config import (
     KNOWN_BACKENDS, KNOWN_CLAUDE_MODELS, PIPELINE_PRESETS,
-    format_pipeline_stages, get_agent_backend, get_claude_model, get_model_provider,
-    get_pipeline_stages, set_agent_backend, set_claude_model, set_pipeline_stages,
+    ROLE_DEFINITIONS, ROLE_PIPELINE_ORDER,
+    format_pipeline_stages, format_role_pipeline_stages,
+    get_agent_backend, get_claude_model, get_model_provider,
+    get_pipeline_stages, get_role_pipeline_stages,
+    set_agent_backend, set_claude_model, set_pipeline_stages,
+    set_role_pipeline_stages, set_role_stage_model,
     add_workspace_search_root, get_workspace_search_roots,
     remove_workspace_search_root, set_workspace_search_roots,
 )
@@ -67,6 +71,8 @@ from interactive_menu import (
     search_roots_keyboard,
     backend_select_keyboard,
     pipeline_preset_keyboard,
+    role_pipeline_config_keyboard,
+    role_model_select_keyboard,
     cancel_keyboard,
     back_to_menu_keyboard,
     confirm_cancel_keyboard,
@@ -819,6 +825,61 @@ def handle_callback_query(cb: Dict) -> None:
                 answer_callback_query(cb_id, "未知预设", show_alert=True)
             return
 
+        # ---- Role pipeline config callbacks ----
+        if data.startswith("role_cfg:"):
+            if not is_ops_allowed(chat_id, user_id):
+                answer_callback_query(cb_id, "无权限", show_alert=True)
+                return
+            role_name = data[len("role_cfg:"):]
+            role_def = ROLE_DEFINITIONS.get(role_name)
+            if not role_def:
+                answer_callback_query(cb_id, "未知角色", show_alert=True)
+                return
+            models = get_available_models()
+            if not models:
+                # Fallback to known models
+                models = [{"id": m, "provider": "anthropic"} for m in KNOWN_CLAUDE_MODELS]
+            send_text(
+                chat_id,
+                "选择 {} {} 使用的模型：".format(role_def.get("emoji", ""), role_def.get("label", role_name)),
+                reply_markup=role_model_select_keyboard(role_name, models),
+            )
+            answer_callback_query(cb_id, "选择模型")
+            return
+
+        if data.startswith("role_model:"):
+            if not is_ops_allowed(chat_id, user_id):
+                answer_callback_query(cb_id, "无权限", show_alert=True)
+                return
+            # Format: role_model:<role>:<provider>:<model_id>
+            parts = data[len("role_model:"):].split(":", 2)
+            if len(parts) < 3:
+                answer_callback_query(cb_id, "无效数据", show_alert=True)
+                return
+            role_name, provider, model_id = parts[0], parts[1], parts[2]
+            role_def = ROLE_DEFINITIONS.get(role_name)
+            if not role_def:
+                answer_callback_query(cb_id, "未知角色", show_alert=True)
+                return
+            set_role_stage_model(role_name, model_id, provider=provider, changed_by=user_id)
+            tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
+            answer_callback_query(cb_id, "已设置: {} {}".format(tag, model_id))
+            # Refresh the role pipeline config view
+            stages = get_role_pipeline_stages()
+            send_text(
+                chat_id,
+                "\U0001f3ad 角色流水线配置\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "{} {} 已设置为: {} {}\n\n"
+                "当前配置:\n{}".format(
+                    role_def.get("emoji", ""), role_def.get("label", role_name),
+                    tag, model_id,
+                    format_role_pipeline_stages(stages),
+                ),
+                reply_markup=role_pipeline_config_keyboard(stages),
+            )
+            return
+
         # ---- Workspace selection callbacks ----
         if data.startswith("ws_task_select:"):
             ws_id = data.split(":", 1)[1].strip()
@@ -1141,6 +1202,25 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             reply_markup=pipeline_preset_keyboard(),
         )
         answer_callback_query(cb_id, "选择流水线配置")
+        return
+
+    # -- Role Pipeline Config: show role config keyboard --
+    if action == "role_pipeline_config":
+        if not is_ops_allowed(chat_id, user_id):
+            send_text(chat_id, "无权限执行此操作。", reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, "无权限", show_alert=True)
+            return
+        stages = get_role_pipeline_stages()
+        send_text(
+            chat_id,
+            "\U0001f3ad 角色流水线配置\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            "当前配置:\n{}\n\n"
+            "点击角色按钮配置对应模型\n"
+            "未配置的角色使用全局模型".format(format_role_pipeline_stages(stages)),
+            reply_markup=role_pipeline_config_keyboard(stages),
+        )
+        answer_callback_query(cb_id, "角色流水线配置")
         return
 
     # -- Pipeline Config Custom: prompt for text --
