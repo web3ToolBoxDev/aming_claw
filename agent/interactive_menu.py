@@ -482,7 +482,7 @@ HELP_TEXT = (
     "  /status [\u4ee3\u53f7] - \u67e5\u770b\u4efb\u52a1\u5217\u8868\u6216\u5355\u4e2a\u4efb\u52a1\n"
     "  /events <\u4ee3\u53f7> - \u67e5\u770b\u4efb\u52a1\u4e8b\u4ef6\n"
     "  /accept <\u4ee3\u53f7> [OTP] - \u9a8c\u6536\u4efb\u52a1\n"
-    "  /reject <\u4ee3\u53f7> [OTP] [\u539f\u56e0] - \u62d2\u7edd\u4efb\u52a1\n"
+    "  /reject <\u4ee3\u53f7> [OTP] <\u539f\u56e0> - \u62d2\u7edd\u4efb\u52a1\n"
     "  /clear_tasks - \u6e05\u7a7a\u4efb\u52a1\u5217\u8868\n\n"
     "\u540e\u7aef & \u6a21\u578b:\n"
     "  /switch_backend <codex|claude|pipeline> - \u5207\u6362\u540e\u7aef\n"

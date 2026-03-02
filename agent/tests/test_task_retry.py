@@ -829,5 +829,174 @@ class TestRejectKeyboard(unittest.TestCase):
         self.assertTrue(retry_button_found, "Reject response should include retry button")
 
 
+class TestRejectReasonRequired(unittest.TestCase):
+    """AC: /reject must require a reason parameter."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["SHARED_VOLUME_PATH"] = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _setup_pending_task(self, task_id="task-test-001", task_code="T0001"):
+        task = _make_rejected_task(task_id=task_id, task_code=task_code)
+        task["status"] = "pending_acceptance"
+        task["acceptance"]["state"] = "pending"
+        result_path = task_file("results", task["task_id"])
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        save_json(result_path, task)
+        register_task_created(task)
+        update_task_runtime(task, status="pending_acceptance", stage="results")
+        return task
+
+    @patch("bot_commands.send_text")
+    def test_reject_without_reason_non2fa_rejected(self, mock_send):
+        """TC-01: /reject T0001 without reason is rejected with usage prompt."""
+        import bot_commands
+
+        self._setup_pending_task()
+
+        with patch("bot_commands._requires_acceptance_2fa", return_value=False):
+            bot_commands.handle_command(123, 456, "/reject T0001")
+
+        text = mock_send.call_args_list[-1][0][1]
+        self.assertIn("必须提供原因", text)
+        self.assertIn("<原因>", text)
+
+        # Verify task status unchanged
+        st = load_task_status("task-test-001")
+        self.assertEqual(st.get("status"), "pending_acceptance")
+
+    @patch("bot_commands.send_text")
+    def test_reject_whitespace_only_reason_rejected(self, mock_send):
+        """TC: /reject T0001 followed by only whitespace is rejected."""
+        import bot_commands
+
+        self._setup_pending_task()
+
+        with patch("bot_commands._requires_acceptance_2fa", return_value=False):
+            bot_commands.handle_command(123, 456, "/reject T0001   ")
+
+        text = mock_send.call_args_list[-1][0][1]
+        self.assertIn("必须提供原因", text)
+
+    @patch("bot_commands.send_text")
+    @patch("bot_commands.rollback_to_checkpoint")
+    def test_reject_with_reason_succeeds(self, mock_rollback, mock_send):
+        """TC-02: /reject T0001 UI样式不符合预期 works and stores reason."""
+        import bot_commands
+
+        mock_rollback.return_value = {"success": True, "current_commit": "a", "reverted_commit": "b"}
+        self._setup_pending_task()
+
+        with patch("bot_commands._requires_acceptance_2fa", return_value=False):
+            bot_commands.handle_command(123, 456, "/reject T0001 UI样式不符合预期")
+
+        # Load the result file to check stored reason
+        result_path = task_file("results", "task-test-001")
+        data = load_json(result_path)
+        self.assertEqual(data["status"], "rejected")
+        self.assertEqual(data["acceptance"]["reason"], "UI样式不符合预期")
+        self.assertEqual(data["acceptance"]["state"], "rejected")
+        # Reason must not be "(未提供)" or "(not provided)"
+        self.assertNotEqual(data["acceptance"]["reason"], "(未提供)")
+        self.assertNotEqual(data["acceptance"]["reason"], "(not provided)")
+
+    @patch("bot_commands.send_text")
+    @patch("bot_commands.rollback_to_checkpoint")
+    def test_reject_multiword_reason(self, mock_rollback, mock_send):
+        """TC: Multi-word reason is preserved as a single string."""
+        import bot_commands
+
+        mock_rollback.return_value = {"success": True, "current_commit": "a", "reverted_commit": "b"}
+        self._setup_pending_task()
+
+        with patch("bot_commands._requires_acceptance_2fa", return_value=False):
+            bot_commands.handle_command(123, 456, "/reject T0001 这是 一个 多词原因")
+
+        result_path = task_file("results", "task-test-001")
+        data = load_json(result_path)
+        self.assertEqual(data["acceptance"]["reason"], "这是 一个 多词原因")
+
+    @patch("bot_commands.send_text")
+    @patch("bot_commands.verify_otp")
+    def test_reject_2fa_without_reason_rejected(self, mock_otp, mock_send):
+        """TC-03: 2FA mode /reject T0001 123456 (valid OTP, no reason) is rejected."""
+        import bot_commands
+
+        mock_otp.return_value = True
+        self._setup_pending_task()
+
+        with patch("bot_commands._requires_acceptance_2fa", return_value=True):
+            bot_commands.handle_command(123, 456, "/reject T0001 123456")
+
+        text = mock_send.call_args_list[-1][0][1]
+        self.assertIn("必须提供原因", text)
+        self.assertIn("<OTP> <原因>", text)
+
+        # Verify task status unchanged
+        st = load_task_status("task-test-001")
+        self.assertEqual(st.get("status"), "pending_acceptance")
+
+    @patch("bot_commands.send_text")
+    @patch("bot_commands.verify_otp")
+    def test_reject_2fa_no_otp_shows_usage(self, mock_otp, mock_send):
+        """TC: 2FA mode /reject T0001 (no OTP) shows usage with <原因>."""
+        import bot_commands
+
+        self._setup_pending_task()
+
+        with patch("bot_commands._requires_acceptance_2fa", return_value=True):
+            bot_commands.handle_command(123, 456, "/reject T0001")
+
+        text = mock_send.call_args_list[-1][0][1]
+        self.assertIn("<OTP> <原因>", text)
+
+    @patch("bot_commands.send_text")
+    def test_reject_no_args_shows_usage(self, mock_send):
+        """TC: /reject without any args shows usage with <原因>."""
+        import bot_commands
+
+        with patch("bot_commands._requires_acceptance_2fa", return_value=False):
+            bot_commands.handle_command(123, 456, "/reject")
+
+        text = mock_send.call_args_list[-1][0][1]
+        self.assertIn("<原因>", text)
+        self.assertNotIn("[原因]", text)
+
+    @patch("bot_commands.send_text")
+    @patch("bot_commands.rollback_to_checkpoint")
+    def test_reject_event_logged(self, mock_rollback, mock_send):
+        """TC-04: Reject records a 'rejected' event in events.jsonl."""
+        import bot_commands
+
+        mock_rollback.return_value = {"success": True, "current_commit": "a", "reverted_commit": "b"}
+        self._setup_pending_task()
+
+        with patch("bot_commands._requires_acceptance_2fa", return_value=False):
+            bot_commands.handle_command(123, 456, "/reject T0001 测试原因")
+
+        events = read_task_events("task-test-001", limit=0)
+        rejected_events = [e for e in events if e.get("event") == "rejected"]
+        self.assertEqual(len(rejected_events), 1)
+        evt = rejected_events[0]
+        self.assertEqual(evt["data"]["status"], "rejected")
+        self.assertEqual(evt["data"]["stage"], "results")
+        self.assertEqual(evt["data"]["reason"], "测试原因")
+
+    def test_help_text_uses_required_reason(self):
+        """TC-05: HELP_TEXT uses <原因> not [原因] for /reject."""
+        from interactive_menu import HELP_TEXT
+        # Find the /reject line in help text
+        for line in HELP_TEXT.splitlines():
+            if "/reject" in line:
+                self.assertIn("<原因>", line)
+                self.assertNotIn("[原因]", line)
+                break
+        else:
+            self.fail("/reject not found in HELP_TEXT")
+
+
 if __name__ == "__main__":
     unittest.main()

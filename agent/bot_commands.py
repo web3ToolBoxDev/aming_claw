@@ -38,6 +38,7 @@ from workspace import (
     set_workspace_override,
 )
 from task_state import (
+    append_task_event,
     archive_task_result,
     clear_active_tasks,
     list_task_state_candidates,
@@ -784,7 +785,7 @@ def handle_callback_query(cb: Dict) -> None:
                 set_pending_action(chat_id, user_id, "reject_otp", {"task_ref": ref})
                 send_text(
                     chat_id,
-                    "拒绝任务 [{}] 需要2FA认证。\n请输入: <OTP> [拒绝原因]".format(ref),
+                    "拒绝任务 [{}] 需要2FA认证。\n请输入: <OTP> <拒绝原因>".format(ref),
                     reply_markup=cancel_keyboard(),
                 )
                 answer_callback_query(cb_id, "请输入OTP和原因")
@@ -2541,6 +2542,15 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             summary=build_status_summary(found),
             error=str(found.get("error") or ""),
         )
+        append_task_event(
+            str(found.get("task_id") or ""),
+            "accepted",
+            {
+                "status": "accepted",
+                "stage": "results",
+                "accepted_by": int(user_id),
+            },
+        )
         archive_meta = archive_task_result(found, result_path, runlog_path if runlog_path.exists() else None)
 
         # ── Git: commit changes after acceptance ──
@@ -2585,31 +2595,41 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         raw_reject = t[len("/reject"):].strip()
         reject_parts = raw_reject.split(None, 2)
         if not reject_parts:
-            send_text(chat_id, "用法: /reject <task_id|代号> [OTP] [原因]")
+            send_text(chat_id, "用法: /reject <task_id|代号> <原因>")
             return True
         task_ref = reject_parts[0]
         if _requires_acceptance_2fa():
             otp_token = reject_parts[1] if len(reject_parts) >= 2 else None
-            reason = reject_parts[2] if len(reject_parts) >= 3 else "(not provided)"
             otp_window = int(os.getenv("AUTH_OTP_WINDOW", "2"))
             if not otp_token:
                 send_text(
                     chat_id,
-                    "2FA is required for rejection.\n"
-                    "Usage: /reject {} <6-digit OTP> [reason]".format(task_ref),
+                    "2FA验收拒绝需要OTP认证。\n"
+                    "用法: /reject {} <OTP> <原因>".format(task_ref),
                 )
                 return True
             if not verify_otp(otp_token, window=otp_window):
                 send_text(
                     chat_id,
-                    "2FA failed: OTP invalid or expired.\n"
-                    "Retry: /reject {} <OTP> [reason]".format(task_ref),
+                    "2FA验证失败: OTP无效或已过期。\n"
+                    "重试: /reject {} <OTP> <原因>".format(task_ref),
+                )
+                return True
+            reason = reject_parts[2].strip() if len(reject_parts) >= 3 else ""
+            if not reason:
+                send_text(
+                    chat_id,
+                    "拒绝任务必须提供原因。\n"
+                    "用法: /reject {} <OTP> <原因>".format(task_ref),
                 )
                 return True
         else:
-            reason = " ".join(reject_parts[1:]) if len(reject_parts) >= 2 else "(未提供)"
+            reason = " ".join(reject_parts[1:]).strip() if len(reject_parts) >= 2 else ""
+            if not reason:
+                send_text(chat_id, "拒绝任务必须提供原因。\n用法: /reject <task_id|代号> <原因>")
+                return True
         if not task_ref:
-            send_text(chat_id, "用法: /reject <task_id|代号> [OTP] [原因]")
+            send_text(chat_id, "用法: /reject <task_id|代号> <原因>")
             return True
         found = find_task(task_ref)
         if not found:
@@ -2641,7 +2661,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         acceptance["archive_allowed"] = False
         acceptance["rejected_at"] = utc_iso()
         acceptance["rejected_by"] = int(user_id)
-        acceptance["reason"] = reason or "(未提供)"
+        acceptance["reason"] = reason
         acceptance["updated_at"] = utc_iso()
         found["acceptance"] = acceptance
         result_path = task_stage_file(found)
@@ -2655,6 +2675,16 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             runlog_file=str((found.get("executor") or {}).get("runlog_file") or ""),
             summary=build_status_summary(found),
             error=str(found.get("error") or ""),
+        )
+        append_task_event(
+            str(found.get("task_id") or ""),
+            "rejected",
+            {
+                "status": "rejected",
+                "stage": "results",
+                "reason": reason,
+                "rejected_by": int(user_id),
+            },
         )
         # ── Git: rollback to checkpoint on rejection ──
         git_rollback_msg = ""
