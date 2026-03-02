@@ -1,0 +1,255 @@
+"""Tests for backends.py - AI execution backends, noop detection, prompt building."""
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+AGENT_DIR = REPO_ROOT / "agent"
+if str(AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_DIR))
+
+from backends import (  # noqa: E402
+    _ANALYSIS_STAGES,
+    build_claude_prompt,
+    build_codex_prompt,
+    build_pipeline_stage_prompt,
+    detect_noop_execution,
+    detect_stage_noop,
+    has_execution_evidence,
+    is_ack_only_message,
+    is_sensitive_path,
+    parse_wait_file_task,
+    task_touches_sensitive_path,
+)
+
+
+class TestIsSensitivePath(unittest.TestCase):
+    def test_ssh_blocked(self):
+        self.assertTrue(is_sensitive_path(Path("/home/user/.ssh/id_rsa")))
+        self.assertTrue(is_sensitive_path(Path("C:/Users/test/.ssh")))
+
+    def test_aws_blocked(self):
+        self.assertTrue(is_sensitive_path(Path("/home/user/.aws/credentials")))
+
+    def test_gnupg_blocked(self):
+        self.assertTrue(is_sensitive_path(Path("/home/user/.gnupg/keyring")))
+
+    def test_normal_path_allowed(self):
+        self.assertFalse(is_sensitive_path(Path("/home/user/projects/myapp")))
+        self.assertFalse(is_sensitive_path(Path("C:/Users/test/Documents")))
+
+    def test_id_rsa_keyword(self):
+        self.assertTrue(is_sensitive_path(Path("/tmp/id_rsa")))
+        self.assertTrue(is_sensitive_path(Path("/tmp/id_ed25519")))
+
+    def test_known_hosts(self):
+        self.assertTrue(is_sensitive_path(Path("/root/.ssh/known_hosts")))
+
+    def test_docker_blocked(self):
+        self.assertTrue(is_sensitive_path(Path("/home/user/.docker/config.json")))
+
+
+class TestTaskTouchesSensitivePath(unittest.TestCase):
+    def test_ssh_in_text(self):
+        self.assertTrue(task_touches_sensitive_path("读取 ~/.ssh/id_rsa 文件"))
+        self.assertTrue(task_touches_sensitive_path("查看 .ssh 目录"))
+
+    def test_aws_in_text(self):
+        self.assertTrue(task_touches_sensitive_path("读取 .aws 配置"))
+
+    def test_safe_text(self):
+        self.assertFalse(task_touches_sensitive_path("修复登录bug"))
+        self.assertFalse(task_touches_sensitive_path("添加日志功能"))
+
+    def test_windows_path(self):
+        self.assertTrue(task_touches_sensitive_path("C:\\Users\\test\\.ssh\\id_rsa"))
+
+
+class TestIsAckOnlyMessage(unittest.TestCase):
+    def test_empty(self):
+        self.assertTrue(is_ack_only_message(""))
+        self.assertTrue(is_ack_only_message(None))
+
+    def test_acknowledgements(self):
+        self.assertTrue(is_ack_only_message("明白。"))
+        self.assertTrue(is_ack_only_message("收到。"))
+        self.assertTrue(is_ack_only_message("好的。"))
+        self.assertTrue(is_ack_only_message("已了解。"))
+        self.assertTrue(is_ack_only_message("了解。"))
+
+    def test_execution_mode_ack(self):
+        self.assertTrue(is_ack_only_message("已进入直接执行模式。"))
+        self.assertTrue(is_ack_only_message("已切换为直接执行模式。"))
+
+    def test_request_for_input(self):
+        self.assertTrue(is_ack_only_message("请发送任务"))
+        self.assertTrue(is_ack_only_message("请提供任务"))
+
+    def test_real_content(self):
+        self.assertFalse(is_ack_only_message(
+            "已执行步骤:\n1. 修改了 utils.py\n修改文件列表: utils.py\n后续建议: 运行测试"))
+
+    def test_long_message_not_ack(self):
+        self.assertFalse(is_ack_only_message("a" * 200))
+
+
+class TestHasExecutionEvidence(unittest.TestCase):
+    def test_structured_evidence(self):
+        msg = "已执行步骤:\n1. 创建文件\n修改文件列表: test.py\n后续建议: 测试"
+        self.assertTrue(has_execution_evidence(msg))
+
+    def test_fallback_markers(self):
+        self.assertTrue(has_execution_evidence("执行了 git diff 命令"))
+        self.assertTrue(has_execution_evidence("修改了 config.py 文件"))
+        self.assertTrue(has_execution_evidence("创建了 test.py"))
+
+    def test_no_evidence(self):
+        self.assertFalse(has_execution_evidence("明白，我来处理"))
+        self.assertFalse(has_execution_evidence(""))
+
+    def test_code_file_marker(self):
+        self.assertTrue(has_execution_evidence("更新了 main.py 的逻辑"))
+        self.assertTrue(has_execution_evidence("修改了 index.ts"))
+
+
+class TestDetectNoopExecution(unittest.TestCase):
+    def test_successful_with_changes(self):
+        run = {
+            "returncode": 0,
+            "last_message": "已完成任务",
+            "stdout": "",
+            "git_changed_files": ["test.py"],
+        }
+        self.assertIsNone(detect_noop_execution(run))
+
+    def test_ack_only_is_noop(self):
+        run = {
+            "returncode": 0,
+            "last_message": "收到。",
+            "stdout": "",
+            "git_changed_files": [],
+        }
+        reason = detect_noop_execution(run)
+        self.assertIsNotNone(reason)
+        self.assertIn("acknowledgement", reason)
+
+    def test_nonzero_returncode_not_noop(self):
+        run = {
+            "returncode": 1,
+            "last_message": "",
+            "stdout": "",
+            "git_changed_files": [],
+        }
+        self.assertIsNone(detect_noop_execution(run))
+
+    def test_no_evidence_no_changes_is_noop(self):
+        os.environ["TASK_STRICT_ACCEPTANCE"] = "1"
+        run = {
+            "returncode": 0,
+            "last_message": "我来处理这个问题，让我看看代码",
+            "stdout": "",
+            "git_changed_files": [],
+        }
+        reason = detect_noop_execution(run)
+        self.assertIsNotNone(reason)
+        os.environ.pop("TASK_STRICT_ACCEPTANCE", None)
+
+    def test_evidence_without_changes_passes(self):
+        evidence = "已执行步骤:\n1. 检查了代码\n修改文件列表: 无\n后续建议: ok"
+        run = {
+            "returncode": 0,
+            "last_message": evidence,
+            "stdout": evidence,
+            "git_changed_files": [],
+        }
+        self.assertIsNone(detect_noop_execution(run))
+
+
+class TestDetectStageNoop(unittest.TestCase):
+    def test_analysis_stage_needs_content(self):
+        run = {"last_message": "", "stdout": "", "returncode": 0}
+        reason = detect_stage_noop(run, {"name": "plan"})
+        self.assertIsNotNone(reason)
+
+    def test_analysis_stage_short_content(self):
+        run = {"last_message": "ok", "stdout": "", "returncode": 0}
+        reason = detect_stage_noop(run, {"name": "verify"})
+        self.assertIsNotNone(reason)
+        self.assertIn("too short", reason)
+
+    def test_analysis_stage_good_content(self):
+        long_msg = "验收标准:\n" + "\n".join(f"{i}. 条目{i}" for i in range(10))
+        run = {"last_message": long_msg, "stdout": "", "returncode": 0}
+        reason = detect_stage_noop(run, {"name": "plan"})
+        self.assertIsNone(reason)
+
+    def test_code_stage_uses_full_detection(self):
+        run = {
+            "returncode": 0,
+            "last_message": "收到。",
+            "stdout": "",
+            "git_changed_files": [],
+        }
+        reason = detect_stage_noop(run, {"name": "code"})
+        self.assertIsNotNone(reason)
+
+    def test_analysis_stages_set(self):
+        expected = {"plan", "verify", "test", "review"}
+        for stage in expected:
+            self.assertIn(stage, _ANALYSIS_STAGES)
+
+
+class TestBuildPrompts(unittest.TestCase):
+    def test_codex_prompt_contains_task(self):
+        task = {"task_id": "task-p1", "text": "修复bug"}
+        prompt = build_codex_prompt(task)
+        self.assertIn("task-p1", prompt)
+        self.assertIn("修复bug", prompt)
+        self.assertIn("中文回复", prompt)
+
+    def test_claude_prompt_contains_task(self):
+        task = {"task_id": "task-p2", "text": "添加功能"}
+        prompt = build_claude_prompt(task)
+        self.assertIn("task-p2", prompt)
+        self.assertIn("添加功能", prompt)
+        self.assertIn("禁止回复确认语", prompt)
+
+    def test_pipeline_stage_prompt(self):
+        task = {"task_id": "task-p3", "text": "实现接口"}
+        prompt = build_pipeline_stage_prompt(task, "plan", "")
+        self.assertIn("task-p3", prompt)
+        self.assertIn("验收标准", prompt)
+
+    def test_pipeline_with_context(self):
+        task = {"task_id": "task-p4", "text": "实现接口"}
+        prompt = build_pipeline_stage_prompt(task, "code", "前面的plan输出")
+        self.assertIn("前序阶段输出", prompt)
+        self.assertIn("前面的plan输出", prompt)
+
+
+class TestParseWaitFileTask(unittest.TestCase):
+    def test_valid_pattern(self):
+        text = "在工作目录创建文件 hello.txt，写入当前时间；等待3秒后再追加一行 done"
+        parsed = parse_wait_file_task(text)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["file_name"], "hello.txt")
+        self.assertEqual(parsed["wait_sec"], 3)
+        self.assertEqual(parsed["append_line"], "done")
+
+    def test_invalid_pattern(self):
+        self.assertIsNone(parse_wait_file_task("普通任务文本"))
+        self.assertIsNone(parse_wait_file_task(""))
+
+    def test_path_traversal_blocked(self):
+        text = "在工作目录创建文件 ../../../etc/passwd，写入当前时间；等待1秒后再追加一行 hacked"
+        self.assertIsNone(parse_wait_file_task(text))
+
+    def test_special_chars_blocked(self):
+        text = "在工作目录创建文件 test|cmd，写入当前时间；等待1秒后再追加一行 test"
+        self.assertIsNone(parse_wait_file_task(text))
+
+
+if __name__ == "__main__":
+    unittest.main()

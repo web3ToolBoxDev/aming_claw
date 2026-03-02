@@ -374,6 +374,10 @@ def is_ack_only_message(message: str) -> bool:
         return True
     if len(msg) > 160:
         return False
+    # If message contains structured execution evidence (已执行步骤 + 修改文件 + 后续建议),
+    # it is NOT ack-only — it's the expected output contract from task execution.
+    if has_execution_evidence(msg):
+        return False
     lowered = msg.lower()
     if ("后续" in msg and "执行" in msg) or ("直接告诉我" in msg) or ("请告诉我" in msg):
         return True
@@ -433,14 +437,16 @@ def detect_noop_execution(run: Dict) -> Optional[str]:
         return None
     last_message = (run.get("last_message") or "").strip()
     stdout = (run.get("stdout") or "").strip()
-    # Ack-only content is considered noop even if workspace has unrelated changes.
+    changed = run.get("git_changed_files")
+    has_changes = isinstance(changed, list) and len(changed) > 0
+    # Ack-only last_message is considered noop regardless of unrelated workspace changes.
     if is_ack_only_message(last_message):
         return "codex returned acknowledgement-only response without concrete execution"
+    # If there are real file changes, accept the result even if stdout is sparse.
+    if has_changes:
+        return None
     if is_ack_only_message(stdout):
         return "codex stdout is acknowledgement-only and no concrete execution output"
-    changed = run.get("git_changed_files")
-    if isinstance(changed, list) and len(changed) > 0:
-        return None
     strict_acceptance = os.getenv("TASK_STRICT_ACCEPTANCE", "1").strip().lower() not in {"0", "false", "no"}
     if strict_acceptance:
         # For /task, require explicit execution evidence when no file changes are detected.

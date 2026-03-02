@@ -12,6 +12,7 @@ AGENT_DIR = REPO_ROOT / "agent"
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
+import bot_commands  # noqa: E402
 import coordinator  # noqa: E402
 import executor  # noqa: E402
 from utils import save_json, tasks_root, utc_iso  # noqa: E402
@@ -100,11 +101,12 @@ class AcceptanceFlowTests(unittest.TestCase):
         }
         save_json(tasks_root() / "results" / "task-2.json", task)
 
-        with patch.object(coordinator, "send_text") as send_text_mock:
+        with patch.object(bot_commands, "send_text") as send_text_mock:
             ok = coordinator.handle_command(chat_id=123, user_id=321, text="/status task-2")
             self.assertTrue(ok)
             self.assertTrue(send_text_mock.called)
-            msg = send_text_mock.call_args[0][1]
+            # First call contains the status summary; subsequent calls contain events
+            msg = send_text_mock.call_args_list[0][0][1]
 
         self.assertIn("验收标识: 待验收", msg)
         self.assertIn("下一步: 通过 /accept T0002", msg)

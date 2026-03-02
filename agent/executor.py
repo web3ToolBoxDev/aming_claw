@@ -175,6 +175,58 @@ def _worker_id() -> str:
     return "executor-{}".format(socket.gethostname())
 
 
+def _handle_task_failure(task: Dict, processing: Path, chat_id: int, exc: Exception) -> str:
+    """Shared error handler for task timeout and general exceptions.
+
+    Finalizes the task as failed, moves to pending_acceptance, and notifies user.
+    Returns the error message string.
+    """
+    _action = task.get("action", "codex")
+    _timeout_env = "CLAUDE_TIMEOUT_RETRIES" if _action == "claude" else "CODEX_TIMEOUT_RETRIES"
+    is_timeout = isinstance(exc, subprocess.TimeoutExpired)
+    error_str = "{} timeout".format(_action) if is_timeout else str(exc)
+
+    run_data = {
+        "returncode": None,
+        "elapsed_ms": None,
+        "cmd": None,
+        "timeout_retries": int(os.getenv(_timeout_env, "1")),
+        "workspace": str(resolve_workspace()) if is_timeout else None,
+        "git_changed_files": None,
+        "noop_reason": None,
+        "stdout": "",
+        "stderr": "",
+        "last_message": "",
+    }
+    result = finalize_codex_task(task, processing, run_data, "failed", error=error_str)
+    log_path = tasks_root() / "logs" / (task["task_id"] + ".run.json")
+    result = to_pending_acceptance(task, result)
+    save_json(processing, result)
+    failed_path = move_task(processing, "results")
+    update_task_runtime(result, status="pending_acceptance", stage="results")
+    mark_task_finished(
+        result,
+        status="pending_acceptance",
+        stage="results",
+        result_file=str(failed_path),
+        runlog_file=str(log_path) if log_path and log_path.exists() else "",
+        summary=build_task_summary(result),
+        error=str(result.get("error") or error_str),
+    )
+    task_code = result.get("task_code", "-")
+    send_text(
+        chat_id,
+        "任务 [{code}] {task_id} 失败: {err}\n状态: pending_acceptance(待验收)\n通过: /accept {code}\n拒绝: /reject {code} <原因>".format(
+            code=task_code,
+            task_id=task["task_id"],
+            err=error_str[:500],
+        ),
+        reply_markup=task_inline_keyboard(task_code, task["task_id"]),
+    )
+    mark_task_completion_notified(task["task_id"])
+    return error_str
+
+
 def process_task(path: Path) -> None:
     task = load_json(path)
     task_id = str(task.get("task_id") or "")
@@ -316,87 +368,8 @@ def process_task(path: Path) -> None:
             )
 
         mark_task_completion_notified(task["task_id"])
-    except subprocess.TimeoutExpired:
-        _action = task.get("action", "codex")
-        _timeout_env = "CLAUDE_TIMEOUT_RETRIES" if _action == "claude" else "CODEX_TIMEOUT_RETRIES"
-        run_data = {
-            "returncode": None,
-            "elapsed_ms": None,
-            "cmd": None,
-            "timeout_retries": int(os.getenv(_timeout_env, "1")),
-            "workspace": str(resolve_workspace()),
-            "git_changed_files": None,
-            "noop_reason": None,
-            "stdout": "",
-            "stderr": "",
-            "last_message": "",
-        }
-        _timeout_err = "{} timeout".format(_action)
-        result = finalize_codex_task(task, processing, run_data, "failed", error=_timeout_err)
-        log_path = tasks_root() / "logs" / (task["task_id"] + ".run.json")
-        result = to_pending_acceptance(task, result)
-        save_json(processing, result)
-        failed_path = move_task(processing, "results")
-        update_task_runtime(result, status="pending_acceptance", stage="results")
-        mark_task_finished(
-            result,
-            status="pending_acceptance",
-            stage="results",
-            result_file=str(failed_path),
-            runlog_file=str(log_path) if log_path and log_path.exists() else "",
-            summary=build_task_summary(result),
-            error=str(result.get("error") or _timeout_err),
-        )
-        send_text(
-            chat_id,
-            "任务 [{code}] {task_id} 失败: {err}\n状态: pending_acceptance(待验收)\n通过: /accept {code}\n拒绝: /reject {code} <原因>".format(
-                code=result.get("task_code", "-"),
-                task_id=task["task_id"],
-                err=_timeout_err,
-            ),
-            reply_markup=task_inline_keyboard(result.get("task_code", "-"), task["task_id"]),
-        )
-        mark_task_completion_notified(task["task_id"])
-    except Exception as exc:
-        _action = task.get("action", "codex")
-        _timeout_env = "CLAUDE_TIMEOUT_RETRIES" if _action == "claude" else "CODEX_TIMEOUT_RETRIES"
-        run_data = {
-            "returncode": None,
-            "elapsed_ms": None,
-            "cmd": None,
-            "timeout_retries": int(os.getenv(_timeout_env, "1")),
-            "workspace": None,
-            "git_changed_files": None,
-            "noop_reason": None,
-            "stdout": "",
-            "stderr": "",
-            "last_message": "",
-        }
-        result = finalize_codex_task(task, processing, run_data, "failed", error=str(exc))
-        log_path = tasks_root() / "logs" / (task["task_id"] + ".run.json")
-        result = to_pending_acceptance(task, result)
-        save_json(processing, result)
-        failed_path = move_task(processing, "results")
-        update_task_runtime(result, status="pending_acceptance", stage="results")
-        mark_task_finished(
-            result,
-            status="pending_acceptance",
-            stage="results",
-            result_file=str(failed_path),
-            runlog_file=str(log_path) if log_path and log_path.exists() else "",
-            summary=build_task_summary(result),
-            error=str(result.get("error") or str(exc)),
-        )
-        send_text(
-            chat_id,
-            "任务 [{code}] {task_id} 失败: {error}\n状态: pending_acceptance(待验收)\n通过: /accept {code}\n拒绝: /reject {code} <原因>".format(
-                code=result.get("task_code", "-"),
-                task_id=task["task_id"],
-                error=str(exc)[:500],
-            ),
-            reply_markup=task_inline_keyboard(result.get("task_code", "-"), task["task_id"]),
-        )
-        mark_task_completion_notified(task["task_id"])
+    except (subprocess.TimeoutExpired, Exception) as exc:
+        error_msg = _handle_task_failure(task, processing, chat_id, exc)
     finally:
         _hb_stop.set()
 

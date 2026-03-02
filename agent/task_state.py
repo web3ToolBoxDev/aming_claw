@@ -139,8 +139,10 @@ def load_task_status(task_id: str) -> Optional[Dict]:
 
 
 def save_task_status(task_id: str, status_obj: Dict) -> Dict:
-    obj = _default_task_status(status_obj)
-    obj.update(status_obj or {})
+    # Build defaults once, then overlay with provided values
+    obj = _default_task_status()
+    if status_obj:
+        obj.update(status_obj)
     obj["task_id"] = str(task_id)
     obj["updated_at"] = utc_iso()
     save_json(task_status_file(task_id), obj)
