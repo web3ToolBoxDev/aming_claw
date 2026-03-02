@@ -421,10 +421,13 @@ def run_claude_chat(text: str) -> str:
     model = get_claude_model()
     provider = get_model_provider()
 
-    if provider in ("anthropic", "openai"):
+    # Only non-Claude providers (e.g. OpenAI) use direct API;
+    # Anthropic/Claude models go through Claude CLI to use Max subscription OAuth
+    # instead of consuming API credits via ANTHROPIC_API_KEY.
+    if provider == "openai":
         return _claude_chat_via_api(text, provider, model)
 
-    # Fallback: Claude Code CLI
+    # Claude Code CLI (uses Max subscription OAuth, not API credits)
     import shutil
     claude_bin = os.getenv("CLAUDE_BIN", "").strip()
     if not claude_bin:
@@ -437,8 +440,12 @@ def run_claude_chat(text: str) -> str:
            "--dangerously-skip-permissions"]
     if model:
         cmd += ["--model", model]
+    # Strip env vars that interfere with Claude CLI:
+    # - CLAUDECODE/CLAUDE_CODE_*: prevents "nested session" rejection
+    # - ANTHROPIC_API_KEY: forces CLI to use API credits instead of Max subscription OAuth
     env = {k: v for k, v in os.environ.items()
-           if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT")}
+           if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT",
+                         "ANTHROPIC_API_KEY")}
     try:
         proc = subprocess.run(cmd, text=True, capture_output=True,
                               timeout=timeout_sec, check=False, env=env)
