@@ -602,6 +602,7 @@ def status_tag(status: str) -> str:
         "accepted": "验收通过",
         "rejected": "验收拒绝",
         "completed": "已完成",
+        "succeeded": "已完成",
         "failed": "执行失败",
     }
     return mapping.get(str(status or "").strip().lower(), str(status or "unknown"))
@@ -620,9 +621,12 @@ def acceptance_tag(task: Dict) -> str:
         return "待验收"
     if stage in {"pending", "processing"}:
         return "未到验收阶段"
-    if stage == "results" and status in {"completed", "failed"}:
+    if stage == "results" and status in {"completed", "failed", "succeeded"}:
         # Backward compatibility for historical result files before explicit pending_acceptance migration.
         return "待验收(兼容旧任务)"
+    if stage == "archive":
+        # Task was archived (normally after acceptance); treat as accepted.
+        return "验收通过"
     return "未知"
 
 
@@ -2676,26 +2680,31 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         parts = t.split(maxsplit=1)
         if len(parts) < 2:
             active = list_active_tasks(chat_id=chat_id)
-            state_items = [x for x in list_task_state_candidates() if int(x.get("chat_id") or 0) == int(chat_id)]
-            # Merge by task_id, prefer state snapshot freshness.
-            merged_by_id: Dict[str, Dict] = {}
+            # Read full task data (with acceptance dict) for accurate status display.
+            merged = []
             for item in active:
                 task_id = str(item.get("task_id") or "")
-                if task_id:
-                    merged_by_id[task_id] = dict(item)
-            for st in state_items:
-                task_id = str(st.get("task_id") or "")
-                if not task_id or task_id not in merged_by_id:
-                    # Skip tasks not in active list (already cleared/archived)
+                if not task_id:
                     continue
-                base = merged_by_id[task_id]
-                base["_status_snapshot"] = st
-                base["status"] = st.get("status", base.get("status"))
-                base["_stage"] = st.get("stage", base.get("_stage", "unknown"))
-                base["updated_at"] = st.get("updated_at", base.get("updated_at", ""))
-                base["task_code"] = st.get("task_code", base.get("task_code", "-"))
-                merged_by_id[task_id] = base
-            merged = sorted(merged_by_id.values(), key=lambda x: str(x.get("updated_at") or ""), reverse=True)
+                found = find_task(task_id)
+                if found:
+                    enriched = merge_task_with_status(found)
+                    # Preserve fields from active entry that may be missing in task file
+                    for key in ("task_code", "action"):
+                        if not enriched.get(key) and item.get(key):
+                            enriched[key] = item[key]
+                else:
+                    # Task file gone (archived/cleared); fall back to state snapshot
+                    enriched = dict(item)
+                    st = task_status_snapshot(task_id)
+                    if st:
+                        enriched["_status_snapshot"] = st
+                        enriched["status"] = st.get("status", enriched.get("status"))
+                        enriched["_stage"] = st.get("stage", enriched.get("_stage", "unknown"))
+                        enriched["updated_at"] = st.get("updated_at", enriched.get("updated_at", ""))
+                        enriched["task_code"] = st.get("task_code", enriched.get("task_code", "-"))
+                merged.append(enriched)
+            merged.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
             if not merged:
                 send_text(
                     chat_id,

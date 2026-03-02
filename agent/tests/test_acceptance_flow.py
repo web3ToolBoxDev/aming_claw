@@ -77,6 +77,78 @@ class AcceptanceFlowTests(unittest.TestCase):
             coordinator.acceptance_tag({"_stage": "results", "status": "completed"}),
             "待验收(兼容旧任务)",
         )
+        # succeeded is also a legacy completion status
+        self.assertEqual(
+            coordinator.acceptance_tag({"_stage": "results", "status": "succeeded"}),
+            "待验收(兼容旧任务)",
+        )
+        # archived tasks should show as accepted
+        self.assertEqual(
+            coordinator.acceptance_tag({"_stage": "archive", "status": "unknown"}),
+            "验收通过",
+        )
+        # acceptance dict takes precedence
+        self.assertEqual(
+            coordinator.acceptance_tag({"status": "unknown", "acceptance": {"state": "accepted"}}),
+            "验收通过",
+        )
+
+    def test_status_list_shows_accepted_task_correctly(self) -> None:
+        """Accepted task in active list should display '验收通过' via full task data merge."""
+        from task_state import register_task_created, update_task_runtime
+
+        task = {
+            "task_id": "task-acc-1",
+            "chat_id": 500,
+            "requested_by": 500,
+            "action": "codex",
+            "text": "已接受的任务",
+            "status": "accepted",
+            "acceptance": {"state": "accepted"},
+        }
+        register_task_created(task)
+        update_task_runtime(task, status="accepted", stage="results")
+        # Save the task file in results/ with acceptance dict
+        save_json(tasks_root() / "results" / "task-acc-1.json", task)
+
+        with patch.object(bot_commands, "send_text") as send_text_mock:
+            ok = coordinator.handle_command(chat_id=500, user_id=500, text="/status")
+            self.assertTrue(ok)
+            self.assertTrue(send_text_mock.called)
+            msg = send_text_mock.call_args_list[0][0][1]
+
+        self.assertIn("验收: 验收通过", msg)
+        self.assertNotIn("验收: 待验收", msg)
+        self.assertNotIn("验收: 未知", msg)
+
+    def test_status_list_reads_acceptance_from_task_file(self) -> None:
+        """List view should read acceptance dict from task file, not just active entry."""
+        from task_state import register_task_created, update_task_runtime
+
+        # Simulate: active entry has old status, but task file has acceptance dict
+        task = {
+            "task_id": "task-acc-2",
+            "chat_id": 600,
+            "requested_by": 600,
+            "action": "codex",
+            "text": "验收文件读取测试",
+        }
+        register_task_created(task)
+        update_task_runtime(task, status="pending_acceptance", stage="results")
+
+        # Write accepted task file with acceptance dict
+        task_file_data = dict(task)
+        task_file_data["status"] = "accepted"
+        task_file_data["acceptance"] = {"state": "accepted", "accepted_at": utc_iso()}
+        save_json(tasks_root() / "results" / "task-acc-2.json", task_file_data)
+
+        with patch.object(bot_commands, "send_text") as send_text_mock:
+            ok = coordinator.handle_command(chat_id=600, user_id=600, text="/status")
+            self.assertTrue(ok)
+            msg = send_text_mock.call_args_list[0][0][1]
+
+        # The list view should read the task file and show accepted status
+        self.assertIn("验收通过", msg)
 
     def test_status_command_contains_acceptance_marker(self) -> None:
         task = {
