@@ -17,6 +17,28 @@ from utils import load_json, save_json, send_text, tasks_root, utc_iso
 
 
 # ---------------------------------------------------------------------------
+# Callback data helpers
+# ---------------------------------------------------------------------------
+
+def safe_callback_data(prefix: str, identifier: str, max_bytes: int = 64) -> str:
+    """Build ``prefix:identifier`` and truncate *identifier* so the result
+    fits within *max_bytes* UTF-8 bytes (Telegram hard limit).
+    """
+    full = "{}:{}".format(prefix, identifier)
+    if len(full.encode("utf-8")) <= max_bytes:
+        return full
+    # Reserve bytes for "prefix:" part
+    prefix_part = "{}:".format(prefix)
+    avail = max_bytes - len(prefix_part.encode("utf-8"))
+    if avail <= 0:
+        return prefix_part[:max_bytes]
+    # Truncate identifier by bytes without breaking multi-byte chars
+    enc = identifier.encode("utf-8")
+    truncated = enc[:avail].decode("utf-8", errors="ignore").rstrip("-")
+    return "{}{}".format(prefix_part, truncated)
+
+
+# ---------------------------------------------------------------------------
 # Pending-action state (file-backed for persistence across restarts)
 # ---------------------------------------------------------------------------
 
@@ -519,7 +541,7 @@ def task_status_list_keyboard(
             archive_id = str(t.get("archive_id") or "").strip()
             if not archive_id:
                 archive_id = str(t.get("task_id") or t.get("task_code") or code).strip()
-            cb = "archive_detail:{}".format(archive_id)
+            cb = safe_callback_data("archive_detail", archive_id)
         else:
             cb = "task_detail:{}".format(code)
         rows.append([{"text": label, "callback_data": cb}])
@@ -639,8 +661,8 @@ def archive_detail_keyboard(archive_id: str) -> Dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "\U0001f4c4 \u67e5\u770b\u5f52\u6863\u8be6\u60c5", "callback_data": "task_doc:{}".format(archive_id)},
-                {"text": "\U0001f5d1 \u5220\u9664\u5f52\u6863\u8bb0\u5f55", "callback_data": "archive_delete:{}".format(archive_id)},
+                {"text": "\U0001f4c4 \u67e5\u770b\u5f52\u6863\u8be6\u60c5", "callback_data": safe_callback_data("task_doc", archive_id)},
+                {"text": "\U0001f5d1 \u5220\u9664\u5f52\u6863\u8bb0\u5f55", "callback_data": safe_callback_data("archive_delete", archive_id)},
             ],
             [
                 {"text": "\u00ab \u8fd4\u56de\u5217\u8868", "callback_data": "menu:tasks_archived"},
@@ -651,9 +673,10 @@ def archive_detail_keyboard(archive_id: str) -> Dict:
 
 def confirm_cancel_keyboard(action: str, context_str: str = "") -> Dict:
     """Confirm + cancel keyboard for dangerous operations."""
-    cb_data = "confirm:{}".format(action)
     if context_str:
-        cb_data = "confirm:{}:{}".format(action, context_str)
+        cb_data = safe_callback_data("confirm:{}".format(action), context_str)
+    else:
+        cb_data = "confirm:{}".format(action)
     return {
         "inline_keyboard": [
             [

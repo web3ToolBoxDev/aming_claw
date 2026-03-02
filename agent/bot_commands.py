@@ -86,6 +86,7 @@ from interactive_menu import (
     task_detail_keyboard,
     tasks_overview_keyboard,
     archive_detail_keyboard,
+    safe_callback_data,
     TASK_STATUS_LABELS,
     TASK_STATUS_EMPTY_LABELS,
     set_pending_action,
@@ -2451,7 +2452,7 @@ def _handle_archive_detail_callback(cb_id: str, data: str, chat_id: int, user_id
     kbd_rows: List[List[Dict]] = []
     aid = entry.get("archive_id", archive_ref)
     kbd_rows.append([
-        {"text": "\U0001f4c4 \u67e5\u770b\u5f52\u6863\u8be6\u60c5", "callback_data": "task_doc:{}".format(aid)},
+        {"text": "\U0001f4c4 \u67e5\u770b\u5f52\u6863\u8be6\u60c5", "callback_data": safe_callback_data("task_doc", aid)},
     ])
     # Add log button if run_log_file exists
     run_log_file = str(entry.get("run_log_file") or "").strip()
@@ -2466,10 +2467,10 @@ def _handle_archive_detail_callback(cb_id: str, data: str, chat_id: int, user_id
         acc_doc = acceptance_root() / (task_id + ".acceptance.md")
         if acc_doc.exists():
             kbd_rows.append([
-                {"text": "\U0001f4c4 \u67e5\u770b\u9a8c\u6536\u6587\u6863", "callback_data": "task_doc:{}".format(entry.get("task_code", aid))},
+                {"text": "\U0001f4c4 \u67e5\u770b\u9a8c\u6536\u6587\u6863", "callback_data": safe_callback_data("task_doc", entry.get("task_code", aid))},
             ])
     kbd_rows.append([
-        {"text": "\U0001f5d1 \u5220\u9664\u5f52\u6863\u8bb0\u5f55", "callback_data": "archive_delete:{}".format(aid)},
+        {"text": "\U0001f5d1 \u5220\u9664\u5f52\u6863\u8bb0\u5f55", "callback_data": safe_callback_data("archive_delete", aid)},
     ])
     kbd_rows.append([
         {"text": "\u00ab \u8fd4\u56de\u5217\u8868", "callback_data": "menu:tasks_archived"},
@@ -2480,7 +2481,11 @@ def _handle_archive_detail_callback(cb_id: str, data: str, chat_id: int, user_id
 
 
 def _remove_archive_entry(archive_id: str) -> bool:
-    """Remove an entry from the archive index by archive_id. Returns True if found and removed."""
+    """Remove an entry from the archive index by archive_id.
+
+    Supports both exact match and prefix match (for truncated callback_data).
+    Returns True if found and removed.
+    """
     from task_state import _archive_index_file
     import json as _json
     path = _archive_index_file()
@@ -2489,6 +2494,15 @@ def _remove_archive_entry(archive_id: str) -> bool:
     lines = path.read_text(encoding="utf-8").splitlines()
     new_lines: List[str] = []
     found = False
+
+    def _matches(aid: str) -> bool:
+        if aid == archive_id:
+            return True
+        # Prefix match for truncated IDs
+        if archive_id.startswith("arc-") and aid.startswith(archive_id):
+            return True
+        return False
+
     for line in lines:
         row = line.strip()
         if not row:
@@ -2498,15 +2512,17 @@ def _remove_archive_entry(archive_id: str) -> bool:
         except Exception:
             new_lines.append(row)
             continue
-        if isinstance(obj, dict) and str(obj.get("archive_id") or "") == archive_id:
-            found = True
-            # Also delete the archive file
-            archive_file = str(obj.get("archive_file") or "")
-            if archive_file:
-                af = Path(archive_file)
-                if af.exists():
-                    af.unlink()
-            continue
+        if isinstance(obj, dict) and _matches(str(obj.get("archive_id") or "")):
+            if not found:
+                # Only remove the first (most recent by reverse order) match
+                found = True
+                # Also delete the archive file
+                archive_file = str(obj.get("archive_file") or "")
+                if archive_file:
+                    af = Path(archive_file)
+                    if af.exists():
+                        af.unlink()
+                continue
         new_lines.append(row)
     if found:
         path.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding="utf-8")

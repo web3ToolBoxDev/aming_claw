@@ -440,13 +440,27 @@ def update_task_runtime(task: Dict, status: str, stage: str) -> None:
     update_task_lifecycle(task, status=status, stage=stage)
 
 
+def _truncate_to_bytes(s: str, max_bytes: int) -> str:
+    """Truncate a string so its UTF-8 encoding is at most *max_bytes* bytes.
+
+    Avoids splitting multi-byte characters.
+    """
+    encoded = s.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return s
+    # Truncate bytes then decode, ignoring the last (possibly broken) char
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def _semantic_slug(text: str, action: str) -> str:
     raw = (text or "").strip().lower()
     cleaned = re.sub(r"[^\w]+", "-", raw, flags=re.UNICODE).strip("-_")
     if not cleaned:
         cleaned = action or "task"
     parts = [p for p in cleaned.split("-") if p]
-    stem = "-".join(parts[:3])[:48]
+    stem = "-".join(parts[:3])
+    # Limit slug to 28 UTF-8 bytes so archive_id stays ≤ 48 bytes
+    stem = _truncate_to_bytes(stem, 28).rstrip("-")
     return stem or (action or "task")
 
 
@@ -545,6 +559,7 @@ def find_archive_entry(task_ref: str) -> Optional[Dict]:
     if not ref:
         return None
     entries = _read_archive_index()
+    # Exact match first
     for item in reversed(entries):
         if (
             ref == str(item.get("archive_id") or "")
@@ -552,6 +567,12 @@ def find_archive_entry(task_ref: str) -> Optional[Dict]:
             or ref == str(item.get("task_code") or "")
         ):
             return item
+    # Prefix match on archive_id (for truncated callback_data)
+    if ref.startswith("arc-"):
+        for item in reversed(entries):
+            aid = str(item.get("archive_id") or "")
+            if aid.startswith(ref):
+                return item
     return None
 
 

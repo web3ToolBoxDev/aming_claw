@@ -12,8 +12,10 @@ if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
 from task_state import (  # noqa: E402
+    _build_archive_id,
     _new_task_code,
     _semantic_slug,
+    _truncate_to_bytes,
     append_task_event,
     archive_task_result,
     clear_active_tasks,
@@ -108,7 +110,16 @@ class TestSemanticSlug(TaskStateTestBase):
 
     def test_long_text_truncated(self):
         slug = _semantic_slug("a" * 200, "codex")
-        self.assertLessEqual(len(slug), 48)
+        self.assertLessEqual(len(slug.encode("utf-8")), 28)
+
+    def test_chinese_slug_byte_limit(self):
+        # Each Chinese char is 3 bytes; 10 chars = 30 bytes > 28
+        slug = _semantic_slug("修复登录异常重启服务器测试", "codex")
+        self.assertLessEqual(len(slug.encode("utf-8")), 28)
+
+    def test_slug_no_trailing_dash(self):
+        slug = _semantic_slug("ab cd ef gh ij kl mn", "codex")
+        self.assertFalse(slug.endswith("-"))
 
 
 class TestRegisterTask(TaskStateTestBase):
@@ -371,6 +382,100 @@ class TestListTaskStateCandidates(TaskStateTestBase):
 
         candidates = list_task_state_candidates()
         self.assertEqual(len(candidates), 3)
+
+
+class TestBuildArchiveIdLength(TaskStateTestBase):
+    """Ensure _build_archive_id always produces IDs ≤ 48 bytes."""
+
+    def test_short_ascii(self):
+        aid = _build_archive_id("codex", "fix bug")
+        self.assertLessEqual(len(aid.encode("utf-8")), 48)
+
+    def test_long_ascii(self):
+        aid = _build_archive_id("codex", "a very long task description that goes on and on")
+        self.assertLessEqual(len(aid.encode("utf-8")), 48)
+
+    def test_chinese_text(self):
+        aid = _build_archive_id("codex", "修复点击归档任务报错按钮操作失败导致系统崩溃")
+        self.assertLessEqual(len(aid.encode("utf-8")), 48)
+
+    def test_mixed_text(self):
+        aid = _build_archive_id("pipeline", "修复login接口返回500错误并添加retry逻辑")
+        self.assertLessEqual(len(aid.encode("utf-8")), 48)
+
+    def test_empty_text(self):
+        aid = _build_archive_id("codex", "")
+        self.assertLessEqual(len(aid.encode("utf-8")), 48)
+        self.assertTrue(aid.startswith("arc-"))
+
+    def test_special_chars(self):
+        aid = _build_archive_id("codex", "!@#$%^&*()_+{}|:<>?")
+        self.assertLessEqual(len(aid.encode("utf-8")), 48)
+
+
+class TestTruncateToBytes(TaskStateTestBase):
+    def test_ascii_no_truncation(self):
+        self.assertEqual(_truncate_to_bytes("hello", 10), "hello")
+
+    def test_ascii_truncation(self):
+        self.assertEqual(_truncate_to_bytes("hello world", 5), "hello")
+
+    def test_chinese_no_split(self):
+        # "你好" = 6 bytes; truncating to 5 should give "你" (3 bytes)
+        result = _truncate_to_bytes("你好", 5)
+        self.assertEqual(result, "你")
+        self.assertLessEqual(len(result.encode("utf-8")), 5)
+
+    def test_chinese_exact(self):
+        result = _truncate_to_bytes("你好", 6)
+        self.assertEqual(result, "你好")
+
+
+class TestFindArchiveByPrefix(TaskStateTestBase):
+    """Test prefix matching in find_archive_entry."""
+
+    def _create_archive(self, task_id="task-pfx-001", text="prefix test"):
+        task = self._make_task(task_id, text=text)
+        task["task_code"] = "T9999"
+        register_task_created(task)
+        task["status"] = "accepted"
+        task["executor"] = {"last_message": "done"}
+        from utils import save_json, tasks_root
+        result_path = tasks_root() / "results" / (task_id + ".json")
+        save_json(result_path, task)
+        return archive_task_result(task, result_path, None)
+
+    def test_exact_match(self):
+        entry = self._create_archive()
+        aid = entry["archive_id"]
+        found = find_archive_entry(aid)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["archive_id"], aid)
+
+    def test_prefix_match(self):
+        entry = self._create_archive()
+        aid = entry["archive_id"]
+        # Use first 20 chars as prefix
+        prefix = aid[:20]
+        found = find_archive_entry(prefix)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["archive_id"], aid)
+
+    def test_prefix_no_match(self):
+        self._create_archive()
+        found = find_archive_entry("arc-nonexistent")
+        self.assertIsNone(found)
+
+    def test_prefix_latest_wins(self):
+        """When prefix matches multiple entries, the latest one wins."""
+        e1 = self._create_archive("task-dup-1", text="same task")
+        e2 = self._create_archive("task-dup-2", text="same task")
+        # Both start with "arc-same"
+        prefix = "arc-same"
+        found = find_archive_entry(prefix)
+        self.assertIsNotNone(found)
+        # Should return the latest (e2)
+        self.assertEqual(found["task_id"], "task-dup-2")
 
 
 if __name__ == "__main__":
