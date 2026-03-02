@@ -170,10 +170,11 @@ def _cli_anthropic_models() -> List[Dict]:
 _OPENAI_PREFIXES = ("gpt-5", "gpt-4.1", "gpt-4o", "gpt-4", "o1", "o3", "o4", "gpt-3.5-turbo")
 _OPENAI_SKIP = ("instruct", "vision-preview", "0301", "0314", "0613")
 
-_OPENAI_FALLBACK_MODELS = ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
+_OPENAI_FALLBACK_MODELS = ["gpt-5.3-codex", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
 
 # Models known to be available via Codex CLI subscription
 _CODEX_CLI_MODELS = [
+    "gpt-5.3-codex",
     "gpt-4.1",
     "gpt-4.1-mini",
     "gpt-4.1-nano",
