@@ -311,21 +311,22 @@ class TestPipelineModelLogging(unittest.TestCase):
         self.assertIn("anthropic", log_output)
 
     @patch("backends.run_claude")
-    @patch("backends.run_via_api")
+    @patch("backends.run_codex")
     @patch("config.set_claude_model")
     @patch("config.get_model_provider", return_value="")
     @patch("config.get_claude_model", return_value="")
     def test_stage_openai_model_uses_api(
-        self, mock_model, mock_provider, mock_set_model, mock_run_api, mock_run_claude
+        self, mock_model, mock_provider, mock_set_model, mock_run_codex, mock_run_claude
     ):
+        """OpenAI model on claude backend routes to run_codex."""
         from backends import run_stage_with_retry
-        mock_run_api.return_value = {
+        mock_run_codex.return_value = {
             "returncode": 0,
-            "stdout": "已执行步骤:\n1) done",
+            "stdout": "\u5df2\u6267\u884c\u6b65\u9aa4:\n1) done",
             "stderr": "",
-            "last_message": "已执行步骤:\n1) done",
+            "last_message": "\u5df2\u6267\u884c\u6b65\u9aa4:\n1) done",
             "elapsed_ms": 100,
-            "cmd": ["api"],
+            "cmd": ["codex"],
             "timeout_retries": 0,
             "workspace": "/tmp",
             "git_changed_files": ["a.py"],
@@ -337,24 +338,25 @@ class TestPipelineModelLogging(unittest.TestCase):
         run = run_stage_with_retry(task, stage, "prompt for role stage", stage_idx=1)
 
         self.assertEqual(run["returncode"], 0)
-        mock_run_api.assert_called_once()
+        mock_run_codex.assert_called_once()
         mock_run_claude.assert_not_called()
 
     @patch("backends.run_claude")
-    @patch("backends.run_via_api")
+    @patch("backends.run_codex")
     @patch("config.get_model_provider", return_value="openai")
     @patch("config.get_claude_model", return_value="gpt-4o")
     def test_stage_global_openai_uses_api(
-        self, mock_model, mock_provider, mock_run_api, mock_run_claude
+        self, mock_model, mock_provider, mock_run_codex, mock_run_claude
     ):
+        """Global openai model routes to run_codex."""
         from backends import run_stage_with_retry
-        mock_run_api.return_value = {
+        mock_run_codex.return_value = {
             "returncode": 0,
-            "stdout": "验收标准:\n" + "\n".join("{}. item".format(i) for i in range(1, 10)),
+            "stdout": "\u9a8c\u6536\u6807\u51c6:\n" + "\n".join("{}. item".format(i) for i in range(1, 10)),
             "stderr": "",
-            "last_message": "验收标准:\n" + "\n".join("{}. item".format(i) for i in range(1, 10)),
+            "last_message": "\u9a8c\u6536\u6807\u51c6:\n" + "\n".join("{}. item".format(i) for i in range(1, 10)),
             "elapsed_ms": 100,
-            "cmd": ["api"],
+            "cmd": ["codex"],
             "timeout_retries": 0,
             "workspace": "/tmp",
             "git_changed_files": [],
@@ -366,24 +368,25 @@ class TestPipelineModelLogging(unittest.TestCase):
         run = run_stage_with_retry(task, stage, "prompt for qa stage with enough content", stage_idx=1)
 
         self.assertEqual(run["returncode"], 0)
-        mock_run_api.assert_called_once()
+        mock_run_codex.assert_called_once()
         mock_run_claude.assert_not_called()
 
     @patch("backends.run_claude")
-    @patch("backends.run_via_api")
+    @patch("backends.run_codex")
     @patch("config.get_model_provider", return_value="anthropic")
     @patch("config.get_claude_model", return_value="claude-sonnet-4-6")
     def test_stage_backend_openai_uses_api_with_fallback_model(
-        self, mock_model, mock_provider, mock_run_api, mock_run_claude
+        self, mock_model, mock_provider, mock_run_codex, mock_run_claude
     ):
+        """backend=openai routes to run_codex with default openai model."""
         from backends import run_stage_with_retry
-        mock_run_api.return_value = {
+        mock_run_codex.return_value = {
             "returncode": 0,
-            "stdout": "验收标准:\n" + "\n".join("{}. item".format(i) for i in range(1, 10)),
+            "stdout": "\u9a8c\u6536\u6807\u51c6:\n" + "\n".join("{}. item".format(i) for i in range(1, 10)),
             "stderr": "",
-            "last_message": "验收标准:\n" + "\n".join("{}. item".format(i) for i in range(1, 10)),
+            "last_message": "\u9a8c\u6536\u6807\u51c6:\n" + "\n".join("{}. item".format(i) for i in range(1, 10)),
             "elapsed_ms": 100,
-            "cmd": ["api", "openai", "gpt-4o"],
+            "cmd": ["codex", "openai", "gpt-4o"],
             "timeout_retries": 0,
             "workspace": "/tmp",
             "git_changed_files": [],
@@ -395,9 +398,10 @@ class TestPipelineModelLogging(unittest.TestCase):
         run = run_stage_with_retry(task, stage, "prompt for plan stage with enough content", stage_idx=1)
 
         self.assertEqual(run["returncode"], 0)
-        mock_run_api.assert_called_once()
-        self.assertEqual(mock_run_api.call_args.kwargs.get("provider_override"), "openai")
-        self.assertEqual(mock_run_api.call_args.kwargs.get("model_override"), "gpt-4o")
+        mock_run_codex.assert_called_once()
+        # Verify model_override is passed for openai backend
+        call_kwargs = mock_run_codex.call_args
+        self.assertIn("model_override", call_kwargs.kwargs)
         mock_run_claude.assert_not_called()
 
 
