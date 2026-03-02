@@ -120,6 +120,7 @@ def system_menu_keyboard() -> Dict:
             ],
             [
                 {"text": "\U0001f916 \u5207\u6362\u6a21\u578b", "callback_data": "menu:switch_model"},
+                {"text": "\U0001f4cb \u6a21\u578b\u6e05\u5355", "callback_data": "menu:model_list"},
             ],
             [
                 {"text": "\u2699\ufe0f \u6d41\u6c34\u7ebf\u914d\u7f6e", "callback_data": "menu:pipeline_config"},
@@ -366,6 +367,24 @@ def role_model_select_keyboard(role_name: str, models: List[Dict]) -> Dict:
         cb_data = "role_model:{}:{}:{}".format(role_name, m["provider"], m["id"])
         rows.append([{"text": label, "callback_data": cb_data}])
     rows.append([{"text": "\u00ab \u8fd4\u56de\u89d2\u8272\u914d\u7f6e", "callback_data": "menu:role_pipeline_config"}])
+    return {"inline_keyboard": rows}
+
+
+def model_list_keyboard(models: List[Dict], current_default: str = "") -> Dict:
+    """Build keyboard for model list page with set-default and refresh buttons."""
+    rows: List[List[Dict]] = []
+    for m in models:
+        if m.get("status") == "available":
+            if m["id"] == current_default:
+                rows.append([{"text": "\u2714 \u5f53\u524d\u9ed8\u8ba4: {} {}".format(
+                    "[C]" if m["provider"] == "anthropic" else "[O]", m["id"]),
+                    "callback_data": "model_default:{}:{}".format(m["provider"], m["id"])}])
+            else:
+                rows.append([{"text": "\u2b50 \u8bbe\u4e3a\u9ed8\u8ba4: {} {}".format(
+                    "[C]" if m["provider"] == "anthropic" else "[O]", m["id"]),
+                    "callback_data": "model_default:{}:{}".format(m["provider"], m["id"])}])
+    rows.append([{"text": "\U0001f504 \u5237\u65b0", "callback_data": "menu:model_list_refresh"}])
+    rows.append([{"text": "\u00ab \u8fd4\u56de\u7cfb\u7edf\u8bbe\u7f6e", "callback_data": "menu:sub_system"}])
     return {"inline_keyboard": rows}
 
 

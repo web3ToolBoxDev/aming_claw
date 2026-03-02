@@ -30,7 +30,7 @@ from config import (
     add_workspace_search_root, get_workspace_search_roots,
     remove_workspace_search_root, set_workspace_search_roots,
 )
-from model_registry import get_available_models, make_label
+from model_registry import get_available_models, make_label, format_model_list_text, find_model
 from auth import debug_verify_otp, get_auth_state, init_authenticator, verify_otp
 from workspace import (
     clear_workspace_override,
@@ -59,6 +59,7 @@ from git_rollback import (
     commit_after_acceptance,
     rollback_to_checkpoint,
 )
+from task_accept import run_post_acceptance_tests
 from interactive_menu import (
     main_menu_keyboard,
     system_menu_keyboard,
@@ -73,6 +74,7 @@ from interactive_menu import (
     pipeline_preset_keyboard,
     role_pipeline_config_keyboard,
     role_model_select_keyboard,
+    model_list_keyboard,
     cancel_keyboard,
     back_to_menu_keyboard,
     confirm_cancel_keyboard,
@@ -800,6 +802,34 @@ def handle_callback_query(cb: Dict) -> None:
             )
             return
 
+        # ---- Model default selection callbacks (from model list page) ----
+        if data.startswith("model_default:"):
+            if not is_ops_allowed(chat_id, user_id):
+                answer_callback_query(cb_id, "\u26a0\ufe0f \u6743\u9650\u4e0d\u8db3\uff0c\u4ec5\u6388\u6743\u7528\u6237\u53ef\u4fee\u6539\u6a21\u578b\u914d\u7f6e", show_alert=True)
+                return
+            rest = data[len("model_default:"):]
+            if ":" in rest:
+                provider, model_id = rest.split(":", 1)
+            else:
+                provider, model_id = "", rest
+            # Check model availability
+            m = find_model(model_id)
+            if m and m.get("status") == "unavailable":
+                reason = m.get("unavailable_reason", "\u4e0d\u53ef\u7528")
+                answer_callback_query(cb_id, "\u6a21\u578b\u4e0d\u53ef\u7528", show_alert=True)
+                send_text(chat_id, "\u274c \u8bbe\u7f6e\u5931\u8d25\uff1a\u6a21\u578b {} \u5f53\u524d\u4e0d\u53ef\u7528\uff08{}）".format(model_id, reason),
+                          reply_markup=back_to_menu_keyboard())
+                return
+            set_claude_model(model_id, provider=provider, changed_by=user_id)
+            tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
+            answer_callback_query(cb_id, "\u5df2\u8bbe\u4e3a\u9ed8\u8ba4")
+            send_text(
+                chat_id,
+                "\u5df2\u5c06\u9ed8\u8ba4\u6a21\u578b\u8bbe\u4e3a {} `{}`\uff0c\u7ba1\u7ebf\u4e2d\u672a\u5355\u72ec\u914d\u7f6e\u7684\u8282\u70b9\u5c06\u4f7f\u7528\u6b64\u6a21\u578b".format(tag, model_id),
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return
+
         # ---- Pipeline preset selection callbacks ----
         if data.startswith("pipeline_preset:"):
             if not is_ops_allowed(chat_id, user_id):
@@ -835,7 +865,9 @@ def handle_callback_query(cb: Dict) -> None:
             if not role_def:
                 answer_callback_query(cb_id, "未知角色", show_alert=True)
                 return
-            models = get_available_models()
+            all_models = get_available_models()
+            # Only show available models for selection
+            models = [m for m in all_models if m.get("status") == "available"]
             if not models:
                 # Fallback to known models
                 models = [{"id": m, "provider": "anthropic"} for m in KNOWN_CLAUDE_MODELS]
@@ -861,7 +893,13 @@ def handle_callback_query(cb: Dict) -> None:
             if not role_def:
                 answer_callback_query(cb_id, "未知角色", show_alert=True)
                 return
-            set_role_stage_model(role_name, model_id, provider=provider, changed_by=user_id)
+            try:
+                set_role_stage_model(role_name, model_id, provider=provider, changed_by=user_id)
+            except ValueError as exc:
+                answer_callback_query(cb_id, "保存失败", show_alert=True)
+                send_text(chat_id, "\u274c \u4fdd\u5b58\u5931\u8d25\uff1a{}".format(exc),
+                          reply_markup=back_to_menu_keyboard())
+                return
             tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
             answer_callback_query(cb_id, "已设置: {} {}".format(tag, model_id))
             # Refresh the role pipeline config view
@@ -1184,6 +1222,29 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
     if action == "switch_model":
         handle_command(chat_id, user_id, "/switch_model")
         answer_callback_query(cb_id, "选择模型")
+        return
+
+    # -- Model List: show all models with status --
+    if action in ("model_list", "model_list_refresh"):
+        force = action == "model_list_refresh"
+        models = get_available_models(force_refresh=force)
+        text = format_model_list_text(models)
+        current_default = get_claude_model()
+        # Telegram message limit: 4096 chars
+        header = (
+            "\U0001f4cb \u6a21\u578b\u6e05\u5355\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        )
+        footer = "\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u9ed8\u8ba4\u6a21\u578b: {}".format(current_default or "(\u672a\u8bbe\u7f6e)")
+        full_text = header + text + footer
+        if len(full_text) > 4000:
+            full_text = full_text[:3990] + "\n..."
+        send_text(
+            chat_id,
+            full_text,
+            reply_markup=model_list_keyboard(models, current_default),
+        )
+        answer_callback_query(cb_id, "\u5df2\u5237\u65b0" if force else "\u6a21\u578b\u6e05\u5355")
         return
 
     # -- Pipeline Config: show preset selection --
@@ -2341,6 +2402,20 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if str(found.get("status") or "") not in {"pending_acceptance", "rejected", "completed", "failed"}:
             send_text(chat_id, "该任务当前状态无需验收: {}".format(status_tag(found.get("status", "unknown"))))
             return True
+
+        # ── Run post-acceptance tests before committing ──
+        test_result = run_post_acceptance_tests(resolve_active_workspace())
+        if not test_result.get("skipped"):
+            if not test_result["passed"]:
+                error_detail = test_result.get("error") or ""
+                output = test_result.get("output") or ""
+                msg = "验收测试未通过，任务保持待验收状态。\n\n"
+                if error_detail:
+                    msg += "错误: {}\n".format(error_detail)
+                if output:
+                    msg += "测试输出:\n{}".format(output[:2000])
+                send_text(chat_id, msg)
+                return True
 
         found["status"] = "accepted"
         found["updated_at"] = utc_iso()

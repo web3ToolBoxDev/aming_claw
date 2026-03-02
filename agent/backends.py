@@ -10,6 +10,7 @@ Contains:
 - run_codex_with_retry, run_claude_with_retry, run_stage_with_retry
 - process_codex, process_claude, process_pipeline
 """
+import logging
 import os
 import re
 import subprocess
@@ -17,6 +18,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from utils import tasks_root
 from workspace import resolve_active_workspace
@@ -679,6 +682,18 @@ def run_stage_with_retry(task: Dict, stage: Dict, prompt: str, stage_idx: int) -
     max_noop_retries = int(os.getenv("TASK_NOOP_RETRIES", "1"))
     base_tag = "s{}_{}".format(stage_idx, stage_name)
 
+    # Determine actual model/provider for this stage
+    if stage_model:
+        actual_model = stage_model
+        actual_provider = stage_provider
+    else:
+        from config import get_claude_model, get_model_provider
+        actual_model = get_claude_model() or "(default)"
+        actual_provider = get_model_provider() or "(default)"
+
+    logger.info("[Pipeline] Stage '%s' using model=%s, provider=%s",
+                stage_name, actual_model, actual_provider)
+
     def _run(p: str, tag: str) -> Dict:
         if backend == "claude":
             # Apply per-stage model override if configured
@@ -931,12 +946,29 @@ def process_pipeline(task: Dict, processing: Path) -> Dict:
 
     is_role = _is_role_pipeline(stages)
     stage_results: List[Dict] = []
+    stages_model_info: List[Dict] = []
     context = ""  # accumulates prior stage outputs (generic pipeline)
     stage_outputs: Dict[str, str] = {}  # role name → output (role pipeline)
 
     for i, stage in enumerate(stages):
         stage_name = stage.get("name", "stage{}".format(i + 1))
         backend = stage.get("backend", "codex")
+        stage_model = (stage.get("model") or "").strip()
+        stage_provider = (stage.get("provider") or "").strip()
+
+        # Record model info for this stage
+        if stage_model:
+            model_id = stage_model
+            provider_id = stage_provider
+        else:
+            from config import get_claude_model as _gcm, get_model_provider as _gmp
+            model_id = _gcm() or "(default)"
+            provider_id = _gmp() or "(default)"
+        stages_model_info.append({
+            "stage": stage_name,
+            "model": model_id,
+            "provider": provider_id,
+        })
 
         # Build context based on pipeline type
         if is_role:
@@ -969,4 +1001,8 @@ def process_pipeline(task: Dict, processing: Path) -> Dict:
     noop_reason = last_run.get("noop_reason")
     status = "completed" if last_run.get("returncode", 1) == 0 and not noop_reason else "failed"
     error = noop_reason if status == "failed" and noop_reason else None
-    return finalize_pipeline_task(task, processing, stage_results, status, error=error)
+    result = finalize_pipeline_task(task, processing, stage_results, status, error=error)
+    # Attach model info to result for audit trail
+    if isinstance(result, dict):
+        result["stages_model_info"] = stages_model_info
+    return result

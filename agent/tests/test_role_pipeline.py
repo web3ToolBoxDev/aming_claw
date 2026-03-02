@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_DIR = REPO_ROOT / "agent"
@@ -100,8 +101,9 @@ class TestRolePipelineConfig(unittest.TestCase):
         self.assertEqual(loaded[2]["provider"], "openai")
 
     def test_set_role_stage_model(self):
-        # Start with defaults
-        set_role_stage_model("pm", "claude-opus-4-6", provider="anthropic", changed_by=1)
+        # Start with defaults (skip validation since no real API)
+        set_role_stage_model("pm", "claude-opus-4-6", provider="anthropic",
+                             changed_by=1, validate=False)
         stages = get_role_pipeline_stages()
         pm = next(s for s in stages if s["name"] == "pm")
         self.assertEqual(pm["model"], "claude-opus-4-6")
@@ -111,8 +113,8 @@ class TestRolePipelineConfig(unittest.TestCase):
         self.assertEqual(dev["model"], "")
 
     def test_set_role_stage_model_multiple(self):
-        set_role_stage_model("pm", "claude-opus-4-6", provider="anthropic")
-        set_role_stage_model("qa", "gpt-4o", provider="openai")
+        set_role_stage_model("pm", "claude-opus-4-6", provider="anthropic", validate=False)
+        set_role_stage_model("qa", "gpt-4o", provider="openai", validate=False)
         stages = get_role_pipeline_stages()
         pm = next(s for s in stages if s["name"] == "pm")
         qa = next(s for s in stages if s["name"] == "qa")
@@ -122,7 +124,7 @@ class TestRolePipelineConfig(unittest.TestCase):
 
     def test_set_nonexistent_role(self):
         # Should not crash
-        set_role_stage_model("nonexistent", "model-x")
+        set_role_stage_model("nonexistent", "model-x", validate=False)
         stages = get_role_pipeline_stages()
         # No change expected
         self.assertEqual(len(stages), 4)

@@ -1,9 +1,11 @@
 """Tests for backends.py - AI execution backends, noop detection, prompt building."""
+import logging
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_DIR = REPO_ROOT / "agent"
@@ -249,6 +251,64 @@ class TestParseWaitFileTask(unittest.TestCase):
     def test_special_chars_blocked(self):
         text = "在工作目录创建文件 test|cmd，写入当前时间；等待1秒后再追加一行 test"
         self.assertIsNone(parse_wait_file_task(text))
+
+
+class TestPipelineModelLogging(unittest.TestCase):
+    """Test that run_stage_with_retry logs model info."""
+
+    @patch("backends.run_claude")
+    @patch("config.get_model_provider", return_value="anthropic")
+    @patch("config.get_claude_model", return_value="claude-sonnet-4-6")
+    def test_stage_logs_model_info(self, mock_model, mock_provider, mock_run):
+        from backends import run_stage_with_retry
+        mock_run.return_value = {
+            "returncode": 0,
+            "stdout": "output " * 20,
+            "stderr": "",
+            "last_message": "output " * 20,
+            "elapsed_ms": 100,
+            "cmd": [],
+            "timeout_retries": 0,
+            "workspace": "/tmp",
+            "git_changed_files": [],
+            "attempt_tag": "test",
+        }
+        task = {"task_id": "test-123", "text": "test task"}
+        stage = {"name": "dev", "backend": "claude", "model": "", "provider": ""}
+
+        with self.assertLogs("backends", level="INFO") as cm:
+            run_stage_with_retry(task, stage, "prompt", stage_idx=1)
+
+        # Check that a log message mentions the stage and model
+        log_output = "\n".join(cm.output)
+        self.assertIn("[Pipeline]", log_output)
+        self.assertIn("dev", log_output)
+
+    @patch("backends.run_claude")
+    def test_stage_with_explicit_model_logs_it(self, mock_run):
+        from backends import run_stage_with_retry
+        mock_run.return_value = {
+            "returncode": 0,
+            "stdout": "output " * 20,
+            "stderr": "",
+            "last_message": "output " * 20,
+            "elapsed_ms": 100,
+            "cmd": [],
+            "timeout_retries": 0,
+            "workspace": "/tmp",
+            "git_changed_files": [],
+            "attempt_tag": "test",
+        }
+        task = {"task_id": "test-123", "text": "test task"}
+        stage = {"name": "pm", "backend": "claude",
+                 "model": "claude-opus-4-6", "provider": "anthropic"}
+
+        with self.assertLogs("backends", level="INFO") as cm:
+            run_stage_with_retry(task, stage, "prompt", stage_idx=1)
+
+        log_output = "\n".join(cm.output)
+        self.assertIn("claude-opus-4-6", log_output)
+        self.assertIn("anthropic", log_output)
 
 
 if __name__ == "__main__":

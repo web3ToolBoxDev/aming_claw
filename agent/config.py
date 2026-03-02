@@ -275,8 +275,19 @@ def set_role_pipeline_stages(stages: List[Dict],
 
 
 def set_role_stage_model(role_name: str, model: str, provider: str = "",
-                         changed_by: Optional[int] = None) -> None:
-    """Set the model for a specific role in the role pipeline."""
+                         changed_by: Optional[int] = None,
+                         validate: bool = True) -> None:
+    """Set the model for a specific role in the role pipeline.
+
+    If validate=True (default), checks the model is in the available model list
+    and raises ValueError if it is unavailable.
+    """
+    if validate and model:
+        from model_registry import get_available_models, find_model
+        m = find_model(model)
+        if m and m.get("status") == "unavailable":
+            reason = m.get("unavailable_reason", "不可用")
+            raise ValueError("模型 {} 当前不可用（{}）".format(model, reason))
     stages = get_role_pipeline_stages()
     for stage in stages:
         if stage.get("name") == role_name:

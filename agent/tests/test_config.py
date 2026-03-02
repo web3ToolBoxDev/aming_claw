@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_DIR = REPO_ROOT / "agent"
@@ -26,6 +27,7 @@ from config import (  # noqa: E402
     set_agent_backend,
     set_claude_model,
     set_pipeline_stages,
+    set_role_stage_model,
     set_workspace_search_roots,
 )
 
@@ -257,6 +259,63 @@ class TestWorkspaceSearchRoots(unittest.TestCase):
         from utils import load_json, tasks_root
         data = load_json(tasks_root() / "state" / "agent_config.json")
         self.assertEqual(data.get("changed_by"), 12345)
+
+
+class TestSetRoleStageModelValidation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["SHARED_VOLUME_PATH"] = self.tmp.name
+
+    def tearDown(self):
+        os.environ.pop("SHARED_VOLUME_PATH", None)
+        self.tmp.cleanup()
+
+    @patch("model_registry.find_model", return_value={
+        "id": "claude-opus-4-6", "provider": "anthropic",
+        "status": "available", "unavailable_reason": ""})
+    def test_available_model_saves(self, mock_find):
+        set_role_stage_model("pm", "claude-opus-4-6", provider="anthropic")
+        from config import get_role_pipeline_stages
+        stages = get_role_pipeline_stages()
+        pm = next(s for s in stages if s["name"] == "pm")
+        self.assertEqual(pm["model"], "claude-opus-4-6")
+
+    @patch("model_registry.find_model", return_value={
+        "id": "gpt-4-turbo", "provider": "openai",
+        "status": "unavailable", "unavailable_reason": "API key未配置"})
+    def test_unavailable_model_raises(self, mock_find):
+        with self.assertRaises(ValueError) as cm:
+            set_role_stage_model("pm", "gpt-4-turbo", provider="openai")
+        self.assertIn("不可用", str(cm.exception))
+        self.assertIn("API key", str(cm.exception))
+
+    def test_empty_model_skips_validation(self):
+        # Setting empty model should not validate
+        set_role_stage_model("pm", "", provider="")
+        from config import get_role_pipeline_stages
+        stages = get_role_pipeline_stages()
+        pm = next(s for s in stages if s["name"] == "pm")
+        self.assertEqual(pm["model"], "")
+
+    @patch("model_registry.find_model", return_value=None)
+    def test_unknown_model_passes(self, mock_find):
+        # Model not in registry passes (not unavailable)
+        set_role_stage_model("pm", "custom-model-xyz", provider="anthropic")
+        from config import get_role_pipeline_stages
+        stages = get_role_pipeline_stages()
+        pm = next(s for s in stages if s["name"] == "pm")
+        self.assertEqual(pm["model"], "custom-model-xyz")
+
+    def test_validate_false_skips(self):
+        # With validate=False, should save even if model would be unavailable
+        with patch("model_registry.find_model", return_value={
+            "id": "bad-model", "status": "unavailable", "unavailable_reason": "err"}):
+            # This should NOT raise because validate=False
+            set_role_stage_model("pm", "bad-model", provider="openai", validate=False)
+        from config import get_role_pipeline_stages
+        stages = get_role_pipeline_stages()
+        pm = next(s for s in stages if s["name"] == "pm")
+        self.assertEqual(pm["model"], "bad-model")
 
 
 if __name__ == "__main__":

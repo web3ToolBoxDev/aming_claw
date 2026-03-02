@@ -6,10 +6,13 @@ Contains:
 - build_acceptance_cases, write_acceptance_documents, to_pending_acceptance
 - finalize_codex_task, finalize_pipeline_task
 - task_inline_keyboard, build_task_summary, acceptance_notice_text
+- run_post_acceptance_tests
 """
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -412,3 +415,40 @@ def acceptance_notice_text(result: Dict, task_id: str, task_code: str, *, detail
         execution_status=execution_status,
         summary=summary[:300],
     )
+
+
+def run_post_acceptance_tests(workspace: Path) -> Dict:
+    """Run test suite after acceptance. Returns {passed, output, error}.
+
+    Controlled by env vars:
+    - ACCEPTANCE_TEST_ENABLED: "1" (default) to enable, "0" to skip
+    - ACCEPTANCE_TEST_CMD: custom test command (default: python -m pytest agent/tests/ -x -q)
+    - ACCEPTANCE_TEST_TIMEOUT: timeout in seconds (default: 120)
+    """
+    enabled = os.getenv("ACCEPTANCE_TEST_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+    if not enabled:
+        return {"passed": True, "output": "(tests skipped)", "error": "", "skipped": True}
+
+    test_cmd = os.getenv("ACCEPTANCE_TEST_CMD", "").strip()
+    if not test_cmd:
+        python_bin = sys.executable or "python"
+        test_cmd = "{} -m unittest discover -s agent/tests -p test_*.py -f".format(python_bin)
+
+    timeout = int(os.getenv("ACCEPTANCE_TEST_TIMEOUT", "120"))
+    try:
+        proc = subprocess.run(
+            test_cmd,
+            shell=True,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            cwd=str(workspace),
+            check=False,
+        )
+        passed = proc.returncode == 0
+        output = (proc.stdout or "")[-3000:] + "\n" + (proc.stderr or "")[-1000:]
+        return {"passed": passed, "output": output.strip(), "error": ""}
+    except subprocess.TimeoutExpired:
+        return {"passed": False, "output": "", "error": "测试超时 ({}s)".format(timeout)}
+    except Exception as exc:
+        return {"passed": False, "output": "", "error": str(exc)[:500]}

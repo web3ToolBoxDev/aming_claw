@@ -24,6 +24,7 @@ from interactive_menu import (  # noqa: E402
     fuzzy_workspace_add_keyboard,
     get_pending_action,
     main_menu_keyboard,
+    model_list_keyboard,
     ops_menu_keyboard,
     peek_pending_action,
     pipeline_preset_keyboard,
@@ -288,6 +289,62 @@ class TestSearchRootsKeyboard(unittest.TestCase):
         btn_text = kb["inline_keyboard"][0][0]["text"]
         # Should be truncated (prefix + max 50 chars)
         self.assertLessEqual(len(btn_text), 56)  # "⛔ " prefix + 50 + "..."
+
+
+class TestModelListKeyboard(unittest.TestCase):
+    def _assert_valid_keyboard(self, kb):
+        self.assertIn("inline_keyboard", kb)
+        for row in kb["inline_keyboard"]:
+            for btn in row:
+                self.assertIn("text", btn)
+                self.assertIn("callback_data", btn)
+
+    def test_with_available_models(self):
+        models = [
+            {"id": "claude-opus-4-6", "provider": "anthropic", "status": "available"},
+            {"id": "gpt-4o", "provider": "openai", "status": "available"},
+        ]
+        kb = model_list_keyboard(models)
+        self._assert_valid_keyboard(kb)
+        all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertTrue(any("model_default:anthropic:claude-opus-4-6" in d for d in all_data))
+        self.assertTrue(any("model_default:openai:gpt-4o" in d for d in all_data))
+        # Refresh and back buttons
+        self.assertTrue(any("model_list_refresh" in d for d in all_data))
+        self.assertTrue(any("sub_system" in d for d in all_data))
+
+    def test_current_default_shown(self):
+        models = [
+            {"id": "claude-opus-4-6", "provider": "anthropic", "status": "available"},
+            {"id": "gpt-4o", "provider": "openai", "status": "available"},
+        ]
+        kb = model_list_keyboard(models, current_default="claude-opus-4-6")
+        # Check that the default model button has the checkmark
+        pm_btn = kb["inline_keyboard"][0][0]
+        self.assertIn("\u2714", pm_btn["text"])  # ✔ 当前默认
+
+    def test_unavailable_models_excluded_from_buttons(self):
+        models = [
+            {"id": "claude-opus-4-6", "provider": "anthropic", "status": "available"},
+            {"id": "gpt-4o", "provider": "openai", "status": "unavailable",
+             "unavailable_reason": "API key未配置"},
+        ]
+        kb = model_list_keyboard(models)
+        all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+        # Only available model should have set-default button
+        self.assertTrue(any("model_default:anthropic:claude-opus-4-6" in d for d in all_data))
+        self.assertFalse(any("model_default:openai:gpt-4o" in d for d in all_data))
+
+    def test_empty_models(self):
+        kb = model_list_keyboard([])
+        self._assert_valid_keyboard(kb)
+        # Only refresh + back buttons
+        self.assertEqual(len(kb["inline_keyboard"]), 2)
+
+    def test_system_menu_has_model_list(self):
+        kb = system_menu_keyboard()
+        all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertTrue(any("model_list" in d for d in all_data))
 
 
 if __name__ == "__main__":
