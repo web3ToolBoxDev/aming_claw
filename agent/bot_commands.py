@@ -46,6 +46,7 @@ from task_state import (
     group_archive_entries,
     grouped_archive_overview,
     list_active_tasks,
+    load_runtime_state,
     load_task_status,
     mark_task_finished,
     mark_task_completion_notified,
@@ -80,6 +81,13 @@ from interactive_menu import (
     back_to_menu_keyboard,
     confirm_cancel_keyboard,
     task_list_action_keyboard,
+    task_mgmt_menu_keyboard,
+    task_status_list_keyboard,
+    task_detail_keyboard,
+    tasks_overview_keyboard,
+    archive_detail_keyboard,
+    TASK_STATUS_LABELS,
+    TASK_STATUS_EMPTY_LABELS,
     set_pending_action,
     get_pending_action,
     peek_pending_action,
@@ -1058,6 +1066,47 @@ def handle_callback_query(cb: Dict) -> None:
                 answer_callback_query(cb_id, "\u5220\u9664\u5931\u8d25", show_alert=True)
             return
 
+        # ---- Task management callbacks ----
+        if data.startswith("task_detail:"):
+            _handle_task_detail_callback(cb_id, data, chat_id, user_id)
+            return
+        if data.startswith("task_cancel:"):
+            ref = data.split(":", 1)[1].strip()
+            send_text(
+                chat_id,
+                "\u786e\u8ba4\u53d6\u6d88\u4efb\u52a1 [{}]\uff1f\u53d6\u6d88\u540e\u4efb\u52a1\u5c06\u4e0d\u4f1a\u88ab\u6267\u884c\u3002".format(ref),
+                reply_markup=confirm_cancel_keyboard("task_cancel", ref),
+            )
+            answer_callback_query(cb_id, "\u8bf7\u786e\u8ba4\u53d6\u6d88")
+            return
+        if data.startswith("task_delete:"):
+            ref = data.split(":", 1)[1].strip()
+            send_text(
+                chat_id,
+                "\u786e\u8ba4\u5220\u9664\u4efb\u52a1 [{}]\uff1f\u5220\u9664\u540e\u5c06\u4ece\u6d3b\u8dc3\u5217\u8868\u79fb\u9664\u3002".format(ref),
+                reply_markup=confirm_cancel_keyboard("task_delete", ref),
+            )
+            answer_callback_query(cb_id, "\u8bf7\u786e\u8ba4\u5220\u9664")
+            return
+        if data.startswith("task_doc:"):
+            _handle_task_doc_callback(cb_id, data, chat_id, user_id)
+            return
+        if data.startswith("archive_detail:"):
+            _handle_archive_detail_callback(cb_id, data, chat_id, user_id)
+            return
+        if data.startswith("archive_delete:"):
+            ref = data.split(":", 1)[1].strip()
+            send_text(
+                chat_id,
+                "\u786e\u8ba4\u5220\u9664\u5f52\u6863\u8bb0\u5f55 [{}]\uff1f".format(ref),
+                reply_markup=confirm_cancel_keyboard("archive_delete", ref),
+            )
+            answer_callback_query(cb_id, "\u8bf7\u786e\u8ba4\u5220\u9664")
+            return
+        if data.startswith("tasks_page:"):
+            _handle_tasks_page_callback(cb_id, data, chat_id, user_id)
+            return
+
         # ---- Confirm callbacks (destructive actions) ----
         if data.startswith("confirm:"):
             _handle_confirm_callback(cb_id, data, chat_id, user_id)
@@ -1129,6 +1178,22 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             reply_markup=archive_menu_keyboard(),
         )
         answer_callback_query(cb_id, "归档管理")
+        return
+
+    # -- Sub-menu: Task Management --
+    if action == "sub_task_mgmt":
+        active_count = len(list_active_tasks(chat_id=chat_id))
+        send_text(
+            chat_id,
+            SUBMENU_TEXTS["task_mgmt"].format(active_count=active_count),
+            reply_markup=task_mgmt_menu_keyboard(),
+        )
+        answer_callback_query(cb_id, "\u4efb\u52a1\u7ba1\u7406")
+        return
+
+    # -- Task Management: status-filtered lists --
+    if action.startswith("tasks_"):
+        _handle_task_status_menu(cb_id, action, chat_id, user_id)
         return
 
     # -- Sub-menu: Operations --
@@ -1624,7 +1689,472 @@ def _handle_confirm_callback(cb_id: str, data: str, chat_id: int, user_id: int) 
         answer_callback_query(cb_id, "已清空 {} 个任务".format(removed))
         return
 
+    if action == "task_cancel":
+        ctx = parts[2] if len(parts) > 2 else ""
+        if not ctx:
+            answer_callback_query(cb_id, "\u65e0\u6548\u64cd\u4f5c", show_alert=True)
+            return
+        found = find_task(ctx)
+        if not found:
+            send_text(chat_id, "\u4efb\u52a1\u4e0d\u5b58\u5728: {}".format(ctx), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, "\u4efb\u52a1\u4e0d\u5b58\u5728")
+            return
+        current_status = str(found.get("status") or "").strip().lower()
+        st = task_status_snapshot(str(found.get("task_id") or ""))
+        if st:
+            current_status = str(st.get("status") or current_status).strip().lower()
+        if current_status != "pending":
+            send_text(chat_id, "\u4ec5\u53ef\u53d6\u6d88\u5f85\u5904\u7406\u4efb\u52a1\uff0c\u5f53\u524d\u72b6\u6001: {}".format(current_status), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, "\u65e0\u6cd5\u53d6\u6d88", show_alert=True)
+            return
+        task_id = str(found.get("task_id") or "")
+        # Remove pending file
+        pending_path = task_file("pending", task_id)
+        if pending_path.exists():
+            pending_path.unlink()
+        # Update status
+        update_task_runtime(found, status="cancelled", stage="results")
+        mark_task_finished(found, status="cancelled", stage="results", error="\u7528\u6237\u53d6\u6d88")
+        send_text(
+            chat_id,
+            "\u2705 \u4efb\u52a1 [{}] \u5df2\u53d6\u6d88\u3002".format(ctx),
+            reply_markup=task_mgmt_menu_keyboard(),
+        )
+        answer_callback_query(cb_id, "\u5df2\u53d6\u6d88")
+        return
+
+    if action == "task_delete":
+        ctx = parts[2] if len(parts) > 2 else ""
+        if not ctx:
+            answer_callback_query(cb_id, "\u65e0\u6548\u64cd\u4f5c", show_alert=True)
+            return
+        task_id = resolve_task_ref(ctx) or ctx
+        # Remove from active list
+        state = load_runtime_state()
+        active = state.get("active") or {}
+        if task_id in active:
+            del active[task_id]
+            state["active"] = active
+            from task_state import save_runtime_state
+            save_runtime_state(state)
+        # Remove task files
+        for stage_name in ("pending", "processing", "results"):
+            p = task_file(stage_name, task_id)
+            if p.exists():
+                p.unlink()
+        send_text(
+            chat_id,
+            "\u2705 \u4efb\u52a1 [{}] \u5df2\u5220\u9664\u3002".format(ctx),
+            reply_markup=task_mgmt_menu_keyboard(),
+        )
+        answer_callback_query(cb_id, "\u5df2\u5220\u9664")
+        return
+
+    if action == "archive_delete":
+        ctx = parts[2] if len(parts) > 2 else ""
+        if not ctx:
+            answer_callback_query(cb_id, "\u65e0\u6548\u64cd\u4f5c", show_alert=True)
+            return
+        removed = _remove_archive_entry(ctx)
+        if removed:
+            send_text(
+                chat_id,
+                "\u2705 \u5f52\u6863\u8bb0\u5f55 [{}] \u5df2\u5220\u9664\u3002".format(ctx),
+                reply_markup=task_mgmt_menu_keyboard(),
+            )
+            answer_callback_query(cb_id, "\u5df2\u5220\u9664")
+        else:
+            send_text(chat_id, "\u5f52\u6863\u8bb0\u5f55\u672a\u627e\u5230: {}".format(ctx), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, "\u672a\u627e\u5230", show_alert=True)
+        return
+
     answer_callback_query(cb_id, "未知确认操作")
+
+
+# ---------------------------------------------------------------------------
+# Task Management Helpers
+# ---------------------------------------------------------------------------
+
+def _collect_tasks_by_status(chat_id: int, status_key: str) -> List[Dict]:
+    """Collect tasks matching the given status key for a chat.
+
+    For 'accepted' includes both 'accepted' and 'completed'.
+    For 'failed' includes both 'failed' and 'timeout'.
+    For 'archived' reads from archive index.
+    """
+    if status_key == "archived":
+        from task_state import _read_archive_index
+        return list(reversed(_read_archive_index()))
+
+    active = list_active_tasks(chat_id=chat_id)
+    result: List[Dict] = []
+    match_statuses: set
+    if status_key == "accepted":
+        match_statuses = {"accepted", "completed"}
+    elif status_key == "failed":
+        match_statuses = {"failed", "timeout"}
+    else:
+        match_statuses = {status_key}
+
+    for item in active:
+        task_id = str(item.get("task_id") or "")
+        # Get latest status from task_state
+        st = task_status_snapshot(task_id) if task_id else None
+        current_status = str((st or item).get("status") or item.get("status") or "").strip().lower()
+        if current_status in match_statuses:
+            enriched = dict(item)
+            if st:
+                enriched["status"] = st.get("status", enriched.get("status"))
+                enriched["task_code"] = st.get("task_code", enriched.get("task_code", "-"))
+            result.append(enriched)
+    return result
+
+
+def _count_tasks_by_status(chat_id: int) -> Dict[str, int]:
+    """Count tasks in each status category."""
+    active = list_active_tasks(chat_id=chat_id)
+    counts: Dict[str, int] = {
+        "pending": 0,
+        "processing": 0,
+        "pending_acceptance": 0,
+        "rejected": 0,
+        "accepted": 0,
+        "failed": 0,
+    }
+    for item in active:
+        task_id = str(item.get("task_id") or "")
+        st = task_status_snapshot(task_id) if task_id else None
+        current_status = str((st or item).get("status") or item.get("status") or "").strip().lower()
+        if current_status in ("accepted", "completed"):
+            counts["accepted"] += 1
+        elif current_status in ("failed", "timeout"):
+            counts["failed"] += 1
+        elif current_status in counts:
+            counts[current_status] += 1
+    # Count archived
+    from task_state import _read_archive_index
+    counts["archived"] = len(_read_archive_index())
+    return counts
+
+
+def _handle_task_status_menu(cb_id: str, action: str, chat_id: int, user_id: int) -> None:
+    """Handle menu:tasks_* callbacks for status-filtered task lists."""
+    status_map = {
+        "tasks_pending": "pending",
+        "tasks_processing": "processing",
+        "tasks_pending_acceptance": "pending_acceptance",
+        "tasks_rejected": "rejected",
+        "tasks_accepted": "accepted",
+        "tasks_failed": "failed",
+        "tasks_archived": "archived",
+        "tasks_overview": "overview",
+    }
+    status_key = status_map.get(action, "")
+    if not status_key:
+        answer_callback_query(cb_id, "\u672a\u77e5\u64cd\u4f5c")
+        return
+
+    if status_key == "overview":
+        counts = _count_tasks_by_status(chat_id)
+        total_active = sum(v for k, v in counts.items() if k != "archived")
+        send_text(
+            chat_id,
+            "\U0001f4ca \u4efb\u52a1\u6982\u89c8\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            "\u6d3b\u8dc3\u4efb\u52a1\u603b\u6570: {}\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            "\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u67e5\u770b\u5bf9\u5e94\u7c7b\u522b:".format(total_active),
+            reply_markup=tasks_overview_keyboard(counts),
+        )
+        answer_callback_query(cb_id, "\u4efb\u52a1\u6982\u89c8")
+        return
+
+    tasks = _collect_tasks_by_status(chat_id, status_key)
+    label = TASK_STATUS_LABELS.get(status_key, status_key)
+    empty_label = TASK_STATUS_EMPTY_LABELS.get(status_key, status_key)
+
+    if not tasks:
+        send_text(
+            chat_id,
+            "\u5f53\u524d\u65e0{}\u4efb\u52a1\u3002".format(empty_label),
+            reply_markup=task_status_list_keyboard([], status_key),
+        )
+        answer_callback_query(cb_id, "\u65e0\u4efb\u52a1")
+        return
+
+    header = "{}\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u5171 {} \u4e2a\u4efb\u52a1\uff0c\u70b9\u51fb\u67e5\u770b\u8be6\u60c5:".format(label, len(tasks))
+    send_text(
+        chat_id,
+        header,
+        reply_markup=task_status_list_keyboard(tasks, status_key, page=0),
+    )
+    answer_callback_query(cb_id, label[:20])
+
+
+def _handle_tasks_page_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:
+    """Handle tasks_page:{status}:{page} pagination callbacks."""
+    parts = data.split(":", 2)
+    if len(parts) < 3:
+        answer_callback_query(cb_id, "\u65e0\u6548\u5206\u9875")
+        return
+    status_key = parts[1]
+    try:
+        page = int(parts[2])
+    except ValueError:
+        answer_callback_query(cb_id, "\u65e0\u6548\u9875\u7801")
+        return
+
+    tasks = _collect_tasks_by_status(chat_id, status_key)
+    label = TASK_STATUS_LABELS.get(status_key, status_key)
+
+    if not tasks:
+        send_text(
+            chat_id,
+            "\u5f53\u524d\u65e0\u4efb\u52a1\u3002",
+            reply_markup=task_status_list_keyboard([], status_key),
+        )
+        answer_callback_query(cb_id, "\u65e0\u4efb\u52a1")
+        return
+
+    send_text(
+        chat_id,
+        "{}\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u5171 {} \u4e2a\u4efb\u52a1\uff08\u7b2c {} \u9875\uff09:".format(label, len(tasks), page + 1),
+        reply_markup=task_status_list_keyboard(tasks, status_key, page=page),
+    )
+    answer_callback_query(cb_id, "\u7b2c {} \u9875".format(page + 1))
+
+
+def _handle_task_detail_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:
+    """Handle task_detail:{task_code} callback to show task detail page."""
+    task_code = data.split(":", 1)[1].strip()
+    found = find_task(task_code)
+    if not found:
+        # Try status snapshot
+        resolved_id = resolve_task_ref(task_code)
+        st = task_status_snapshot(resolved_id) if resolved_id else None
+        if st:
+            status = str(st.get("status") or "unknown").strip().lower()
+            text_preview = str(st.get("text") or "").strip()[:200] or "(\u65e0\u63cf\u8ff0)"
+            iteration = int(st.get("attempt") or 0)
+            detail = (
+                "\U0001f4cb \u4efb\u52a1\u8be6\u60c5\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u4ee3\u53f7: {code}\n"
+                "\u72b6\u6001: {status}\n"
+                "\u521b\u5efa\u65f6\u95f4: {created}\n"
+                "\u8fed\u4ee3\u6b21\u6570: {iteration}\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u63cf\u8ff0: {text}\n"
+                "\u6982\u8981: {summary}"
+            ).format(
+                code=task_code,
+                status=status_tag(status),
+                created=st.get("created_at", ""),
+                iteration=iteration,
+                text=text_preview,
+                summary=str(st.get("summary") or "").strip()[:200] or "(\u65e0)",
+            )
+            send_text(chat_id, detail, reply_markup=task_detail_keyboard(task_code, status))
+            answer_callback_query(cb_id, "\u4efb\u52a1\u8be6\u60c5")
+            return
+        send_text(chat_id, "\u4efb\u52a1\u4e0d\u5b58\u5728: {}".format(task_code), reply_markup=task_mgmt_menu_keyboard())
+        answer_callback_query(cb_id, "\u4efb\u52a1\u4e0d\u5b58\u5728")
+        return
+
+    found = merge_task_with_status(found)
+    status = str(found.get("status") or "unknown").strip().lower()
+    st = found.get("_status_snapshot") if isinstance(found.get("_status_snapshot"), dict) else {}
+    text_preview = str(found.get("text") or "").strip()[:200] or "(\u65e0\u63cf\u8ff0)"
+    summary = str(build_status_summary(found)).strip()[:200]
+    iteration = int(st.get("attempt") or found.get("attempt") or 0)
+    acceptance = found.get("acceptance") if isinstance(found.get("acceptance"), dict) else {}
+
+    detail = (
+        "\U0001f4cb \u4efb\u52a1\u8be6\u60c5\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u4ee3\u53f7: {code}\n"
+        "\u72b6\u6001: {status}\n"
+        "\u521b\u5efa\u65f6\u95f4: {created}\n"
+        "\u8fed\u4ee3\u6b21\u6570: {iteration}\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u63cf\u8ff0: {text}\n"
+        "\u6267\u884c\u6982\u8981: {summary}"
+    ).format(
+        code=found.get("task_code", task_code),
+        status=status_tag(status),
+        created=found.get("created_at") or st.get("created_at", ""),
+        iteration=iteration,
+        text=text_preview,
+        summary=summary or "(\u65e0)",
+    )
+    if acceptance.get("reason"):
+        detail += "\n\u62d2\u7edd\u539f\u56e0: {}".format(str(acceptance["reason"])[:200])
+
+    send_text(chat_id, detail, reply_markup=task_detail_keyboard(found.get("task_code", task_code), status))
+    answer_callback_query(cb_id, "\u4efb\u52a1\u8be6\u60c5")
+
+
+def _handle_task_doc_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:
+    """Handle task_doc:{task_code} callback to display task document."""
+    ref = data.split(":", 1)[1].strip()
+
+    # Try as archive entry first
+    archived = find_archive_entry(ref)
+    if archived:
+        result_file = str(archived.get("result_file") or "")
+        doc_text = str(archived.get("summary") or "").strip()
+        if result_file:
+            p = Path(result_file)
+            if p.exists():
+                try:
+                    content = p.read_text(encoding="utf-8")[:3000]
+                    doc_text = content
+                except Exception:
+                    pass
+        if not doc_text:
+            doc_text = "(\u65e0\u6587\u6863\u5185\u5bb9)"
+        send_text(
+            chat_id,
+            "\U0001f4c4 \u4efb\u52a1\u6587\u6863 [{}]\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{}".format(ref, doc_text[:3500]),
+            reply_markup=back_to_menu_keyboard(),
+        )
+        answer_callback_query(cb_id, "\u67e5\u770b\u6587\u6863")
+        return
+
+    # Try as active task
+    found = find_task(ref)
+    if not found:
+        resolved_id = resolve_task_ref(ref)
+        st = task_status_snapshot(resolved_id) if resolved_id else None
+        if st:
+            doc_text = str(st.get("summary") or st.get("text") or st.get("error") or "").strip()[:3000]
+            if not doc_text:
+                doc_text = "(\u65e0\u6587\u6863\u5185\u5bb9)"
+            send_text(
+                chat_id,
+                "\U0001f4c4 \u4efb\u52a1\u6587\u6863 [{}]\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{}".format(ref, doc_text[:3500]),
+                reply_markup=back_to_menu_keyboard(),
+            )
+            answer_callback_query(cb_id, "\u67e5\u770b\u6587\u6863")
+            return
+        send_text(chat_id, "\u4efb\u52a1\u4e0d\u5b58\u5728: {}".format(ref), reply_markup=back_to_menu_keyboard())
+        answer_callback_query(cb_id, "\u4efb\u52a1\u4e0d\u5b58\u5728")
+        return
+
+    found = merge_task_with_status(found)
+    acceptance = found.get("acceptance") if isinstance(found.get("acceptance"), dict) else {}
+    doc_file = str(acceptance.get("doc_file") or "").strip()
+    doc_text = ""
+
+    # Try acceptance doc_file
+    if doc_file:
+        p = Path(doc_file)
+        if p.exists():
+            try:
+                doc_text = p.read_text(encoding="utf-8")[:3000]
+            except Exception:
+                pass
+
+    # Fallback to result_file
+    if not doc_text:
+        st = found.get("_status_snapshot") if isinstance(found.get("_status_snapshot"), dict) else {}
+        result_file = str(st.get("result_file") or found.get("result_file") or "").strip()
+        if result_file:
+            p = Path(result_file)
+            if p.exists():
+                try:
+                    doc_text = p.read_text(encoding="utf-8")[:3000]
+                except Exception:
+                    pass
+
+    # Fallback to summary/error
+    if not doc_text:
+        doc_text = str(build_status_summary(found)).strip()[:3000]
+        if acceptance.get("reason"):
+            doc_text += "\n\n\u62d2\u7edd\u539f\u56e0: {}".format(str(acceptance["reason"])[:500])
+        error = str(found.get("error") or "").strip()
+        if error:
+            doc_text += "\n\n\u9519\u8bef\u4fe1\u606f: {}".format(error[:500])
+
+    if not doc_text:
+        doc_text = "(\u65e0\u6587\u6863\u5185\u5bb9)"
+
+    send_text(
+        chat_id,
+        "\U0001f4c4 \u4efb\u52a1\u6587\u6863 [{}]\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{}".format(
+            found.get("task_code", ref), doc_text[:3500]
+        ),
+        reply_markup=back_to_menu_keyboard(),
+    )
+    answer_callback_query(cb_id, "\u67e5\u770b\u6587\u6863")
+
+
+def _handle_archive_detail_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:
+    """Handle archive_detail:{archive_id} callback to show archive detail page."""
+    archive_ref = data.split(":", 1)[1].strip()
+    entry = find_archive_entry(archive_ref)
+    if not entry:
+        send_text(chat_id, "\u5f52\u6863\u8bb0\u5f55\u672a\u627e\u5230: {}".format(archive_ref), reply_markup=task_mgmt_menu_keyboard())
+        answer_callback_query(cb_id, "\u672a\u627e\u5230")
+        return
+
+    detail = (
+        "\U0001f4c1 \u5f52\u6863\u8be6\u60c5\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u4efb\u52a1\u4ee3\u53f7: {code}\n"
+        "\u5f52\u6863ID: {archive_id}\n"
+        "\u72b6\u6001: {status}\n"
+        "\u7c7b\u578b: {action}\n"
+        "\u5b8c\u6210\u65f6\u95f4: {completed}\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u63cf\u8ff0: {text}\n"
+        "\u6982\u8981: {summary}"
+    ).format(
+        code=entry.get("task_code", "-"),
+        archive_id=entry.get("archive_id", ""),
+        status=status_tag(entry.get("status", "unknown")),
+        action=entry.get("action", "unknown"),
+        completed=entry.get("completed_at") or entry.get("updated_at", ""),
+        text=str(entry.get("text") or "").strip()[:200] or "(\u65e0\u63cf\u8ff0)",
+        summary=str(entry.get("summary") or "").strip()[:200] or "(\u65e0)",
+    )
+
+    send_text(chat_id, detail, reply_markup=archive_detail_keyboard(entry.get("archive_id", archive_ref)))
+    answer_callback_query(cb_id, "\u5f52\u6863\u8be6\u60c5")
+
+
+def _remove_archive_entry(archive_id: str) -> bool:
+    """Remove an entry from the archive index by archive_id. Returns True if found and removed."""
+    from task_state import _archive_index_file
+    import json as _json
+    path = _archive_index_file()
+    if not path.exists():
+        return False
+    lines = path.read_text(encoding="utf-8").splitlines()
+    new_lines: List[str] = []
+    found = False
+    for line in lines:
+        row = line.strip()
+        if not row:
+            continue
+        try:
+            obj = _json.loads(row)
+        except Exception:
+            new_lines.append(row)
+            continue
+        if isinstance(obj, dict) and str(obj.get("archive_id") or "") == archive_id:
+            found = True
+            # Also delete the archive file
+            archive_file = str(obj.get("archive_file") or "")
+            if archive_file:
+                af = Path(archive_file)
+                if af.exists():
+                    af.unlink()
+            continue
+        new_lines.append(row)
+    if found:
+        path.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding="utf-8")
+    return found
 
 
 def _handle_backend_select_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:

@@ -87,7 +87,7 @@ def main_menu_keyboard() -> Dict:
             # ---- Quick Actions (most used) ----
             [
                 {"text": "\u270f\ufe0f \u65b0\u5efa\u4efb\u52a1", "callback_data": "menu:new_task"},
-                {"text": "\U0001f4cb \u4efb\u52a1\u5217\u8868", "callback_data": "menu:task_list"},
+                {"text": "\U0001f4cb \u4efb\u52a1\u7ba1\u7406", "callback_data": "menu:sub_task_mgmt"},
                 {"text": "\U0001f4f7 \u622a\u56fe", "callback_data": "menu:screenshot"},
             ],
             # ---- Sub-menu entries ----
@@ -438,6 +438,202 @@ def task_list_action_keyboard() -> Dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Keyboard builders - Task Management Sub-menu
+# ---------------------------------------------------------------------------
+
+# Status display names for task management menu
+TASK_STATUS_LABELS = {
+    "pending": "\U0001f550 \u5f85\u5904\u7406\u4efb\u52a1",
+    "processing": "\u2699\ufe0f \u6267\u884c\u4e2d\u4efb\u52a1",
+    "pending_acceptance": "\U0001f4cb \u5f85\u9a8c\u6536\u4efb\u52a1",
+    "rejected": "\u274c \u5df2\u62d2\u7edd\u4efb\u52a1",
+    "accepted": "\u2705 \u5df2\u5b8c\u6210\u4efb\u52a1",
+    "failed": "\U0001f4a5 \u5931\u8d25/\u8d85\u65f6",
+    "archived": "\U0001f4c1 \u5f52\u6863\u4efb\u52a1",
+}
+
+TASK_STATUS_EMPTY_LABELS = {
+    "pending": "\u5f85\u5904\u7406",
+    "processing": "\u6267\u884c\u4e2d",
+    "pending_acceptance": "\u5f85\u9a8c\u6536",
+    "rejected": "\u5df2\u62d2\u7edd",
+    "accepted": "\u5df2\u5b8c\u6210",
+    "failed": "\u5931\u8d25/\u8d85\u65f6",
+    "archived": "\u5f52\u6863",
+}
+
+
+def task_mgmt_menu_keyboard() -> Dict:
+    """Sub-menu: task management with status-based filtering."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "\U0001f550 \u5f85\u5904\u7406\u4efb\u52a1", "callback_data": "menu:tasks_pending"},
+                {"text": "\u2699\ufe0f \u6267\u884c\u4e2d\u4efb\u52a1", "callback_data": "menu:tasks_processing"},
+            ],
+            [
+                {"text": "\U0001f4cb \u5f85\u9a8c\u6536\u4efb\u52a1", "callback_data": "menu:tasks_pending_acceptance"},
+                {"text": "\u274c \u5df2\u62d2\u7edd\u4efb\u52a1", "callback_data": "menu:tasks_rejected"},
+            ],
+            [
+                {"text": "\u2705 \u5df2\u5b8c\u6210\u4efb\u52a1", "callback_data": "menu:tasks_accepted"},
+                {"text": "\U0001f4a5 \u5931\u8d25/\u8d85\u65f6", "callback_data": "menu:tasks_failed"},
+            ],
+            [
+                {"text": "\U0001f4c1 \u5f52\u6863\u4efb\u52a1", "callback_data": "menu:tasks_archived"},
+                {"text": "\U0001f4ca \u5168\u90e8\u6982\u89c8", "callback_data": "menu:tasks_overview"},
+            ],
+            [
+                {"text": "\u00ab \u8fd4\u56de\u4e3b\u83dc\u5355", "callback_data": "menu:main"},
+            ],
+        ]
+    }
+
+
+def task_status_list_keyboard(
+    tasks: List[Dict],
+    status_key: str,
+    page: int = 0,
+    page_size: int = 5,
+) -> Dict:
+    """Build paginated task list keyboard for a given status filter.
+
+    Each task becomes a button: [T00XX] description...
+    Includes pagination and back button.
+    """
+    total = len(tasks)
+    start = page * page_size
+    end = min(start + page_size, total)
+    page_tasks = tasks[start:end]
+
+    rows: List[List[Dict]] = []
+    for t in page_tasks:
+        code = str(t.get("task_code") or "-")
+        text = str(t.get("text") or t.get("summary") or "").strip()
+        if len(text) > 20:
+            text = text[:20] + "..."
+        label = "[{}] {}".format(code, text)
+        # For archived tasks, use archive_detail callback
+        if status_key == "archived":
+            cb = "archive_detail:{}".format(t.get("archive_id", code))
+        else:
+            cb = "task_detail:{}".format(code)
+        rows.append([{"text": label, "callback_data": cb}])
+
+    # Pagination buttons
+    nav_row: List[Dict] = []
+    if page > 0:
+        nav_row.append({"text": "\u00ab \u4e0a\u4e00\u9875", "callback_data": "tasks_page:{}:{}".format(status_key, page - 1)})
+    if end < total:
+        nav_row.append({"text": "\u4e0b\u4e00\u9875 \u00bb", "callback_data": "tasks_page:{}:{}".format(status_key, page + 1)})
+    if nav_row:
+        rows.append(nav_row)
+
+    rows.append([{"text": "\u00ab \u8fd4\u56de\u4efb\u52a1\u7ba1\u7406", "callback_data": "menu:sub_task_mgmt"}])
+    return {"inline_keyboard": rows}
+
+
+def task_detail_keyboard(task_code: str, status: str) -> Dict:
+    """Build action keyboard for a task detail page based on its status.
+
+    Different statuses get different action buttons.
+    """
+    rows: List[List[Dict]] = []
+    s = str(status or "").strip().lower()
+    code = str(task_code or "")
+
+    if s == "pending":
+        rows.append([
+            {"text": "\U0001f4c4 \u67e5\u770b\u8be6\u60c5", "callback_data": "task_doc:{}".format(code)},
+            {"text": "\U0001f5d1 \u53d6\u6d88\u4efb\u52a1", "callback_data": "task_cancel:{}".format(code)},
+        ])
+        back_cb = "menu:tasks_pending"
+    elif s == "processing":
+        rows.append([
+            {"text": "\U0001f4ca \u67e5\u770b\u8fdb\u5ea6", "callback_data": "status:{}".format(code)},
+            {"text": "\U0001f4dc \u67e5\u770b\u4e8b\u4ef6", "callback_data": "events:{}".format(code)},
+        ])
+        back_cb = "menu:tasks_processing"
+    elif s == "pending_acceptance":
+        rows.append([
+            {"text": "\u2705 \u9a8c\u6536\u901a\u8fc7", "callback_data": "accept:{}".format(code)},
+            {"text": "\u274c \u9a8c\u6536\u62d2\u7edd", "callback_data": "reject:{}".format(code)},
+        ])
+        rows.append([
+            {"text": "\U0001f4c4 \u67e5\u770b\u6587\u6863", "callback_data": "task_doc:{}".format(code)},
+            {"text": "\U0001f4dc \u67e5\u770b\u4e8b\u4ef6", "callback_data": "events:{}".format(code)},
+        ])
+        back_cb = "menu:tasks_pending_acceptance"
+    elif s == "rejected":
+        rows.append([
+            {"text": "\U0001f504 \u91cd\u65b0\u5f00\u53d1", "callback_data": "retry:{}".format(code)},
+            {"text": "\u2705 \u6539\u4e3a\u901a\u8fc7", "callback_data": "accept:{}".format(code)},
+        ])
+        rows.append([
+            {"text": "\U0001f4c4 \u67e5\u770b\u6587\u6863", "callback_data": "task_doc:{}".format(code)},
+            {"text": "\U0001f5d1 \u5220\u9664\u4efb\u52a1", "callback_data": "task_delete:{}".format(code)},
+        ])
+        back_cb = "menu:tasks_rejected"
+    elif s in ("accepted", "completed"):
+        rows.append([
+            {"text": "\U0001f4c4 \u67e5\u770b\u6587\u6863", "callback_data": "task_doc:{}".format(code)},
+            {"text": "\U0001f4dc \u67e5\u770b\u4e8b\u4ef6", "callback_data": "events:{}".format(code)},
+        ])
+        back_cb = "menu:tasks_accepted"
+    elif s in ("failed", "timeout"):
+        rows.append([
+            {"text": "\U0001f504 \u91cd\u8bd5", "callback_data": "retry:{}".format(code)},
+            {"text": "\U0001f4c4 \u67e5\u770b\u9519\u8bef", "callback_data": "task_doc:{}".format(code)},
+        ])
+        rows.append([
+            {"text": "\U0001f5d1 \u5220\u9664\u4efb\u52a1", "callback_data": "task_delete:{}".format(code)},
+        ])
+        back_cb = "menu:tasks_failed"
+    else:
+        rows.append([
+            {"text": "\U0001f4c4 \u67e5\u770b\u8be6\u60c5", "callback_data": "task_doc:{}".format(code)},
+        ])
+        back_cb = "menu:sub_task_mgmt"
+
+    rows.append([{"text": "\u00ab \u8fd4\u56de\u5217\u8868", "callback_data": back_cb}])
+    return {"inline_keyboard": rows}
+
+
+def tasks_overview_keyboard(counts: Dict[str, int]) -> Dict:
+    """Build overview statistics keyboard. Each line is a clickable button."""
+    status_map = [
+        ("pending", "\U0001f550 \u5f85\u5904\u7406", "menu:tasks_pending"),
+        ("processing", "\u2699\ufe0f \u6267\u884c\u4e2d", "menu:tasks_processing"),
+        ("pending_acceptance", "\U0001f4cb \u5f85\u9a8c\u6536", "menu:tasks_pending_acceptance"),
+        ("rejected", "\u274c \u5df2\u62d2\u7edd", "menu:tasks_rejected"),
+        ("accepted", "\u2705 \u5df2\u5b8c\u6210", "menu:tasks_accepted"),
+        ("failed", "\U0001f4a5 \u5931\u8d25/\u8d85\u65f6", "menu:tasks_failed"),
+        ("archived", "\U0001f4c1 \u5df2\u5f52\u6863", "menu:tasks_archived"),
+    ]
+    rows: List[List[Dict]] = []
+    for key, label, cb in status_map:
+        count = int(counts.get(key, 0))
+        rows.append([{"text": "{}: {}".format(label, count), "callback_data": cb}])
+    rows.append([{"text": "\u00ab \u8fd4\u56de\u4efb\u52a1\u7ba1\u7406", "callback_data": "menu:sub_task_mgmt"}])
+    return {"inline_keyboard": rows}
+
+
+def archive_detail_keyboard(archive_id: str) -> Dict:
+    """Action keyboard for an archived task detail."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "\U0001f4c4 \u67e5\u770b\u5f52\u6863\u8be6\u60c5", "callback_data": "task_doc:{}".format(archive_id)},
+                {"text": "\U0001f5d1 \u5220\u9664\u5f52\u6863\u8bb0\u5f55", "callback_data": "archive_delete:{}".format(archive_id)},
+            ],
+            [
+                {"text": "\u00ab \u8fd4\u56de\u5217\u8868", "callback_data": "menu:tasks_archived"},
+            ],
+        ]
+    }
+
+
 def confirm_cancel_keyboard(action: str, context_str: str = "") -> Dict:
     """Confirm + cancel keyboard for dangerous operations."""
     cb_data = "confirm:{}".format(action)
@@ -557,6 +753,13 @@ SUBMENU_TEXTS = {
         "\u67e5\u770b\u4efb\u52a1\u961f\u5217\u548c\u8c03\u5ea6\u5668\u72b6\u6001\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "\u9009\u62e9\u8981\u6267\u884c\u7684\u64cd\u4f5c:"
+    ),
+    "task_mgmt": (
+        "\U0001f4cb \u4efb\u52a1\u7ba1\u7406\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u5f53\u524d\u5171 {active_count} \u4e2a\u6d3b\u8dc3\u4efb\u52a1\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u9009\u62e9\u8981\u67e5\u770b\u7684\u4efb\u52a1\u72b6\u6001:"
     ),
 }
 
