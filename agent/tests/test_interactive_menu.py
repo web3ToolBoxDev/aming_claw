@@ -27,6 +27,7 @@ from interactive_menu import (  # noqa: E402
     ops_menu_keyboard,
     peek_pending_action,
     pipeline_preset_keyboard,
+    search_roots_keyboard,
     security_menu_keyboard,
     set_pending_action,
     system_menu_keyboard,
@@ -143,6 +144,7 @@ class TestKeyboardBuilders(unittest.TestCase):
         self.assertTrue(any("workspace_remove" in d for d in all_data))
         self.assertTrue(any("workspace_set_default" in d for d in all_data))
         self.assertTrue(any("workspace_queue_status" in d for d in all_data))
+        self.assertTrue(any("workspace_search_roots" in d for d in all_data))
 
     def test_workspace_select(self):
         workspaces = [
@@ -194,6 +196,10 @@ class TestTextConstants(unittest.TestCase):
         self.assertIn("workspace_remove", PENDING_PROMPTS)
         self.assertIn("workspace_set_default", PENDING_PROMPTS)
         self.assertIn("new_task_with_workspace", PENDING_PROMPTS)
+        self.assertIn("search_root_add", PENDING_PROMPTS)
+
+    def test_help_has_search_roots_command(self):
+        self.assertIn("/workspace_search_roots", HELP_TEXT)
 
     def test_workspace_add_prompt_has_fuzzy_hint(self):
         prompt = PENDING_PROMPTS["workspace_add"]
@@ -247,6 +253,41 @@ class TestFuzzyWorkspaceAddKeyboard(unittest.TestCase):
         kb = fuzzy_workspace_add_keyboard(candidates)
         btn_text = kb["inline_keyboard"][0][0]["text"]
         self.assertLessEqual(len(btn_text), 63)  # 60 + "..."
+
+
+class TestSearchRootsKeyboard(unittest.TestCase):
+    def _assert_valid_keyboard(self, kb):
+        self.assertIn("inline_keyboard", kb)
+        for row in kb["inline_keyboard"]:
+            for btn in row:
+                self.assertIn("text", btn)
+                self.assertIn("callback_data", btn)
+
+    def test_empty_roots(self):
+        kb = search_roots_keyboard([])
+        self._assert_valid_keyboard(kb)
+        # Should have add button + back button
+        self.assertEqual(len(kb["inline_keyboard"]), 2)
+        all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertTrue(any("search_root_add" in d for d in all_data))
+        self.assertTrue(any("sub_workspace" in d for d in all_data))
+
+    def test_with_roots(self):
+        roots = ["/tmp/projects", "/tmp/repos"]
+        kb = search_roots_keyboard(roots)
+        self._assert_valid_keyboard(kb)
+        # 2 remove buttons + add button + back button = 4 rows
+        self.assertEqual(len(kb["inline_keyboard"]), 4)
+        all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertIn("sr_remove:1", all_data)
+        self.assertIn("sr_remove:2", all_data)
+
+    def test_long_path_truncated(self):
+        long_path = "C:\\Users\\someone\\very\\deep\\nested\\directory\\structure\\that\\is\\really\\long"
+        kb = search_roots_keyboard([long_path])
+        btn_text = kb["inline_keyboard"][0][0]["text"]
+        # Should be truncated (prefix + max 50 chars)
+        self.assertLessEqual(len(btn_text), 56)  # "⛔ " prefix + 50 + "..."
 
 
 if __name__ == "__main__":

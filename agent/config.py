@@ -14,7 +14,7 @@ the ordered list of AI stages to run for each task, e.g.:
    {"name": "verify", "backend": "codex"}]
 """
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from utils import load_json, save_json, tasks_root, utc_iso
 
@@ -206,3 +206,70 @@ def format_pipeline_stages(stages: List[Dict]) -> str:
     if not stages:
         return "(empty)"
     return " → ".join("{}({})".format(s.get("name", "?"), s.get("backend", "?")) for s in stages)
+
+
+# ── Workspace search roots ────────────────────────────────────────────────────
+
+def get_workspace_search_roots() -> List[str]:
+    """Return persisted workspace search root paths, or [] if none."""
+    p = _config_path()
+    if p.exists():
+        try:
+            data = load_json(p)
+            roots = data.get("workspace_search_roots")
+            if isinstance(roots, list):
+                return [str(r) for r in roots if str(r).strip()]
+        except Exception:
+            pass
+    return []
+
+
+def set_workspace_search_roots(roots: List[str],
+                               changed_by: Optional[int] = None) -> None:
+    """Persist workspace search root paths to runtime config."""
+    p = _config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if p.exists():
+        try:
+            existing = load_json(p)
+        except Exception:
+            pass
+    existing["workspace_search_roots"] = [r.strip() for r in roots if r.strip()]
+    existing["updated_at"] = utc_iso()
+    if changed_by is not None:
+        existing["changed_by"] = changed_by
+    save_json(p, existing)
+
+
+def add_workspace_search_root(root: str,
+                              changed_by: Optional[int] = None) -> Tuple[bool, str]:
+    """Add a single search root path. Returns (success, message)."""
+    from pathlib import Path as _P
+    root = root.strip().strip('"').strip("'")
+    if not root:
+        return False, "路径不能为空"
+    p = _P(root).expanduser()
+    if not p.exists():
+        return False, "路径不存在: {}".format(root)
+    if not p.is_dir():
+        return False, "路径不是目录: {}".format(root)
+    resolved = str(p.resolve())
+    current = get_workspace_search_roots()
+    # Dedup (case-insensitive on Windows)
+    if any(resolved.lower() == c.lower() for c in current):
+        return False, "已存在: {}".format(resolved)
+    current.append(resolved)
+    set_workspace_search_roots(current, changed_by=changed_by)
+    return True, resolved
+
+
+def remove_workspace_search_root(index: int,
+                                 changed_by: Optional[int] = None) -> Tuple[bool, str]:
+    """Remove a search root by 1-based index. Returns (success, message)."""
+    current = get_workspace_search_roots()
+    if index < 1 or index > len(current):
+        return False, "无效索引: {}（共{}项）".format(index, len(current))
+    removed = current.pop(index - 1)
+    set_workspace_search_roots(current, changed_by=changed_by)
+    return True, removed

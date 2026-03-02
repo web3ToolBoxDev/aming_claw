@@ -15,14 +15,18 @@ from config import (  # noqa: E402
     KNOWN_STAGE_BACKENDS,
     PIPELINE_PRESETS,
     _parse_pipeline_stages,
+    add_workspace_search_root,
     format_pipeline_stages,
     get_agent_backend,
     get_claude_model,
     get_model_provider,
     get_pipeline_stages,
+    get_workspace_search_roots,
+    remove_workspace_search_root,
     set_agent_backend,
     set_claude_model,
     set_pipeline_stages,
+    set_workspace_search_roots,
 )
 
 
@@ -175,6 +179,84 @@ class TestGetSetPipelineStages(unittest.TestCase):
         self.assertEqual(loaded[0]["name"], "plan")
         # Should also set backend to pipeline
         self.assertEqual(get_agent_backend(), "pipeline")
+
+
+class TestWorkspaceSearchRoots(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["SHARED_VOLUME_PATH"] = self.tmp.name
+
+    def tearDown(self):
+        os.environ.pop("SHARED_VOLUME_PATH", None)
+        self.tmp.cleanup()
+
+    def test_default_empty(self):
+        self.assertEqual(get_workspace_search_roots(), [])
+
+    def test_set_and_get(self):
+        set_workspace_search_roots(["/tmp/a", "/tmp/b"])
+        roots = get_workspace_search_roots()
+        self.assertEqual(len(roots), 2)
+        self.assertIn("/tmp/a", roots)
+        self.assertIn("/tmp/b", roots)
+
+    def test_set_filters_empty(self):
+        set_workspace_search_roots(["", "/tmp/a", "  ", "/tmp/b"])
+        roots = get_workspace_search_roots()
+        self.assertEqual(len(roots), 2)
+
+    def test_add_root(self):
+        # Create real dirs for add to validate
+        d1 = Path(self.tmp.name) / "projects"
+        d1.mkdir()
+        ok, msg = add_workspace_search_root(str(d1))
+        self.assertTrue(ok)
+        roots = get_workspace_search_roots()
+        self.assertEqual(len(roots), 1)
+
+    def test_add_duplicate_rejected(self):
+        d1 = Path(self.tmp.name) / "projects"
+        d1.mkdir()
+        add_workspace_search_root(str(d1))
+        ok, msg = add_workspace_search_root(str(d1))
+        self.assertFalse(ok)
+        self.assertIn("\u5df2\u5b58\u5728", msg)
+
+    def test_add_nonexistent_rejected(self):
+        ok, msg = add_workspace_search_root("/nonexistent/path/xyz")
+        self.assertFalse(ok)
+        self.assertIn("\u4e0d\u5b58\u5728", msg)
+
+    def test_add_empty_rejected(self):
+        ok, msg = add_workspace_search_root("")
+        self.assertFalse(ok)
+
+    def test_remove_root(self):
+        set_workspace_search_roots(["/tmp/a", "/tmp/b", "/tmp/c"])
+        ok, removed = remove_workspace_search_root(2)
+        self.assertTrue(ok)
+        self.assertEqual(removed, "/tmp/b")
+        roots = get_workspace_search_roots()
+        self.assertEqual(len(roots), 2)
+        self.assertNotIn("/tmp/b", roots)
+
+    def test_remove_invalid_index(self):
+        set_workspace_search_roots(["/tmp/a"])
+        ok, msg = remove_workspace_search_root(0)
+        self.assertFalse(ok)
+        ok, msg = remove_workspace_search_root(5)
+        self.assertFalse(ok)
+
+    def test_clear_roots(self):
+        set_workspace_search_roots(["/tmp/a", "/tmp/b"])
+        set_workspace_search_roots([])
+        self.assertEqual(get_workspace_search_roots(), [])
+
+    def test_changed_by_tracked(self):
+        set_workspace_search_roots(["/tmp/a"], changed_by=12345)
+        from utils import load_json, tasks_root
+        data = load_json(tasks_root() / "state" / "agent_config.json")
+        self.assertEqual(data.get("changed_by"), 12345)
 
 
 if __name__ == "__main__":

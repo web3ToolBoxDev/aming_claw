@@ -196,6 +196,9 @@ def workspace_menu_keyboard() -> Dict:
                 {"text": "\u2b50 \u8bbe\u7f6e\u9ed8\u8ba4", "callback_data": "menu:workspace_set_default"},
             ],
             [
+                {"text": "\U0001f50d \u641c\u7d22\u6839\u76ee\u5f55", "callback_data": "menu:workspace_search_roots"},
+            ],
+            [
                 {"text": "\U0001f4ca \u961f\u5217\u72b6\u6001", "callback_data": "menu:workspace_queue_status"},
                 {"text": "\U0001f4ca \u8c03\u5ea6\u5668\u72b6\u6001", "callback_data": "menu:dispatch_status"},
             ],
@@ -204,6 +207,25 @@ def workspace_menu_keyboard() -> Dict:
             ],
         ]
     }
+
+
+def search_roots_keyboard(roots: list) -> Dict:
+    """Sub-view: manage workspace search roots.
+
+    Shows current roots with remove buttons, plus an add button.
+    """
+    rows: list = []
+    for idx, root in enumerate(roots, 1):
+        display = root
+        if len(display) > 50:
+            display = "...{}".format(display[-47:])
+        rows.append([
+            {"text": "\u2796 {}".format(display),
+             "callback_data": "sr_remove:{}".format(idx)},
+        ])
+    rows.append([{"text": "\u2795 \u6dfb\u52a0\u641c\u7d22\u6839\u76ee\u5f55", "callback_data": "menu:search_root_add"}])
+    rows.append([{"text": "\u00ab \u8fd4\u56de\u5de5\u4f5c\u533a\u7ba1\u7406", "callback_data": "menu:sub_workspace"}])
+    return {"inline_keyboard": rows}
 
 
 def workspace_select_keyboard(workspaces: List[Dict], callback_prefix: str = "ws_select") -> Dict:
@@ -408,6 +430,7 @@ HELP_TEXT = (
     "  /workspace_remove <ID> - \u79fb\u9664\u5de5\u4f5c\u76ee\u5f55\n"
     "  /workspace_list - \u67e5\u770b\u5de5\u4f5c\u76ee\u5f55\u5217\u8868\n"
     "  /workspace_default <ID> - \u8bbe\u7f6e\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55\n"
+    "  /workspace_search_roots [add|remove|clear] - \u641c\u7d22\u6839\u76ee\u5f55\n"
     "  /dispatch_status - \u67e5\u770b\u5e76\u884c\u8c03\u5ea6\u5668\u72b6\u6001\n"
     "  @workspace:<\u6807\u7b7e> <\u4efb\u52a1> - \u6307\u5b9a\u5de5\u4f5c\u76ee\u5f55\u6267\u884c\n\n"
     "\u5176\u4ed6:\n"
@@ -554,6 +577,14 @@ PENDING_PROMPTS = {
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "\u8bf7\u8f93\u5165\u8981\u8bbe\u7f6e\u4e3a\u9ed8\u8ba4\u7684\u5de5\u4f5c\u76ee\u5f55ID:\n\n"
         "\u793a\u4f8b: ws-abc12345"
+    ),
+    "search_root_add": (
+        "\U0001f50d \u6dfb\u52a0\u641c\u7d22\u6839\u76ee\u5f55\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u8bf7\u8f93\u5165\u8981\u6dfb\u52a0\u7684\u641c\u7d22\u6839\u76ee\u5f55\u8def\u5f84\n"
+        "\u6a21\u7cca\u641c\u7d22\u5c06\u5728\u8fd9\u4e9b\u76ee\u5f55\u4e0b\u9012\u5f52\u67e5\u627e .git \u9879\u76ee\n\n"
+        "\u793a\u4f8b: C:\\Users\\me\\Documents\n"
+        "\u591a\u4e2a\u8def\u5f84\u7528\u5206\u53f7\u5206\u9694: D:\\projects;E:\\repos"
     ),
     "new_task_with_workspace": (
         "\U0001f4dd \u65b0\u5efa\u4efb\u52a1\n"

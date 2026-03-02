@@ -23,6 +23,8 @@ from config import (
     KNOWN_BACKENDS, KNOWN_CLAUDE_MODELS, PIPELINE_PRESETS,
     format_pipeline_stages, get_agent_backend, get_claude_model, get_model_provider,
     get_pipeline_stages, set_agent_backend, set_claude_model, set_pipeline_stages,
+    add_workspace_search_root, get_workspace_search_roots,
+    remove_workspace_search_root, set_workspace_search_roots,
 )
 from model_registry import get_available_models, make_label
 from auth import debug_verify_otp, get_auth_state, init_authenticator, verify_otp
@@ -62,6 +64,7 @@ from interactive_menu import (
     workspace_menu_keyboard,
     workspace_select_keyboard,
     fuzzy_workspace_add_keyboard,
+    search_roots_keyboard,
     backend_select_keyboard,
     pipeline_preset_keyboard,
     cancel_keyboard,
@@ -145,8 +148,15 @@ def clear_workspace_candidates(chat_id: int, user_id: int) -> None:
 
 
 def resolve_workspace_search_roots() -> List[Path]:
-    raw = os.getenv("WORKSPACE_SEARCH_ROOTS", "").strip()
     roots: List[Path] = []
+    # 1. Persisted config (set via menu / /workspace_search_roots command)
+    config_roots = get_workspace_search_roots()
+    for v in config_roots:
+        p = Path(v).expanduser()
+        if p.exists() and p.is_dir():
+            roots.append(p.resolve())
+    # 2. Environment variable (additive)
+    raw = os.getenv("WORKSPACE_SEARCH_ROOTS", "").strip()
     if raw:
         for part in raw.split(os.pathsep):
             v = part.strip().strip('"').strip("'")
@@ -155,6 +165,7 @@ def resolve_workspace_search_roots() -> List[Path]:
             p = Path(v).expanduser()
             if p.exists() and p.is_dir():
                 roots.append(p.resolve())
+    # 3. Fallback: active workspace + parent
     if not roots:
         active = resolve_active_workspace().resolve()
         for p in [active, active.parent]:
@@ -897,12 +908,34 @@ def handle_callback_query(cb: Dict) -> None:
                 answer_callback_query(cb_id, "添加失败", show_alert=True)
             return
 
+        # ---- Search root remove callbacks ----
+        if data.startswith("sr_remove:"):
+            idx_str = data.split(":", 1)[1].strip()
+            try:
+                idx = int(idx_str)
+            except ValueError:
+                answer_callback_query(cb_id, "\u65e0\u6548\u5e8f\u53f7", show_alert=True)
+                return
+            ok, msg = remove_workspace_search_root(idx, changed_by=user_id)
+            if ok:
+                roots = get_workspace_search_roots()
+                send_text(
+                    chat_id,
+                    "\u2705 \u5df2\u5220\u9664\u641c\u7d22\u6839\u76ee\u5f55: {}".format(msg),
+                    reply_markup=search_roots_keyboard(roots),
+                )
+                answer_callback_query(cb_id, "\u5df2\u5220\u9664")
+            else:
+                send_text(chat_id, "\u5220\u9664\u5931\u8d25: {}".format(msg))
+                answer_callback_query(cb_id, "\u5220\u9664\u5931\u8d25", show_alert=True)
+            return
+
         # ---- Confirm callbacks (destructive actions) ----
         if data.startswith("confirm:"):
             _handle_confirm_callback(cb_id, data, chat_id, user_id)
             return
 
-        answer_callback_query(cb_id, "未知按钮")
+        answer_callback_query(cb_id, "\u672a\u77e5\u6309\u94ae")
     except Exception as exc:
         answer_callback_query(cb_id, "操作失败", show_alert=True)
         send_text(chat_id, "按钮操作失败: {}".format(str(exc)[:500]))
@@ -1333,6 +1366,40 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         answer_callback_query(cb_id, "\u9009\u62e9\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55")
         return
 
+    # -- Workspace Search Roots: show current roots with management UI --
+    if action == "workspace_search_roots":
+        roots = get_workspace_search_roots()
+        if roots:
+            lines = ["\U0001f50d \u641c\u7d22\u6839\u76ee\u5f55"]
+            lines.append("\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+            for idx, r in enumerate(roots, 1):
+                lines.append("{}. {}".format(idx, r))
+            lines.append("\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501")
+            lines.append("\u70b9\u51fb \u2796 \u5220\u9664\uff0c\u6216\u70b9 \u2795 \u6dfb\u52a0\u65b0\u6839\u76ee\u5f55")
+            text = "\n".join(lines)
+        else:
+            text = (
+                "\U0001f50d \u641c\u7d22\u6839\u76ee\u5f55\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u5c1a\u672a\u914d\u7f6e\u641c\u7d22\u6839\u76ee\u5f55\u3002\n"
+                "\u9ed8\u8ba4\u4f7f\u7528\u5f53\u524d\u6d3b\u8dc3\u5de5\u4f5c\u76ee\u5f55\u53ca\u5176\u7236\u76ee\u5f55\u3002\n\n"
+                "\u70b9\u51fb \u2795 \u6dfb\u52a0\u641c\u7d22\u6839\u76ee\u5f55\uff0c\u6269\u5927\u6a21\u7cca\u641c\u7d22\u8303\u56f4\u3002"
+            )
+        send_text(chat_id, text, reply_markup=search_roots_keyboard(roots))
+        answer_callback_query(cb_id, "\u641c\u7d22\u6839\u76ee\u5f55")
+        return
+
+    # -- Search Root Add: prompt for path --
+    if action == "search_root_add":
+        set_pending_action(chat_id, user_id, "search_root_add")
+        send_text(
+            chat_id,
+            PENDING_PROMPTS["search_root_add"],
+            reply_markup=cancel_keyboard(),
+        )
+        answer_callback_query(cb_id, "\u8bf7\u8f93\u5165\u8def\u5f84")
+        return
+
     # -- Workspace Queue Status: show all queues --
     if action == "workspace_queue_status":
         all_queues = list_all_queues()
@@ -1573,6 +1640,11 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
     # -- Workspace Set Default (text input fallback) --
     if action == "workspace_set_default":
         handle_command(chat_id, user_id, "/workspace_default {}".format(t))
+        return True
+
+    # -- Search Root Add --
+    if action == "search_root_add":
+        handle_command(chat_id, user_id, "/workspace_search_roots add {}".format(t))
         return True
 
     return False
@@ -2758,6 +2830,96 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             )
         else:
             send_text(chat_id, "工作目录未找到: {}".format(ws_id))
+        return True
+
+    if t.startswith("/workspace_search_roots"):
+        parts = t.split(maxsplit=2)
+        # /workspace_search_roots — show current
+        if len(parts) < 2:
+            roots = get_workspace_search_roots()
+            if roots:
+                lines = ["\U0001f50d \u641c\u7d22\u6839\u76ee\u5f55:"]
+                for idx, r in enumerate(roots, 1):
+                    lines.append("{}. {}".format(idx, r))
+                lines.append("\n\u7528\u6cd5:")
+                lines.append("  /workspace_search_roots add <\u8def\u5f84>")
+                lines.append("  /workspace_search_roots remove <\u5e8f\u53f7>")
+                lines.append("  /workspace_search_roots clear")
+                send_text(chat_id, "\n".join(lines), reply_markup=back_to_menu_keyboard())
+            else:
+                send_text(
+                    chat_id,
+                    "\u5c1a\u672a\u914d\u7f6e\u641c\u7d22\u6839\u76ee\u5f55\u3002\n"
+                    "\u9ed8\u8ba4\u4f7f\u7528\u5f53\u524d\u6d3b\u8dc3\u5de5\u4f5c\u76ee\u5f55\u53ca\u5176\u7236\u76ee\u5f55\u3002\n\n"
+                    "\u7528\u6cd5: /workspace_search_roots add <\u8def\u5f84>",
+                    reply_markup=back_to_menu_keyboard(),
+                )
+            return True
+        sub = parts[1].strip().lower()
+        # /workspace_search_roots add <path>[;path2;...]
+        if sub == "add":
+            if len(parts) < 3:
+                send_text(chat_id, "\u7528\u6cd5: /workspace_search_roots add <\u8def\u5f84>")
+                return True
+            raw_paths = parts[2].strip()
+            added = []
+            failed = []
+            for segment in raw_paths.split(";"):
+                segment = segment.strip()
+                if not segment:
+                    continue
+                ok, msg = add_workspace_search_root(segment, changed_by=user_id)
+                if ok:
+                    added.append(msg)
+                else:
+                    failed.append(msg)
+            lines = []
+            if added:
+                lines.append("\u2705 \u5df2\u6dfb\u52a0:")
+                for a in added:
+                    lines.append("  {}".format(a))
+            if failed:
+                lines.append("\u274c \u5931\u8d25:")
+                for f in failed:
+                    lines.append("  {}".format(f))
+            roots = get_workspace_search_roots()
+            send_text(
+                chat_id,
+                "\n".join(lines) if lines else "\u65e0\u6709\u6548\u8def\u5f84",
+                reply_markup=search_roots_keyboard(roots),
+            )
+            return True
+        # /workspace_search_roots remove <index>
+        if sub == "remove":
+            if len(parts) < 3:
+                send_text(chat_id, "\u7528\u6cd5: /workspace_search_roots remove <\u5e8f\u53f7>")
+                return True
+            try:
+                idx = int(parts[2].strip())
+            except ValueError:
+                send_text(chat_id, "\u5e8f\u53f7\u5fc5\u987b\u662f\u6570\u5b57")
+                return True
+            ok, msg = remove_workspace_search_root(idx, changed_by=user_id)
+            if ok:
+                roots = get_workspace_search_roots()
+                send_text(
+                    chat_id,
+                    "\u2705 \u5df2\u5220\u9664: {}".format(msg),
+                    reply_markup=search_roots_keyboard(roots),
+                )
+            else:
+                send_text(chat_id, "\u5220\u9664\u5931\u8d25: {}".format(msg))
+            return True
+        # /workspace_search_roots clear
+        if sub == "clear":
+            set_workspace_search_roots([], changed_by=user_id)
+            send_text(
+                chat_id,
+                "\u2705 \u5df2\u6e05\u7a7a\u6240\u6709\u641c\u7d22\u6839\u76ee\u5f55\u3002\n\u5c06\u56de\u9000\u5230\u9ed8\u8ba4\u641c\u7d22\u8303\u56f4\u3002",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return True
+        send_text(chat_id, "\u672a\u77e5\u5b50\u547d\u4ee4: {}\n\u7528\u6cd5: add / remove / clear".format(sub))
         return True
 
     if t.startswith("/workspace_list") or t == "/workspaces":
