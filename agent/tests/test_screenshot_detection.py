@@ -90,6 +90,12 @@ class TestIsScreenshotText(unittest.TestCase):
         text = "检查任务T0046,修复任务没执行反而执行截图命令"
         self.assertFalse(is_screenshot_text(text))
 
+    def test_task_starting_with_screenshot_command_phrase(self):
+        self.assertFalse(is_screenshot_text("截图命令误判修复"))
+
+    def test_task_starting_with_english_screenshot_command_phrase(self):
+        self.assertFalse(is_screenshot_text("screenshot command misclassification fix"))
+
     def test_fix_screenshot_feature(self):
         self.assertFalse(is_screenshot_text("修复截图功能的bug"))
 

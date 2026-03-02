@@ -302,16 +302,27 @@ def is_screenshot_text(text: str) -> bool:
     low = (text or "").strip().lower()
     if not low:
         return False
-    # 1) Text starts with a direct screenshot command
-    cmd_prefixes = ["/screenshot", "截图", "截屏", "screenshot"]
-    if any(low.startswith(p) for p in cmd_prefixes):
+    # 1) Explicit slash command is always treated as screenshot intent.
+    if low.startswith("/screenshot"):
         return True
-    # 2) Common polite-prefix + screenshot verb patterns
+    # 2) Guard against task descriptions that start with screenshot keywords.
+    #    Examples: "截图命令误判修复", "screenshot command misclassification fix"
+    if re.match(
+        r"^(截图|截屏)\s*(命令|功能|模块|问题|误判|任务|报告|日志|流程|逻辑|修复|排查|检查|优化|失败|异常|bug)",
+        low,
+    ):
+        return False
+    if re.match(
+        r"^screenshot\s*(command|feature|module|issue|task|report|log|flow|logic|fix|debug|bug)",
+        low,
+    ):
+        return False
+    # 3) Common polite-prefix + screenshot verb patterns
     if re.match(r"^(请|帮我|请帮我|请帮忙|帮忙)?(截图|截屏|截个图|截个屏)", low):
         return True
     if re.match(r"^(take\s+a?\s*)?(screenshot|screen\s*shot|screen\s*cap)", low):
         return True
-    # 3) Very short text (≤ 15 chars) with screen-related keywords
+    # 4) Very short text (<= 15 chars) with screen-related keywords
     if len(low) <= 15:
         keys = ["screen", "屏幕", "多屏", "双屏", "all screens"]
         return any(k in low for k in keys)
