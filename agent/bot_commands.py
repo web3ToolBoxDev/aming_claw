@@ -294,21 +294,28 @@ def is_ops_allowed(chat_id: int, user_id: int) -> bool:
 
 
 def is_screenshot_text(text: str) -> bool:
+    """Return True only when the user's PRIMARY intent is to take a screenshot.
+
+    Avoids false positives when screenshot keywords appear incidentally in longer
+    task descriptions (e.g. "修复截图功能", "测试报告、截图、日志").
+    """
     low = (text or "").strip().lower()
     if not low:
         return False
-    keys = [
-        "/screenshot",
-        "截图",
-        "截屏",
-        "screen",
-        "screenshot",
-        "屏幕",
-        "多屏",
-        "双屏",
-        "all screens",
-    ]
-    return any(k in low for k in keys)
+    # 1) Text starts with a direct screenshot command
+    cmd_prefixes = ["/screenshot", "截图", "截屏", "screenshot"]
+    if any(low.startswith(p) for p in cmd_prefixes):
+        return True
+    # 2) Common polite-prefix + screenshot verb patterns
+    if re.match(r"^(请|帮我|请帮我|请帮忙|帮忙)?(截图|截屏|截个图|截个屏)", low):
+        return True
+    if re.match(r"^(take\s+a?\s*)?(screenshot|screen\s*shot|screen\s*cap)", low):
+        return True
+    # 3) Very short text (≤ 15 chars) with screen-related keywords
+    if len(low) <= 15:
+        keys = ["screen", "屏幕", "多屏", "双屏", "all screens"]
+        return any(k in low for k in keys)
+    return False
 
 
 def parse_task_text(text: str) -> Optional[str]:
