@@ -42,7 +42,8 @@ class TestSafeCallbackData(unittest.TestCase):
     def test_all_archive_button_patterns(self):
         """Test that all archive button callback_data patterns fit in 64 bytes."""
         # Worst case: 48-byte archive ID (max from _build_archive_id)
-        aid = "arc-" + "a" * 24 + "-20260302-abcdef"  # 48 bytes
+        # arc-(4) + slug(28) + -(1) + date(8) + -(1) + uuid(6) = 48
+        aid = "arc-" + "a" * 28 + "-20260302-abcdef"  # 48 bytes
         self.assertEqual(len(aid.encode("utf-8")), 48)
 
         patterns = [
