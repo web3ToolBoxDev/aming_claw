@@ -1081,6 +1081,8 @@ def process_pipeline(task: Dict, processing: Path) -> Dict:
             "backend": backend,
             "stage_index": i + 1,
             "run": run,
+            "model": model_id,
+            "provider": provider_id,
         })
 
         # Accumulate output for next stage
@@ -1098,10 +1100,8 @@ def process_pipeline(task: Dict, processing: Path) -> Dict:
     noop_reason = last_run.get("noop_reason")
     status = "completed" if last_run.get("returncode", 1) == 0 and not noop_reason else "failed"
     error = noop_reason if status == "failed" and noop_reason else None
-    result = finalize_pipeline_task(task, processing, stage_results, status, error=error)
-    # Attach model info to result for audit trail
-    if isinstance(result, dict):
-        result["stages_model_info"] = stages_model_info
-        if pipeline_routing:
-            result["pipeline_routing"] = pipeline_routing
+    result = finalize_pipeline_task(task, processing, stage_results, status, error=error,
+                                    stages_model_info=stages_model_info)
+    if isinstance(result, dict) and pipeline_routing:
+        result["pipeline_routing"] = pipeline_routing
     return result

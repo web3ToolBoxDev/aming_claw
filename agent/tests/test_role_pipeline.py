@@ -175,7 +175,8 @@ class TestRolePipelinePresetMerge(unittest.TestCase):
         dev = next(s for s in stages if s["name"] == "dev")
         self.assertFalse(dev.get("model"))
 
-    def test_format_shows_model_after_merge(self):
+    @patch("config.get_claude_model", return_value="")
+    def test_format_shows_model_after_merge(self, _):
         """Confirmation message should show model names after merge."""
         set_role_stage_model("pm", "claude-opus-4-6", provider="anthropic", validate=False)
 
@@ -194,7 +195,7 @@ class TestRolePipelinePresetMerge(unittest.TestCase):
         text = format_pipeline_stages(stages)
         self.assertIn("claude-opus-4-6", text)
         self.assertIn("[C]", text)
-        # Unconfigured stages show backend
+        # Unconfigured stages show backend (no global model)
         self.assertIn("dev(claude)", text)
 
     def test_no_role_config_uses_defaults(self):
@@ -218,18 +219,32 @@ class TestRolePipelinePresetMerge(unittest.TestCase):
 class TestFormatRolePipelineStages(unittest.TestCase):
     def test_empty(self):
         result = format_role_pipeline_stages([])
-        self.assertEqual(result, "(未配置)")
+        self.assertEqual(result, "(\u672a\u914d\u7f6e)")
 
-    def test_with_model(self):
+    @patch("config.get_claude_model", return_value="")
+    def test_with_model_no_global(self, _):
         stages = [
             {"name": "pm", "backend": "claude", "model": "claude-opus-4-6", "provider": "anthropic"},
             {"name": "dev", "backend": "claude", "model": "", "provider": ""},
         ]
         result = format_role_pipeline_stages(stages)
-        self.assertIn("产品经理", result)
+        self.assertIn("\u4ea7\u54c1\u7ecf\u7406", result)
         self.assertIn("claude-opus-4-6", result)
         self.assertIn("[C]", result)
-        self.assertIn("全局模型", result)
+        self.assertIn("\u5168\u5c40\u6a21\u578b", result)
+
+    @patch("config.get_model_provider", return_value="anthropic")
+    @patch("config.get_claude_model", return_value="claude-opus-4-6")
+    def test_with_global_model(self, _, __):
+        """When global model is set, unconfigured roles show \u5168\u5c40: model."""
+        stages = [
+            {"name": "pm", "backend": "claude", "model": "", "provider": ""},
+            {"name": "dev", "backend": "claude", "model": "", "provider": ""},
+        ]
+        result = format_role_pipeline_stages(stages)
+        self.assertIn("\u5168\u5c40: claude-opus-4-6", result)
+        self.assertIn("[C]", result)
+        self.assertNotIn("\u4f7f\u7528\u5168\u5c40\u6a21\u578b", result)
 
     def test_openai_tag(self):
         stages = [
@@ -241,7 +256,8 @@ class TestFormatRolePipelineStages(unittest.TestCase):
 
 
 class TestFormatPipelineStagesWithModel(unittest.TestCase):
-    def test_stage_with_model_no_provider(self):
+    @patch("config.get_claude_model", return_value="")
+    def test_stage_with_model_no_provider(self, _):
         stages = [
             {"name": "pm", "backend": "claude", "model": "claude-opus-4-6"},
             {"name": "dev", "backend": "claude"},
@@ -250,7 +266,8 @@ class TestFormatPipelineStagesWithModel(unittest.TestCase):
         self.assertIn("pm(claude-opus-4-6)", result)
         self.assertIn("dev(claude)", result)
 
-    def test_stage_with_model_and_provider(self):
+    @patch("config.get_claude_model", return_value="")
+    def test_stage_with_model_and_provider(self, _):
         stages = [
             {"name": "pm", "backend": "claude", "model": "claude-opus-4-6", "provider": "anthropic"},
             {"name": "test", "backend": "openai", "model": "gpt-4o", "provider": "openai"},

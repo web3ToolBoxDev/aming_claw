@@ -16,13 +16,14 @@ from task_accept import (  # noqa: E402
     acceptance_root,
     build_acceptance_cases,
     build_task_summary,
+    finalize_pipeline_task,
     json_sha256,
     task_inline_keyboard,
     to_pending_acceptance,
     write_acceptance_documents,
     write_run_log,
 )
-from utils import utc_iso  # noqa: E402
+from utils import load_json, utc_iso  # noqa: E402
 
 
 class TestJsonSha256(unittest.TestCase):
@@ -229,6 +230,119 @@ class TestTaskInlineKeyboard(unittest.TestCase):
         # Check callback data contains task code
         all_data = [btn["callback_data"] for row in rows for btn in row]
         self.assertTrue(any("T0001" in d for d in all_data))
+
+
+class TestFinalizePipelineTask(unittest.TestCase):
+    """T3: Verify model/provider persistence in finalize_pipeline_task."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["SHARED_VOLUME_PATH"] = self.tmp.name
+        from utils import tasks_root
+        (tasks_root() / "processing").mkdir(parents=True, exist_ok=True)
+        (tasks_root() / "logs").mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        os.environ.pop("SHARED_VOLUME_PATH", None)
+        self.tmp.cleanup()
+
+    def test_stage_summary_has_model_provider(self):
+        """executor.stages[*] should include model and provider fields."""
+        from utils import tasks_root
+        task = {"task_id": "test-fp-1", "text": "test task"}
+        processing = tasks_root() / "processing" / "test-fp-1.json"
+        stage_results = [
+            {
+                "stage": "pm", "backend": "claude", "stage_index": 1,
+                "model": "claude-opus-4-6", "provider": "anthropic",
+                "run": {"returncode": 0, "elapsed_ms": 1000, "last_message": "done",
+                        "stdout": "out", "stderr": "", "cmd": "echo", "noop_reason": None,
+                        "attempt_count": 1, "git_changed_files": []},
+            },
+            {
+                "stage": "dev", "backend": "claude", "stage_index": 2,
+                "model": "gpt-4o", "provider": "openai",
+                "run": {"returncode": 0, "elapsed_ms": 2000, "last_message": "code done",
+                        "stdout": "out2", "stderr": "", "cmd": "echo2", "noop_reason": None,
+                        "attempt_count": 1, "git_changed_files": ["a.py"]},
+            },
+        ]
+        stages_model_info = [
+            {"stage": "pm", "model": "claude-opus-4-6", "provider": "anthropic"},
+            {"stage": "dev", "model": "gpt-4o", "provider": "openai"},
+        ]
+        result = finalize_pipeline_task(task, processing, stage_results, "completed",
+                                        stages_model_info=stages_model_info)
+        # Check executor.stages has model/provider
+        stages = result["executor"]["stages"]
+        self.assertEqual(stages[0]["model"], "claude-opus-4-6")
+        self.assertEqual(stages[0]["provider"], "anthropic")
+        self.assertEqual(stages[1]["model"], "gpt-4o")
+        self.assertEqual(stages[1]["provider"], "openai")
+        # Check stages_model_info top-level field
+        self.assertIn("stages_model_info", result)
+        self.assertEqual(len(result["stages_model_info"]), 2)
+
+    def test_run_log_stage_details_has_model_provider(self):
+        """logs/{task_id}.run.json stage_details should include model/provider."""
+        from utils import tasks_root
+        task = {"task_id": "test-fp-2", "text": "test task"}
+        processing = tasks_root() / "processing" / "test-fp-2.json"
+        stage_results = [
+            {
+                "stage": "test", "backend": "openai", "stage_index": 1,
+                "model": "gpt-4o", "provider": "openai",
+                "run": {"returncode": 0, "elapsed_ms": 500, "last_message": "ok",
+                        "stdout": "ok", "stderr": "", "cmd": "run", "noop_reason": None,
+                        "attempt_count": 1, "git_changed_files": []},
+            },
+        ]
+        finalize_pipeline_task(task, processing, stage_results, "completed")
+        # Read run log
+        run_log_path = tasks_root() / "logs" / "test-fp-2.run.json"
+        self.assertTrue(run_log_path.exists())
+        run_data = load_json(run_log_path)
+        sd = run_data["stage_details"]
+        self.assertEqual(len(sd), 1)
+        self.assertEqual(sd[0]["model"], "gpt-4o")
+        self.assertEqual(sd[0]["provider"], "openai")
+
+    def test_result_file_persisted_with_model(self):
+        """Result JSON file should contain model/provider in stages."""
+        from utils import tasks_root
+        task = {"task_id": "test-fp-3", "text": "test task"}
+        processing = tasks_root() / "processing" / "test-fp-3.json"
+        stage_results = [
+            {
+                "stage": "qa", "backend": "claude", "stage_index": 1,
+                "model": "claude-sonnet-4-6", "provider": "anthropic",
+                "run": {"returncode": 0, "elapsed_ms": 300, "last_message": "pass",
+                        "stdout": "pass", "stderr": "", "cmd": "test", "noop_reason": None,
+                        "attempt_count": 1, "git_changed_files": []},
+            },
+        ]
+        finalize_pipeline_task(task, processing, stage_results, "completed")
+        # Read persisted file
+        saved = load_json(processing)
+        self.assertEqual(saved["executor"]["stages"][0]["model"], "claude-sonnet-4-6")
+        self.assertEqual(saved["executor"]["stages"][0]["provider"], "anthropic")
+
+    def test_backward_compat_no_model(self):
+        """Stage results without model/provider should default to empty string."""
+        from utils import tasks_root
+        task = {"task_id": "test-fp-4", "text": "test task"}
+        processing = tasks_root() / "processing" / "test-fp-4.json"
+        stage_results = [
+            {
+                "stage": "code", "backend": "codex", "stage_index": 1,
+                "run": {"returncode": 0, "elapsed_ms": 100, "last_message": "done",
+                        "stdout": "out", "stderr": "", "cmd": "run", "noop_reason": None,
+                        "attempt_count": 1, "git_changed_files": []},
+            },
+        ]
+        result = finalize_pipeline_task(task, processing, stage_results, "completed")
+        self.assertEqual(result["executor"]["stages"][0]["model"], "")
+        self.assertEqual(result["executor"]["stages"][0]["provider"], "")
 
 
 if __name__ == "__main__":

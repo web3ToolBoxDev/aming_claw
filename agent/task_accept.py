@@ -258,7 +258,8 @@ def finalize_codex_task(task: Dict, processing: Path, run: Dict, status: str, er
 
 
 def finalize_pipeline_task(
-    task: Dict, processing: Path, stage_results: List[Dict], status: str, error: Optional[str] = None
+    task: Dict, processing: Path, stage_results: List[Dict], status: str,
+    error: Optional[str] = None, stages_model_info: Optional[List[Dict]] = None
 ) -> Dict:
     """Write pipeline result JSON + runlog with per-stage details."""
     last_run = stage_results[-1]["run"] if stage_results else {}
@@ -277,6 +278,8 @@ def finalize_pipeline_task(
         {
             "stage": sr["stage"],
             "backend": sr["backend"],
+            "model": sr.get("model", ""),
+            "provider": sr.get("provider", ""),
             "stage_index": sr["stage_index"],
             "returncode": sr["run"].get("returncode"),
             "elapsed_ms": sr["run"].get("elapsed_ms"),
@@ -306,6 +309,8 @@ def finalize_pipeline_task(
             "stages": stage_summary,
         },
     }
+    if stages_model_info:
+        result["stages_model_info"] = stages_model_info
     if error:
         result["error"] = error
 
@@ -329,6 +334,8 @@ def finalize_pipeline_task(
             {
                 "stage": sr["stage"],
                 "backend": sr["backend"],
+                "model": sr.get("model", ""),
+                "provider": sr.get("provider", ""),
                 "stage_index": sr["stage_index"],
                 "returncode": sr["run"].get("returncode"),
                 "elapsed_ms": sr["run"].get("elapsed_ms"),

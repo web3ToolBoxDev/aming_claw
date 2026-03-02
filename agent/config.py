@@ -223,7 +223,8 @@ def format_pipeline_stages(stages: List[Dict]) -> str:
     """Human-readable stage list showing model name when available.
 
     With model: 'pm(claude-opus-4-6 [C]) → dev(claude-opus-4-6 [C])'
-    Without model (fallback): 'plan(claude) → code(claude) → verify(codex)'
+    Without model (uses global): 'plan(全局: claude-opus-4-6 [C])'
+    Without model (no global): 'plan(claude) → verify(codex)'
     """
     if not stages:
         return "(empty)"
@@ -238,7 +239,14 @@ def format_pipeline_stages(stages: List[Dict]) -> str:
             display = "{} {}".format(model, tag).rstrip() if tag else model
             parts.append("{}({})".format(name, display))
         else:
-            parts.append("{}({})".format(name, backend))
+            global_model = get_claude_model()
+            if global_model:
+                global_provider = get_model_provider()
+                tag = _provider_tag(global_provider)
+                display = "{} {}".format(global_model, tag).rstrip() if tag else global_model
+                parts.append("{}(全局: {})".format(name, display))
+            else:
+                parts.append("{}({})".format(name, backend))
     return " → ".join(parts)
 
 
@@ -329,10 +337,17 @@ def format_role_pipeline_stages(stages: List[Dict]) -> str:
         model = s.get("model", "")
         provider = s.get("provider", "")
         if model:
-            tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
+            tag = _provider_tag(provider)
             lines.append("{} {} \u2192 {} {}".format(emoji, label, model, tag).strip())
         else:
-            lines.append("{} {} \u2192 (\u4f7f\u7528\u5168\u5c40\u6a21\u578b)".format(emoji, label))
+            global_model = get_claude_model()
+            if global_model:
+                global_provider = get_model_provider()
+                tag = _provider_tag(global_provider)
+                display = "{} {}".format(global_model, tag).rstrip() if tag else global_model
+                lines.append("{} {} \u2192 \u5168\u5c40: {}".format(emoji, label, display))
+            else:
+                lines.append("{} {} \u2192 (\u4f7f\u7528\u5168\u5c40\u6a21\u578b)".format(emoji, label))
     return "\n".join(lines)
 
 

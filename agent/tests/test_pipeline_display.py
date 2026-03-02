@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_DIR = REPO_ROOT / "agent"
@@ -30,7 +31,8 @@ class TestFormatPipelineStagesDisplay(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(format_pipeline_stages([]), "(empty)")
 
-    def test_no_model_fallback_to_backend(self):
+    @patch("config.get_claude_model", return_value="")
+    def test_no_model_fallback_to_backend(self, _):
         stages = [
             {"name": "plan", "backend": "claude"},
             {"name": "code", "backend": "codex"},
@@ -62,7 +64,8 @@ class TestFormatPipelineStagesDisplay(unittest.TestCase):
         self.assertNotIn("[C]", result)
         self.assertNotIn("[O]", result)
 
-    def test_mixed_stages(self):
+    @patch("config.get_claude_model", return_value="")
+    def test_mixed_stages(self, _):
         stages = [
             {"name": "pm", "backend": "claude", "model": "claude-opus-4-6", "provider": "anthropic"},
             {"name": "dev", "backend": "claude"},
@@ -74,7 +77,8 @@ class TestFormatPipelineStagesDisplay(unittest.TestCase):
         self.assertIn("test(gpt-4o [O])", result)
         self.assertIn("\u2192", result)
 
-    def test_backward_compat_plan_code_verify(self):
+    @patch("config.get_claude_model", return_value="")
+    def test_backward_compat_plan_code_verify(self, _):
         """Non-role pipeline presets should still work with backend fallback."""
         stages = [
             {"name": "plan", "backend": "claude"},
@@ -84,6 +88,19 @@ class TestFormatPipelineStagesDisplay(unittest.TestCase):
         result = format_pipeline_stages(stages)
         self.assertIn("plan(claude)", result)
         self.assertIn("verify(codex)", result)
+
+    @patch("config.get_model_provider", return_value="anthropic")
+    @patch("config.get_claude_model", return_value="claude-opus-4-6")
+    def test_global_model_replaces_backend(self, _, __):
+        """When global model is set, stages without model show \u5168\u5c40: model_name."""
+        stages = [
+            {"name": "plan", "backend": "claude"},
+            {"name": "code", "backend": "codex"},
+        ]
+        result = format_pipeline_stages(stages)
+        self.assertIn("plan(\u5168\u5c40: claude-opus-4-6 [C])", result)
+        self.assertIn("code(\u5168\u5c40: claude-opus-4-6 [C])", result)
+        self.assertNotIn("plan(claude)", result)
 
 
 class TestFormatStageExecutionSummary(unittest.TestCase):
@@ -154,7 +171,7 @@ class TestFormatStageExecutionSummary(unittest.TestCase):
         self.assertIn("\u2705", result)
 
     def test_unexecuted_stage(self):
-        """Stage with no elapsed_ms and no returncode should show (未执行)."""
+        """Stage with no elapsed_ms and no returncode should show (\u672a\u6267\u884c)."""
         func = self._import_func()
         task = {
             "executor": {
@@ -167,6 +184,23 @@ class TestFormatStageExecutionSummary(unittest.TestCase):
         }
         result = func(task)
         self.assertIn("\u672a\u6267\u884c", result)
+
+    def test_pipeline_with_stage_level_model(self):
+        """T3: stages with model/provider fields should be used directly."""
+        func = self._import_func()
+        task = {
+            "executor": {
+                "action": "pipeline",
+                "stages": [
+                    {"stage": "pm", "stage_index": 1, "backend": "claude",
+                     "model": "claude-opus-4-6", "provider": "anthropic",
+                     "returncode": 0, "elapsed_ms": 2000, "noop_reason": None},
+                ],
+            },
+        }
+        result = func(task)
+        self.assertIn("claude-opus-4-6", result)
+        self.assertIn("[C]", result)
 
 
 if __name__ == "__main__":

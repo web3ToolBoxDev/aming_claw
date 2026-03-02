@@ -633,10 +633,10 @@ def format_stage_execution_summary(task: Dict) -> str:
         emoji = role_def.get("emoji", "")
         label = role_def.get("label", stage_name)
 
-        # Determine model display from stages_model_info, fallback to backend
+        # Determine model display: prefer stage-level (T3), fallback to stages_model_info, then backend
         mi = model_map.get(stage_name, {})
-        model = mi.get("model", "")
-        provider = mi.get("provider", "")
+        model = s.get("model", "") or mi.get("model", "")
+        provider = s.get("provider", "") or mi.get("provider", "")
         if model and model != "(default)":
             from config import _provider_tag
             tag = _provider_tag(provider)
@@ -945,17 +945,31 @@ def handle_callback_query(cb: Dict) -> None:
                                 stage["provider"] = rc.get("provider", "")
                 set_pipeline_stages(stages, changed_by=user_id)
                 answer_callback_query(cb_id, "流水线已配置")
-                send_text(
-                    chat_id,
-                    "\u2699\ufe0f \u6d41\u6c34\u7ebf\u5df2\u914d\u7f6e\n"
-                    "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                    "\u9884\u8bbe: {}\n"
-                    "\u9636\u6bb5: {}\n\n"
-                    "\u65b0\u5efa\u4efb\u52a1\u5c06\u6309\u6b64\u6d41\u6c34\u7ebf\u6267\u884c".format(
-                        preset_name, format_pipeline_stages(stages)
-                    ),
-                    reply_markup=back_to_menu_keyboard(),
-                )
+                if preset_name == "role_pipeline":
+                    stage_display = format_role_pipeline_stages(stages)
+                    send_text(
+                        chat_id,
+                        "\u2699\ufe0f \u6d41\u6c34\u7ebf\u5df2\u914d\u7f6e\n"
+                        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                        "\u9884\u8bbe: {}\n"
+                        "\u9636\u6bb5:\n{}\n\n"
+                        "\u65b0\u5efa\u4efb\u52a1\u5c06\u6309\u6b64\u6d41\u6c34\u7ebf\u6267\u884c".format(
+                            preset_name, stage_display
+                        ),
+                        reply_markup=back_to_menu_keyboard(),
+                    )
+                else:
+                    send_text(
+                        chat_id,
+                        "\u2699\ufe0f \u6d41\u6c34\u7ebf\u5df2\u914d\u7f6e\n"
+                        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                        "\u9884\u8bbe: {}\n"
+                        "\u9636\u6bb5: {}\n\n"
+                        "\u65b0\u5efa\u4efb\u52a1\u5c06\u6309\u6b64\u6d41\u6c34\u7ebf\u6267\u884c".format(
+                            preset_name, format_pipeline_stages(stages)
+                        ),
+                        reply_markup=back_to_menu_keyboard(),
+                    )
             else:
                 answer_callback_query(cb_id, "未知预设", show_alert=True)
             return
@@ -1418,7 +1432,23 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
             answer_callback_query(cb_id, "无权限", show_alert=True)
             return
-        preset_info = "\n".join("  {} \u2192 {}".format(k, format_pipeline_stages(v)) for k, v in PIPELINE_PRESETS.items())
+        preset_lines = []
+        for k, v in PIPELINE_PRESETS.items():
+            if k == "role_pipeline":
+                display_stages = [dict(s) for s in v]
+                role_stages = get_role_pipeline_stages()
+                role_config = {s["name"]: s for s in role_stages if "name" in s}
+                for stage in display_stages:
+                    sname = stage.get("name", "")
+                    if sname in role_config:
+                        rc = role_config[sname]
+                        if rc.get("model"):
+                            stage["model"] = rc["model"]
+                            stage["provider"] = rc.get("provider", "")
+                preset_lines.append("  {} \u2192\n{}".format(k, format_role_pipeline_stages(display_stages)))
+            else:
+                preset_lines.append("  {} \u2192 {}".format(k, format_pipeline_stages(v)))
+        preset_info = "\n".join(preset_lines)
         send_text(
             chat_id,
             "\u2699\ufe0f \u6d41\u6c34\u7ebf\u914d\u7f6e\n"
@@ -2109,7 +2139,18 @@ def _handle_stage_detail_callback(cb_id: str, data: str, chat_id: int, user_id: 
         rc = sd.get("returncode")
         time_str = " ({:.1f}s)".format(elapsed / 1000.0) if elapsed else ""
 
-        lines.append("\n{} {}. {} {}{}".format(emoji, idx, label, "\u274c" if noop or (rc and rc != 0) else "\u2705", time_str))
+        # Model display with fallback for backward compatibility
+        model = sd.get("model", "")
+        provider = sd.get("provider", "")
+        if model and model != "(default)":
+            from config import _provider_tag
+            tag = _provider_tag(provider)
+            model_display = "{} {}".format(model, tag).rstrip()
+        else:
+            model_display = sd.get("backend", "\u672a\u77e5")
+
+        status_icon = "\u274c" if noop or (rc and rc != 0) else "\u2705"
+        lines.append("\n{} {}. {} {} \u2192 {}{}".format(emoji, idx, label, status_icon, model_display, time_str))
         if noop:
             lines.append("  noop: {}".format(noop[:100]))
         # Show output preview (last_message preferred, fallback stdout)

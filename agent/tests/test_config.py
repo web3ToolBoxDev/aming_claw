@@ -64,20 +64,32 @@ class TestFormatPipelineStages(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(format_pipeline_stages([]), "(empty)")
 
-    def test_single_stage(self):
+    @patch("config.get_claude_model", return_value="")
+    def test_single_stage_no_global(self, _):
+        """No model set + no global model → fallback to backend name."""
         result = format_pipeline_stages([{"name": "code", "backend": "claude"}])
         self.assertEqual(result, "code(claude)")
 
-    def test_multi_stage(self):
+    @patch("config.get_claude_model", return_value="")
+    def test_multi_stage_no_global(self, _):
         stages = [
             {"name": "plan", "backend": "claude"},
             {"name": "code", "backend": "claude"},
             {"name": "verify", "backend": "codex"},
         ]
         result = format_pipeline_stages(stages)
-        self.assertIn("→", result)
+        self.assertIn("\u2192", result)
         self.assertIn("plan(claude)", result)
         self.assertIn("verify(codex)", result)
+
+    @patch("config.get_model_provider", return_value="anthropic")
+    @patch("config.get_claude_model", return_value="claude-opus-4-6")
+    def test_global_model_display(self, _, __):
+        """No model set + global model exists → show \u5168\u5c40: model."""
+        result = format_pipeline_stages([{"name": "code", "backend": "claude"}])
+        self.assertIn("\u5168\u5c40:", result)
+        self.assertIn("claude-opus-4-6", result)
+        self.assertIn("[C]", result)
 
 
 class TestKnownBackends(unittest.TestCase):
