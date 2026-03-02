@@ -376,7 +376,8 @@ def _claude_chat_via_api(text: str, provider: str, model: str) -> str:
                   "max_tokens": 4096},
             timeout=120,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            _raise_api_error("OpenAI", resp)
         return resp.json()["choices"][0]["message"]["content"].strip()[-3500:]
     else:
         api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -392,8 +393,27 @@ def _claude_chat_via_api(text: str, provider: str, model: str) -> str:
                   "messages": [{"role": "user", "content": text}]},
             timeout=120,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            _raise_api_error("Anthropic", resp)
         return resp.json()["content"][0]["text"].strip()[-3500:]
+
+
+def _raise_api_error(provider: str, resp) -> None:
+    """Extract error details from API response body and raise informative RuntimeError."""
+    try:
+        body = resp.json()
+        err_obj = body.get("error", {})
+        if isinstance(err_obj, dict):
+            err_type = err_obj.get("type", "")
+            err_msg = err_obj.get("message", "")
+            detail = "{}: {}".format(err_type, err_msg) if err_type else err_msg
+        else:
+            detail = str(err_obj)
+    except Exception:
+        detail = resp.text[:500] if resp.text else ""
+    raise RuntimeError(
+        "{} API {} (HTTP {}): {}".format(provider, "error", resp.status_code, detail or "unknown error")
+    )
 
 
 def run_claude_chat(text: str) -> str:
