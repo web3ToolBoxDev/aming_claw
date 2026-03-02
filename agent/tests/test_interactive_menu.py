@@ -30,6 +30,8 @@ from interactive_menu import (  # noqa: E402
     set_pending_action,
     system_menu_keyboard,
     task_list_action_keyboard,
+    workspace_menu_keyboard,
+    workspace_select_keyboard,
 )
 
 
@@ -131,6 +133,40 @@ class TestKeyboardBuilders(unittest.TestCase):
         all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
         self.assertTrue(any("confirm:restart" in d for d in all_data))
 
+    def test_workspace_menu(self):
+        kb = workspace_menu_keyboard()
+        self._assert_valid_keyboard(kb)
+        all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertTrue(any("workspace_list" in d for d in all_data))
+        self.assertTrue(any("workspace_add" in d for d in all_data))
+        self.assertTrue(any("workspace_remove" in d for d in all_data))
+        self.assertTrue(any("workspace_set_default" in d for d in all_data))
+        self.assertTrue(any("workspace_queue_status" in d for d in all_data))
+
+    def test_workspace_select(self):
+        workspaces = [
+            {"id": "ws-001", "label": "project-a", "is_default": True, "active": True},
+            {"id": "ws-002", "label": "project-b", "is_default": False, "active": True},
+        ]
+        kb = workspace_select_keyboard(workspaces, "ws_test")
+        self._assert_valid_keyboard(kb)
+        all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertTrue(any("ws_test:ws-001" in d for d in all_data))
+        self.assertTrue(any("ws_test:ws-002" in d for d in all_data))
+        # Cancel button
+        self.assertTrue(any("menu:cancel" in d for d in all_data))
+
+    def test_workspace_select_empty(self):
+        kb = workspace_select_keyboard([], "ws_test")
+        self._assert_valid_keyboard(kb)
+        # Should only have cancel button
+        self.assertEqual(len(kb["inline_keyboard"]), 1)
+
+    def test_main_menu_has_workspace(self):
+        kb = main_menu_keyboard()
+        all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertTrue(any("sub_workspace" in d for d in all_data))
+
 
 class TestTextConstants(unittest.TestCase):
     def test_welcome_has_placeholders(self):
@@ -148,11 +184,15 @@ class TestTextConstants(unittest.TestCase):
         self.assertIn("archive", SUBMENU_TEXTS)
         self.assertIn("ops", SUBMENU_TEXTS)
         self.assertIn("security", SUBMENU_TEXTS)
+        self.assertIn("workspace", SUBMENU_TEXTS)
 
     def test_pending_prompts(self):
         self.assertIn("new_task", PENDING_PROMPTS)
         self.assertIn("screenshot", PENDING_PROMPTS)
         self.assertIn("set_workspace", PENDING_PROMPTS)
+        self.assertIn("workspace_remove", PENDING_PROMPTS)
+        self.assertIn("workspace_set_default", PENDING_PROMPTS)
+        self.assertIn("new_task_with_workspace", PENDING_PROMPTS)
 
 
 if __name__ == "__main__":

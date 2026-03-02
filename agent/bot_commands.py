@@ -59,6 +59,8 @@ from interactive_menu import (
     archive_menu_keyboard,
     ops_menu_keyboard,
     security_menu_keyboard,
+    workspace_menu_keyboard,
+    workspace_select_keyboard,
     backend_select_keyboard,
     pipeline_preset_keyboard,
     cancel_keyboard,
@@ -73,6 +75,16 @@ from interactive_menu import (
     HELP_TEXT,
     SUBMENU_TEXTS,
     PENDING_PROMPTS,
+)
+from workspace_queue import (
+    enqueue_task,
+    dequeue_task,
+    list_queue,
+    list_all_queues,
+    queue_length,
+    should_queue_task,
+    promote_next_queued_task,
+    remove_from_queue,
 )
 
 
@@ -745,6 +757,50 @@ def handle_callback_query(cb: Dict) -> None:
                 answer_callback_query(cb_id, "未知预设", show_alert=True)
             return
 
+        # ---- Workspace selection callbacks ----
+        if data.startswith("ws_task_select:"):
+            ws_id = data.split(":", 1)[1].strip()
+            from workspace_registry import get_workspace as _get_ws_sel
+            ws = _get_ws_sel(ws_id)
+            if not ws:
+                answer_callback_query(cb_id, "\u5de5\u4f5c\u533a\u57df\u4e0d\u5b58\u5728", show_alert=True)
+                return
+            set_pending_action(chat_id, user_id, "new_task_with_workspace", {"ws_id": ws_id, "ws_label": ws.get("label", ws_id)})
+            send_text(
+                chat_id,
+                PENDING_PROMPTS["new_task_with_workspace"].format(ws_label=ws.get("label", ws_id)),
+                reply_markup=cancel_keyboard(),
+            )
+            answer_callback_query(cb_id, "\u5df2\u9009: {}".format(ws.get("label", ws_id)))
+            return
+
+        if data.startswith("ws_remove:"):
+            ws_id = data.split(":", 1)[1].strip()
+            from workspace_registry import remove_workspace as _rm_ws
+            if _rm_ws(ws_id):
+                send_text(chat_id, "\u5de5\u4f5c\u76ee\u5f55\u5df2\u79fb\u9664: {}".format(ws_id), reply_markup=back_to_menu_keyboard())
+                answer_callback_query(cb_id, "\u5df2\u5220\u9664")
+            else:
+                send_text(chat_id, "\u5de5\u4f5c\u76ee\u5f55\u672a\u627e\u5230: {}".format(ws_id))
+                answer_callback_query(cb_id, "\u672a\u627e\u5230", show_alert=True)
+            return
+
+        if data.startswith("ws_default:"):
+            ws_id = data.split(":", 1)[1].strip()
+            from workspace_registry import set_default_workspace as _set_def, get_workspace as _get_ws_d
+            if _set_def(ws_id):
+                ws = _get_ws_d(ws_id)
+                send_text(
+                    chat_id,
+                    "\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55\u5df2\u8bbe\u7f6e: {} ({})".format(ws_id, ws.get("label", "") if ws else ""),
+                    reply_markup=back_to_menu_keyboard(),
+                )
+                answer_callback_query(cb_id, "\u5df2\u8bbe\u7f6e\u9ed8\u8ba4")
+            else:
+                send_text(chat_id, "\u5de5\u4f5c\u76ee\u5f55\u672a\u627e\u5230: {}".format(ws_id))
+                answer_callback_query(cb_id, "\u672a\u627e\u5230", show_alert=True)
+            return
+
         # ---- Confirm callbacks (destructive actions) ----
         if data.startswith("confirm:"):
             _handle_confirm_callback(cb_id, data, chat_id, user_id)
@@ -838,15 +894,37 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         answer_callback_query(cb_id, "安全认证")
         return
 
-    # -- New Task: prompt for description --
-    if action == "new_task":
-        set_pending_action(chat_id, user_id, "new_task")
+    # -- Sub-menu: Workspace Management --
+    if action == "sub_workspace":
         send_text(
             chat_id,
-            PENDING_PROMPTS["new_task"],
-            reply_markup=cancel_keyboard(),
+            SUBMENU_TEXTS["workspace"],
+            reply_markup=workspace_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入任务内容")
+        answer_callback_query(cb_id, "工作区管理")
+        return
+
+    # -- New Task: show workspace selection if multiple workspaces --
+    if action == "new_task":
+        from workspace_registry import list_workspaces as _list_ws_for_task
+        workspaces = _list_ws_for_task()
+        if len(workspaces) > 1:
+            send_text(
+                chat_id,
+                "\U0001f4dd \u65b0\u5efa\u4efb\u52a1\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u8bf7\u9009\u62e9\u4efb\u52a1\u6267\u884c\u7684\u5de5\u4f5c\u533a\u57df:",
+                reply_markup=workspace_select_keyboard(workspaces, "ws_task_select"),
+            )
+            answer_callback_query(cb_id, "选择工作区")
+        else:
+            set_pending_action(chat_id, user_id, "new_task")
+            send_text(
+                chat_id,
+                PENDING_PROMPTS["new_task"],
+                reply_markup=cancel_keyboard(),
+            )
+            answer_callback_query(cb_id, "请输入任务内容")
         return
 
     # -- Task List: execute directly --
@@ -1127,6 +1205,67 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         answer_callback_query(cb_id, "请输入路径")
         return
 
+    # -- Workspace Remove: show selection or prompt --
+    if action == "workspace_remove":
+        from workspace_registry import list_workspaces as _list_ws_rm
+        workspaces = _list_ws_rm(include_inactive=True)
+        if not workspaces:
+            send_text(chat_id, "\u5c1a\u672a\u6ce8\u518c\u4efb\u4f55\u5de5\u4f5c\u76ee\u5f55\u3002", reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, "\u65e0\u5de5\u4f5c\u76ee\u5f55")
+            return
+        send_text(
+            chat_id,
+            "\u2796 \u5220\u9664\u5de5\u4f5c\u76ee\u5f55\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u8bf7\u9009\u62e9\u8981\u5220\u9664\u7684\u5de5\u4f5c\u76ee\u5f55:",
+            reply_markup=workspace_select_keyboard(workspaces, "ws_remove"),
+        )
+        answer_callback_query(cb_id, "\u9009\u62e9\u8981\u5220\u9664\u7684\u5de5\u4f5c\u76ee\u5f55")
+        return
+
+    # -- Workspace Set Default: show selection --
+    if action == "workspace_set_default":
+        from workspace_registry import list_workspaces as _list_ws_def
+        workspaces = _list_ws_def()
+        if not workspaces:
+            send_text(chat_id, "\u5c1a\u672a\u6ce8\u518c\u4efb\u4f55\u5de5\u4f5c\u76ee\u5f55\u3002", reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, "\u65e0\u5de5\u4f5c\u76ee\u5f55")
+            return
+        send_text(
+            chat_id,
+            "\u2b50 \u8bbe\u7f6e\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u8bf7\u9009\u62e9\u8981\u8bbe\u7f6e\u4e3a\u9ed8\u8ba4\u7684\u5de5\u4f5c\u76ee\u5f55:",
+            reply_markup=workspace_select_keyboard(workspaces, "ws_default"),
+        )
+        answer_callback_query(cb_id, "\u9009\u62e9\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55")
+        return
+
+    # -- Workspace Queue Status: show all queues --
+    if action == "workspace_queue_status":
+        all_queues = list_all_queues()
+        if not all_queues or all(len(q) == 0 for q in all_queues.values()):
+            send_text(
+                chat_id,
+                "\u5f53\u524d\u6240\u6709\u5de5\u4f5c\u533a\u57df\u65e0\u6392\u961f\u4efb\u52a1\u3002",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            answer_callback_query(cb_id, "\u65e0\u6392\u961f\u4efb\u52a1")
+            return
+        from workspace_registry import get_workspace as _get_ws_q
+        lines = ["\U0001f4ca \u5de5\u4f5c\u533a\u57df\u4efb\u52a1\u961f\u5217:"]
+        for ws_id, tasks in all_queues.items():
+            if not tasks:
+                continue
+            ws = _get_ws_q(ws_id)
+            ws_label = ws.get("label", ws_id) if ws else ws_id
+            lines.append("\n{} ({}\u4e2a\u6392\u961f):".format(ws_label, len(tasks)))
+            for i, t in enumerate(tasks, 1):
+                lines.append("  {}. [{}] {}".format(
+                    i,
+                    t.get("task_code", "-"),
+                    (t.get("text", "") or "")[:60],
+                ))
+        send_text(chat_id, "\n".join(lines), reply_markup=back_to_menu_keyboard())
+        answer_callback_query(cb_id, "\u961f\u5217\u72b6\u6001")
+        return
+
     # -- Dispatch Status: execute directly --
     if action == "dispatch_status":
         handle_command(chat_id, user_id, "/dispatch_status")
@@ -1188,13 +1327,60 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
         task_code = task.get("task_code", "-")
         send_text(
             chat_id,
-            "任务已创建: [{code}] {task_id}\n状态: pending\n内容: {text}".format(
+            "\u4efb\u52a1\u5df2\u521b\u5efa: [{code}] {task_id}\n\u72b6\u6001: pending\n\u5185\u5bb9: {text}".format(
                 code=task_code,
                 task_id=task_id,
                 text=t[:200],
             ),
             reply_markup=task_inline_keyboard(task_code),
         )
+        return True
+
+    # -- New Task with Workspace Selection --
+    if action == "new_task_with_workspace":
+        ws_id = context.get("ws_id", "")
+        ws_label = context.get("ws_label", ws_id)
+        if ws_id and should_queue_task(ws_id):
+            # Workspace has active task, queue this one
+            from task_state import register_task_created as _reg_task, load_runtime_state
+            from utils import new_task_id as _new_tid
+            q_task_id = _new_tid()
+            q_info = {
+                "task_id": q_task_id,
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "text": t,
+                "action": infer_action(t),
+                "task_code": "",
+            }
+            pos = enqueue_task(ws_id, q_info)
+            send_text(
+                chat_id,
+                "\u5de5\u4f5c\u533a [{ws}] \u5f53\u524d\u6709\u4efb\u52a1\u6267\u884c\u4e2d\uff0c\u5df2\u52a0\u5165\u961f\u5217\u3002\n"
+                "\u961f\u5217\u4f4d\u7f6e: \u7b2c{pos}\u4e2a\n"
+                "\u5185\u5bb9: {text}\n\n"
+                "\u524d\u4e00\u4efb\u52a1\u9a8c\u6536\u901a\u8fc7\u540e\u5c06\u81ea\u52a8\u542f\u52a8\u3002".format(
+                    ws=ws_label,
+                    pos=pos,
+                    text=t[:200],
+                ),
+                reply_markup=back_to_menu_keyboard(),
+            )
+        else:
+            # No active task, create immediately with workspace targeting
+            task_id = create_task_for_workspace(chat_id, user_id, t, ws_id, ws_label)
+            task = load_json(task_file("pending", task_id))
+            task_code = task.get("task_code", "-")
+            send_text(
+                chat_id,
+                "\u4efb\u52a1\u5df2\u521b\u5efa: [{code}] {task_id}\n\u5de5\u4f5c\u533a: {ws}\n\u72b6\u6001: pending\n\u5185\u5bb9: {text}".format(
+                    code=task_code,
+                    task_id=task_id,
+                    ws=ws_label,
+                    text=t[:200],
+                ),
+                reply_markup=task_inline_keyboard(task_code),
+            )
         return True
 
     # -- Screenshot --
@@ -1281,6 +1467,16 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
     # -- Workspace Add --
     if action == "workspace_add":
         handle_command(chat_id, user_id, "/workspace_add {}".format(t))
+        return True
+
+    # -- Workspace Remove (text input fallback) --
+    if action == "workspace_remove":
+        handle_command(chat_id, user_id, "/workspace_remove {}".format(t))
+        return True
+
+    # -- Workspace Set Default (text input fallback) --
+    if action == "workspace_set_default":
+        handle_command(chat_id, user_id, "/workspace_default {}".format(t))
         return True
 
     return False
@@ -1946,7 +2142,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
 
         send_text(
             chat_id,
-            "任务 [{code}] {task_id} 验收通过并归档。\n状态: 验收通过\narchive_id={archive_id}{git_msg}\n可用 /archive_show {archive_id} 查看归档详情。".format(
+            "\u4efb\u52a1 [{code}] {task_id} \u9a8c\u6536\u901a\u8fc7\u5e76\u5f52\u6863\u3002\n\u72b6\u6001: \u9a8c\u6536\u901a\u8fc7\narchive_id={archive_id}{git_msg}\n\u53ef\u7528 /archive_show {archive_id} \u67e5\u770b\u5f52\u6863\u8be6\u60c5\u3002".format(
                 code=found.get("task_code", "-"),
                 task_id=found.get("task_id", ""),
                 archive_id=archive_meta.get("archive_id", ""),
@@ -1955,7 +2151,11 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         )
         archive_path = Path(str(archive_meta.get("archive_file") or ""))
         if archive_path.exists():
-            send_text(chat_id, "归档文件已生成: {}".format(str(archive_path)))
+            send_text(chat_id, "\u5f52\u6863\u6587\u4ef6\u5df2\u751f\u6210: {}".format(str(archive_path)))
+
+        # ── Auto-launch queued tasks for this workspace ──
+        _auto_launch_queued_task(found, chat_id)
+
         return True
 
     if t.startswith("/reject"):
@@ -2517,3 +2717,81 @@ def create_task(chat_id: int, user_id: int, raw_text: str) -> str:
     task["task_code"] = register_task_created(task)
     save_json(task_file("pending", task_id), task)
     return task_id
+
+
+def create_task_for_workspace(chat_id: int, user_id: int, text: str, ws_id: str, ws_label: str) -> str:
+    """Create a task explicitly targeting a specific workspace by ID."""
+    task_id = new_task_id()
+    action = infer_action(text)
+
+    task = {
+        "task_id": task_id,
+        "chat_id": chat_id,
+        "requested_by": user_id,
+        "action": action,
+        "text": text.strip(),
+        "status": "pending",
+        "created_at": utc_iso(),
+        "updated_at": utc_iso(),
+        "target_workspace_id": ws_id,
+        "target_workspace": ws_label,
+    }
+
+    task["task_code"] = register_task_created(task)
+    save_json(task_file("pending", task_id), task)
+    return task_id
+
+
+def _auto_launch_queued_task(accepted_task: Dict, chat_id: int) -> None:
+    """After a task is accepted, check if there are queued tasks for the same workspace.
+
+    If so, promote the next one to pending and notify the user.
+    """
+    # Determine workspace ID of the accepted task
+    ws_id = str(accepted_task.get("target_workspace_id", "")).strip()
+    if not ws_id:
+        ws_label = str(accepted_task.get("target_workspace", "")).strip()
+        if ws_label:
+            from workspace_registry import find_workspace_by_label
+            ws = find_workspace_by_label(ws_label)
+            if ws:
+                ws_id = ws["id"]
+    if not ws_id:
+        # Try to resolve from workspace_registry by default
+        from workspace_registry import get_default_workspace
+        ws = get_default_workspace()
+        if ws:
+            ws_id = ws["id"]
+    if not ws_id:
+        return
+
+    pending = queue_length(ws_id)
+    if pending == 0:
+        return
+
+    promoted = promote_next_queued_task(ws_id)
+    if not promoted:
+        return
+
+    from workspace_registry import get_workspace as _get_ws_auto
+    ws = _get_ws_auto(ws_id)
+    ws_label_str = ws.get("label", ws_id) if ws else ws_id
+    remaining = queue_length(ws_id)
+
+    send_text(
+        chat_id,
+        "\U0001f504 \u961f\u5217\u4efb\u52a1\u81ea\u52a8\u542f\u52a8\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u5de5\u4f5c\u533a: {ws}\n"
+        "\u4efb\u52a1: [{code}] {task_id}\n"
+        "\u5185\u5bb9: {text}\n"
+        "\u72b6\u6001: pending (\u5df2\u52a0\u5165\u6267\u884c\u961f\u5217)\n"
+        "\u5269\u4f59\u6392\u961f: {remaining}\u4e2a".format(
+            ws=ws_label_str,
+            code=promoted.get("task_code", "-"),
+            task_id=promoted.get("task_id", ""),
+            text=(promoted.get("text", "") or "")[:200],
+            remaining=remaining,
+        ),
+        reply_markup=task_inline_keyboard(promoted.get("task_code", "-")),
+    )

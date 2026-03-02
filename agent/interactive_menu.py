@@ -99,6 +99,9 @@ def main_menu_keyboard() -> Dict:
                 {"text": "\U0001f527 \u8fd0\u7ef4\u64cd\u4f5c", "callback_data": "menu:sub_ops"},
                 {"text": "\U0001f512 \u5b89\u5168\u8ba4\u8bc1", "callback_data": "menu:sub_security"},
             ],
+            [
+                {"text": "\U0001f4c1 \u5de5\u4f5c\u533a\u7ba1\u7406", "callback_data": "menu:sub_workspace"},
+            ],
         ]
     }
 
@@ -178,6 +181,49 @@ def ops_menu_keyboard() -> Dict:
             ],
         ]
     }
+
+
+def workspace_menu_keyboard() -> Dict:
+    """Sub-menu: workspace management."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "\U0001f4c1 \u5de5\u4f5c\u76ee\u5f55\u5217\u8868", "callback_data": "menu:workspace_list"},
+                {"text": "\u2795 \u6dfb\u52a0\u5de5\u4f5c\u76ee\u5f55", "callback_data": "menu:workspace_add"},
+            ],
+            [
+                {"text": "\u2796 \u5220\u9664\u5de5\u4f5c\u76ee\u5f55", "callback_data": "menu:workspace_remove"},
+                {"text": "\u2b50 \u8bbe\u7f6e\u9ed8\u8ba4", "callback_data": "menu:workspace_set_default"},
+            ],
+            [
+                {"text": "\U0001f4ca \u961f\u5217\u72b6\u6001", "callback_data": "menu:workspace_queue_status"},
+                {"text": "\U0001f4ca \u8c03\u5ea6\u5668\u72b6\u6001", "callback_data": "menu:dispatch_status"},
+            ],
+            [
+                {"text": "\u00ab \u8fd4\u56de\u4e3b\u83dc\u5355", "callback_data": "menu:main"},
+            ],
+        ]
+    }
+
+
+def workspace_select_keyboard(workspaces: List[Dict], callback_prefix: str = "ws_select") -> Dict:
+    """Build a dynamic keyboard for workspace selection.
+
+    Each workspace gets a button with callback_data: <prefix>:<ws_id>
+    """
+    rows: List[List[Dict]] = []
+    for ws in workspaces:
+        label = ws.get("label", ws.get("id", "?"))
+        ws_id = ws.get("id", "")
+        flags = []
+        if ws.get("is_default"):
+            flags.append("\u2b50")
+        if not ws.get("active", True):
+            flags.append("\u26d4")
+        display = "{}{}".format(" ".join(flags) + " " if flags else "", label)
+        rows.append([{"text": display, "callback_data": "{}:{}".format(callback_prefix, ws_id)}])
+    rows.append([{"text": "\u00ab \u53d6\u6d88", "callback_data": "menu:cancel"}])
+    return {"inline_keyboard": rows}
 
 
 def security_menu_keyboard() -> Dict:
@@ -385,6 +431,14 @@ SUBMENU_TEXTS = {
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "\u9009\u62e9\u8981\u6267\u884c\u7684\u64cd\u4f5c:"
     ),
+    "workspace": (
+        "\U0001f4c1 \u5de5\u4f5c\u533a\u7ba1\u7406\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u7ba1\u7406\u5de5\u4f5c\u76ee\u5f55\uff1a\u6dfb\u52a0\u3001\u5220\u9664\u3001\u8bbe\u7f6e\u9ed8\u8ba4\n"
+        "\u67e5\u770b\u4efb\u52a1\u961f\u5217\u548c\u8c03\u5ea6\u5668\u72b6\u6001\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u9009\u62e9\u8981\u6267\u884c\u7684\u64cd\u4f5c:"
+    ),
 }
 
 
@@ -470,5 +524,24 @@ PENDING_PROMPTS = {
         "\u8bf7\u8f93\u5165\u5de5\u4f5c\u76ee\u5f55\u8def\u5f84\u548c\u53ef\u9009\u6807\u7b7e\n"
         "\u683c\u5f0f: <\u8def\u5f84> [\u6807\u7b7e]\n\n"
         "\u793a\u4f8b: C:\\Users\\me\\projects\\my-app my-app"
+    ),
+    "workspace_remove": (
+        "\u2796 \u5220\u9664\u5de5\u4f5c\u76ee\u5f55\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u8bf7\u8f93\u5165\u8981\u5220\u9664\u7684\u5de5\u4f5c\u76ee\u5f55ID:\n\n"
+        "\u793a\u4f8b: ws-abc12345"
+    ),
+    "workspace_set_default": (
+        "\u2b50 \u8bbe\u7f6e\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u8bf7\u8f93\u5165\u8981\u8bbe\u7f6e\u4e3a\u9ed8\u8ba4\u7684\u5de5\u4f5c\u76ee\u5f55ID:\n\n"
+        "\u793a\u4f8b: ws-abc12345"
+    ),
+    "new_task_with_workspace": (
+        "\U0001f4dd \u65b0\u5efa\u4efb\u52a1\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "\u5df2\u9009\u62e9\u5de5\u4f5c\u533a: {ws_label}\n"
+        "\u8bf7\u8f93\u5165\u4efb\u52a1\u8be6\u7ec6\u63cf\u8ff0\uff0c\u53d1\u9001\u6587\u5b57\u5373\u53ef\u521b\u5efa:\n\n"
+        "\u793a\u4f8b: \u5728 src/utils.py \u4e2d\u6dfb\u52a0\u65e5\u5fd7\u529f\u80fd"
     ),
 }
