@@ -22,7 +22,9 @@ from workspace import (  # noqa: E402
     thread_workspace_context,
 )
 from workspace_registry import (  # noqa: E402
+    _paths_equal,
     add_workspace,
+    ensure_current_workspace_registered,
     find_workspace_by_label,
     find_workspace_by_path,
     get_default_workspace,
@@ -271,6 +273,92 @@ class TestResolveWorkspaceForTask(unittest.TestCase):
         task = {"text": "普通任务"}
         resolved = resolve_workspace_for_task(task)
         self.assertEqual(resolved["id"], ws["id"])
+
+
+class TestEnsureCurrentWorkspaceRegistered(unittest.TestCase):
+    """Tests for ensure_current_workspace_registered auto-registration logic."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["SHARED_VOLUME_PATH"] = self.tmp.name
+        self.current_dir = Path(self.tmp.name) / "current-project"
+        self.current_dir.mkdir()
+        self.other_dir = Path(self.tmp.name) / "toolbox"
+        self.other_dir.mkdir()
+        clear_thread_workspace()
+
+    def tearDown(self):
+        os.environ.pop("SHARED_VOLUME_PATH", None)
+        os.environ.pop("CODEX_WORKSPACE", None)
+        clear_thread_workspace()
+        self.tmp.cleanup()
+
+    def test_empty_registry_registers_as_default(self):
+        """AC2.1-1: 注册表为空 → 注册当前目录为默认"""
+        set_thread_workspace(self.current_dir)
+        result = ensure_current_workspace_registered()
+        self.assertIsNotNone(result)
+        self.assertTrue(result["is_default"])
+        self.assertEqual(len(list_workspaces()), 1)
+
+    def test_other_workspace_exists_appends_non_default(self):
+        """AC2.1-2: 注册表有1个其他工作区 → 追加当前目录（非默认）"""
+        add_workspace(self.other_dir, label="toolbox", is_default=True)
+        set_thread_workspace(self.current_dir)
+        result = ensure_current_workspace_registered()
+        self.assertIsNotNone(result)
+        self.assertFalse(result["is_default"])
+        self.assertEqual(len(list_workspaces()), 2)
+
+    def test_current_already_registered_skips(self):
+        """AC2.1-3: 注册表已含当前目录 → 不重复注册"""
+        add_workspace(self.current_dir, label="current")
+        set_thread_workspace(self.current_dir)
+        result = ensure_current_workspace_registered()
+        self.assertIsNone(result)
+        self.assertEqual(len(list_workspaces()), 1)
+
+    def test_multiple_workspaces_appends(self):
+        """AC2.4: 注册表有2+个工作区且不含当前目录 → 追加注册"""
+        add_workspace(self.other_dir, label="toolbox", is_default=True)
+        extra = Path(self.tmp.name) / "extra"
+        extra.mkdir()
+        add_workspace(extra, label="extra")
+        set_thread_workspace(self.current_dir)
+        result = ensure_current_workspace_registered()
+        self.assertIsNotNone(result)
+        self.assertFalse(result["is_default"])
+        self.assertEqual(len(list_workspaces()), 3)
+
+    def test_nonexistent_dir_skips(self):
+        """AC2.1-4: 当前目录不存在 → 不注册"""
+        nonexistent = Path(self.tmp.name) / "does-not-exist"
+        set_thread_workspace(nonexistent)
+        result = ensure_current_workspace_registered()
+        self.assertIsNone(result)
+        self.assertEqual(len(list_workspaces()), 0)
+
+    def test_integration_extra_workspace_then_ensure(self):
+        """集成测试: 有额外工作区 + 当前目录未注册 → list_workspaces 返回2个"""
+        add_workspace(self.other_dir, label="toolbox", is_default=True)
+        self.assertEqual(len(list_workspaces()), 1)
+        set_thread_workspace(self.current_dir)
+        ensure_current_workspace_registered()
+        workspaces = list_workspaces()
+        self.assertEqual(len(workspaces), 2)
+        labels = {ws["label"] for ws in workspaces}
+        self.assertIn("toolbox", labels)
+        self.assertIn(self.current_dir.name, labels)
+
+
+class TestPathsEqual(unittest.TestCase):
+    """Tests for _paths_equal cross-platform path comparison."""
+
+    def test_identical_paths(self):
+        self.assertTrue(_paths_equal(Path("/tmp/a"), Path("/tmp/a")))
+
+    def test_different_paths(self):
+        self.assertFalse(_paths_equal(Path("/tmp/a"), Path("/tmp/b")))
 
 
 class TestLooksLikePath(unittest.TestCase):

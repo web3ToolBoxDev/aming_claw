@@ -1511,7 +1511,8 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
 
     # -- New Task: show workspace selection if multiple workspaces --
     if action == "new_task":
-        from workspace_registry import list_workspaces as _list_ws_for_task
+        from workspace_registry import ensure_current_workspace_registered, list_workspaces as _list_ws_for_task
+        ensure_current_workspace_registered()
         workspaces = _list_ws_for_task()
         if len(workspaces) > 1:
             send_text(

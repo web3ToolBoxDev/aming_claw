@@ -19,11 +19,19 @@ Schema per workspace entry:
   }
 """
 import os
+import sys
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from utils import load_json, save_json, tasks_root, utc_iso
+
+
+def _paths_equal(a: Path, b: Path) -> bool:
+    """Cross-platform path comparison (case-insensitive on Windows)."""
+    if sys.platform == "win32":
+        return str(a).lower() == str(b).lower()
+    return a == b
 
 
 def _registry_file() -> Path:
@@ -233,20 +241,28 @@ def resolve_workspace_for_task(task: Dict) -> Optional[Dict]:
 # ── Migration helper ─────────────────────────────────────────────────────────
 
 def ensure_current_workspace_registered() -> Optional[Dict]:
-    """If no workspaces exist, auto-register the current active workspace."""
-    if list_workspaces():
-        return None  # Already has workspaces
-
+    """当前活跃工作目录若不在注册表中，自动注册。"""
     from workspace import resolve_active_workspace
     current = resolve_active_workspace()
     if not current.exists():
         return None
 
+    current_resolved = current.resolve()
+    existing = list_workspaces()
+
+    # 检查当前路径是否已注册（规范化比较）
+    for ws in existing:
+        ws_path = Path(ws["path"]).resolve()
+        if _paths_equal(current_resolved, ws_path):
+            return None  # 已注册，跳过
+
+    # 未注册，执行注册；注册表为空时设为默认
+    is_first = len(existing) == 0
     try:
         return add_workspace(
             current,
             label=current.name,
-            is_default=True,
+            is_default=is_first,
             created_by=0,
         )
     except ValueError:
