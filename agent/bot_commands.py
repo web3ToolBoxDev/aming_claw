@@ -2865,8 +2865,8 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
                 "task_id": q_task_id,
                 "chat_id": chat_id,
                 "user_id": user_id,
-                "text": t,
-                "action": infer_action(t),
+                "text": txt,
+                "action": infer_action(txt),
                 "task_code": "",
             }
             pos = enqueue_task(ws_id, q_info)
@@ -2884,7 +2884,7 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
             )
         else:
             # No active task, create immediately with workspace targeting
-            task_id = create_task_for_workspace(chat_id, user_id, t, ws_id, ws_label)
+            task_id = create_task_for_workspace(chat_id, user_id, txt, ws_id, ws_label)
             task = load_json(task_file("pending", task_id))
             task_code = task.get("task_code", "-")
             send_text(
@@ -2945,25 +2945,25 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
     # -- Accept with OTP --
     if action == "accept_otp":
         ref = context.get("task_ref", "")
-        handle_command(chat_id, user_id, "/accept {} {}".format(ref, t))
+        handle_command(chat_id, user_id, "/accept {} {}".format(ref, txt))
         return True
 
     # -- Reject with OTP + reason --
     if action == "reject_otp":
         ref = context.get("task_ref", "")
-        handle_command(chat_id, user_id, "/reject {} {}".format(ref, t))
+        handle_command(chat_id, user_id, "/reject {} {}".format(ref, txt))
         return True
 
     # -- Reject with reason only --
     if action == "reject_reason":
         ref = context.get("task_ref", "")
-        handle_command(chat_id, user_id, "/reject {} {}".format(ref, t))
+        handle_command(chat_id, user_id, "/reject {} {}".format(ref, txt))
         return True
 
     # -- Retry with OTP + supplement --
     if action == "retry_otp":
         ref = context.get("task_ref", "")
-        handle_command(chat_id, user_id, "/retry {} {}".format(ref, t))
+        handle_command(chat_id, user_id, "/retry {} {}".format(ref, txt))
         return True
 
     # -- Archive Show --
@@ -3225,7 +3225,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         try:
             body = txt[12:].strip() if len(txt) > 11 else ""
             if body and _looks_like_screenshot_task_tail(body):
-                task_id = create_task(chat_id, user_id, "/task {}".format(t))
+                task_id = create_task(chat_id, user_id, "/task {}".format(txt))
                 task = load_json(task_file("pending", task_id))
                 task_code = task.get("task_code", "-")
                 send_text(
@@ -3233,7 +3233,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                     t("msg.task_created", code="{code}", task_id="{task_id}", text="{text}").format(
                         code=task_code,
                         task_id=task_id,
-                        text=t[:200],
+                        text=txt[:200],
                     ),
                     reply_markup=task_inline_keyboard(task_code),
                 )
@@ -3357,7 +3357,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if not is_ops_allowed(chat_id, user_id):
             send_text(chat_id, "not authorized for /auth_debug")
             return True
-        otp = parse_otp(t)
+        otp = parse_otp(txt)
         if not otp:
             send_text(chat_id, t("msg.usage_auth_debug"))
             return True
@@ -3607,7 +3607,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         return True
 
     if txt.startswith("/mgr_restart"):
-        otp = parse_otp(t)
+        otp = parse_otp(txt)
         ok, msg = verify_risky_operation(chat_id, user_id, otp, "/mgr_restart <OTP>")
         if not ok:
             send_text(chat_id, msg or "operation blocked", reply_markup=back_to_menu_keyboard())
@@ -3621,7 +3621,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         return True
 
     if txt.startswith("/mgr_reinit"):
-        otp = parse_otp(t)
+        otp = parse_otp(txt)
         ok, msg = verify_risky_operation(chat_id, user_id, otp, "/mgr_reinit <OTP>")
         if not ok:
             send_text(chat_id, msg or "operation blocked", reply_markup=back_to_menu_keyboard())
@@ -3635,7 +3635,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         return True
 
     if txt.startswith("/ops_restart"):
-        otp = parse_otp(t)
+        otp = parse_otp(txt)
         ok, msg = verify_risky_operation(chat_id, user_id, otp, "/ops_restart <OTP>")
         if not ok:
             send_text(chat_id, msg or "operation blocked", reply_markup=back_to_menu_keyboard())
@@ -3650,7 +3650,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         return True
 
     if txt.startswith("/ops_set_workspace_pick"):
-        idx, otp = parse_pick_workspace_command(t)
+        idx, otp = parse_pick_workspace_command(txt)
         ok, msg = verify_risky_operation(
             chat_id,
             user_id,
@@ -3680,7 +3680,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         return True
 
     if txt.startswith("/ops_set_workspace"):
-        raw_path, otp = parse_set_workspace_command(t)
+        raw_path, otp = parse_set_workspace_command(txt)
         ok, msg = verify_risky_operation(
             chat_id,
             user_id,
