@@ -56,15 +56,16 @@ def _is_qa_boilerplate(text: str) -> bool:
     has_boilerplate = any(m in text for m in boilerplate_markers)
     if not has_boilerplate:
         return False
-    # Check if there's an actual verdict WITH a value (not just listing "验收结论" in template)
+    # Check if there's an actual verdict WITH a concrete value
+    # (not template options like "通过 / 有条件通过 / 不通过")
     import re
     real_verdict_patterns = [
-        r"验收结论[：:]\s*\S",      # "验收结论：通过" (has value)
-        r"总体结论[：:]\s*\S",      # "总体结论：有条件通过"
-        r"✓通过",                   # actual checkmark
-        r"✗未通过",                 # actual X mark
-        r"⚠部分通过",              # actual warning
-        r"^\d+[.)]\s*.*[：:]\s*[✓✗⚠]", # numbered items with verdict marks
+        r"验收结论[：:]\s*(通过|不通过|有条件通过)(?!\s*/)",  # actual verdict, not "通过 / 不通过"
+        r"总体结论[：:]\s*(通过|不通过|有条件通过)(?!\s*/)",
+        r"✓通过\s+\w",             # actual checkmark with item reference
+        r"✗未通过\s+\w",           # actual X mark with item reference
+        r"⚠部分通过\s+\w",        # actual warning with item reference
+        r"AC-\d+.*[✓✗⚠]",        # "AC-001 ✓通过" acceptance case items
     ]
     for pattern in real_verdict_patterns:
         if re.search(pattern, text, re.MULTILINE):
