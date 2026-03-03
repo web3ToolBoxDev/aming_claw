@@ -562,7 +562,7 @@ def run_screenshot_once(chat_id: int, text: str) -> None:
     payload = {
         "task_id": "chat-screenshot-" + str(int(time.time() * 1000)),
         "action": "take_screenshot",
-        "command_text": text or "请截图",
+        "command_text": text or "screenshot",
     }
     resp = requests.post(
         base_url + "/execute",
@@ -586,13 +586,9 @@ def run_screenshot_once(chat_id: int, text: str) -> None:
     if ("耗时" in text) or ("timing" in text.lower()):
         send_text(
             chat_id,
-            "截图耗时: total={}ms capture={}ms copy={}ms".format(
-                timings.get("total_ms", 0),
-                timings.get("capture_ms", 0),
-                timings.get("copy_ms", 0),
-            ),
+            t("msg.screenshot_timing", total=timings.get("total_ms", 0), capture=timings.get("capture_ms", 0), copy=timings.get("copy_ms", 0)),
         )
-    send_text(chat_id, "截图完成，已回传 {} 张图片。".format(sent))
+    send_text(chat_id, t("msg.screenshot_done", count=sent))
 
 
 def find_task(task_ref: str) -> Optional[Dict]:
@@ -656,11 +652,11 @@ def build_status_summary(task: Dict) -> str:
         return summary[:300]
     noop_reason = (executor.get("noop_reason") or "").strip()
     if noop_reason:
-        return ("失败原因: " + noop_reason)[:300]
+        return (t("summary.failure_reason", reason=noop_reason))[:300]
     err = (task.get("error") or "").strip()
     if err:
-        return ("错误: " + err)[:300]
-    return "(暂无概要)"
+        return (t("summary.error_prefix", err=err))[:300]
+    return t("msg.no_summary_short")
 
 
 def format_stage_execution_summary(task: Dict) -> str:
@@ -722,16 +718,16 @@ def format_stage_execution_summary(task: Dict) -> str:
 
 def status_tag(status: str) -> str:
     mapping = {
-        "pending": "待处理",
-        "processing": "执行中",
-        "pending_acceptance": "待验收",
-        "accepted": "验收通过",
-        "rejected": "验收拒绝",
-        "completed": "已完成",
-        "succeeded": "已完成",
-        "failed": "执行失败",
+        "pending": t("status.pending"),
+        "processing": t("status.processing"),
+        "pending_acceptance": t("status.pending_acceptance"),
+        "accepted": t("status.accepted"),
+        "rejected": t("status.rejected"),
+        "completed": t("status.completed"),
+        "succeeded": t("status.succeeded"),
+        "failed": t("status.failed"),
     }
-    return mapping.get(str(status or "").strip().lower(), str(status or "unknown"))
+    return mapping.get(str(status or "").strip().lower(), str(status or t("status.unknown")))
 
 
 def acceptance_tag(task: Dict) -> str:
@@ -740,30 +736,30 @@ def acceptance_tag(task: Dict) -> str:
     acceptance = task.get("acceptance") if isinstance(task.get("acceptance"), dict) else {}
     state = str(acceptance.get("state") or "").strip().lower()
     if status == "accepted" or state == "accepted":
-        return "验收通过"
+        return t("acceptance.tag_accepted")
     if status == "rejected" or state == "rejected":
-        return "验收拒绝"
+        return t("acceptance.tag_rejected")
     if status == "pending_acceptance" or state == "pending":
-        return "待验收"
+        return t("acceptance.tag_pending")
     if stage in {"pending", "processing"}:
-        return "未到验收阶段"
+        return t("acceptance.tag_not_ready")
     if stage == "results" and status in {"completed", "failed", "succeeded"}:
         # Backward compatibility for historical result files before explicit pending_acceptance migration.
-        return "待验收(兼容旧任务)"
+        return t("acceptance.tag_pending_compat")
     if stage == "archive":
         # Task was archived (normally after acceptance); treat as accepted.
-        return "验收通过"
-    return "未知"
+        return t("acceptance.tag_accepted")
+    return t("acceptance.tag_unknown")
 
 
 def acceptance_next_action(task: Dict) -> str:
     code = str(task.get("task_code") or task.get("task_id") or "-")
     tag = acceptance_tag(task)
-    if tag in {"待验收", "待验收(兼容旧任务)", "验收拒绝"}:
-        return "通过 /accept {code} 验收通过归档；或 /reject {code} <原因> 保持不归档".format(code=code)
-    if tag == "验收通过":
-        return "已验收通过，可用 /archive_show {code} 查看归档详情".format(code=code)
-    return "当前无需验收操作"
+    if tag in {t("acceptance.tag_pending"), t("acceptance.tag_pending_compat"), t("acceptance.tag_rejected")}:
+        return t("acceptance.next_accept_or_reject", code=code)
+    if tag == t("acceptance.tag_accepted"):
+        return t("acceptance.next_already_accepted", code=code)
+    return t("acceptance.next_no_action")
 
 
 def task_stage_file(task: Dict) -> Path:
@@ -781,7 +777,7 @@ def build_archive_list_text(items: List[Dict], title: str) -> str:
     lines = [title]
     for item in items:
         lines.append(
-            "[{code}] {status} {action} {archive_id}\n任务ID={task_id}\n概要: {summary}".format(
+            t("msg.archive_list_item", code="{code}", status="{status}", action="{action}", archive_id="{archive_id}", task_id="{task_id}", summary="{summary}").format(
                 code=item.get("task_code", "-"),
                 status=item.get("status", "unknown"),
                 action=item.get("action", "unknown"),
@@ -796,13 +792,13 @@ def build_archive_list_text(items: List[Dict], title: str) -> str:
 def build_archive_grouped_text(items: List[Dict], title: str, limit_per_group: int = 5) -> str:
     grouped = group_archive_entries(items, limit_per_group=limit_per_group)
     if not grouped:
-        return title + "\n(无结果)"
+        return title + "\n" + t("msg.no_results")
     lines = [title]
     for action, info in grouped.items():
-        lines.append("类型 {}: {} 条".format(action, info.get("count", 0)))
+        lines.append(t("msg.type_count", action=action, count=info.get("count", 0)))
         for item in (info.get("items") or []):
             lines.append(
-                "  [{code}] {status} {archive_id}\n  任务ID={task_id}\n  概要: {summary}".format(
+                t("msg.archive_group_item", code="{code}", status="{status}", archive_id="{archive_id}", task_id="{task_id}", summary="{summary}").format(
                     code=item.get("task_code", "-"),
                     status=item.get("status", "unknown"),
                     archive_id=item.get("archive_id", ""),
@@ -818,12 +814,12 @@ def task_inline_keyboard(task_ref: str) -> Dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "查看状态", "callback_data": "status:{}".format(ref)},
-                {"text": "验收通过", "callback_data": "accept:{}".format(ref)},
-                {"text": "验收拒绝", "callback_data": "reject:{}".format(ref)},
+                {"text": t("task.view_progress"), "callback_data": "status:{}".format(ref)},
+                {"text": t("task.accept"), "callback_data": "accept:{}".format(ref)},
+                {"text": t("task.reject"), "callback_data": "reject:{}".format(ref)},
             ],
             [
-                {"text": "查看事件", "callback_data": "events:{}".format(ref)},
+                {"text": t("task.view_events"), "callback_data": "events:{}".format(ref)},
             ],
         ]
     }
@@ -832,8 +828,8 @@ def task_inline_keyboard(task_ref: str) -> Dict:
 def build_events_text(task_id: str, task_code: str = "", limit: int = 12) -> str:
     rows = read_task_events(task_id, limit=limit)
     if not rows:
-        return "任务 [{}] {} 暂无事件记录。".format(task_code or "-", task_id)
-    lines = ["任务 [{}] {} 最近事件:".format(task_code or "-", task_id)]
+        return t("msg.no_events", code=task_code or "-", task_id=task_id)
+    lines = [t("msg.recent_events", code=task_code or "-", task_id=task_id)]
     for row in rows:
         evt = str(row.get("event") or "unknown")
         ts = str(row.get("ts") or "")
@@ -856,7 +852,7 @@ def handle_callback_query(cb: Dict) -> None:
     if not cb_id:
         return
     if not data or not chat_id:
-        answer_callback_query(cb_id, "无效按钮")
+        answer_callback_query(cb_id, t("callback.invalid_button"))
         return
     try:
         # ---- Noop callbacks (section headers etc.) ----
@@ -878,12 +874,12 @@ def handle_callback_query(cb: Dict) -> None:
         if data.startswith("status:"):
             ref = data.split(":", 1)[1].strip()
             handle_command(chat_id, user_id, "/status {}".format(ref))
-            answer_callback_query(cb_id, "已查询状态")
+            answer_callback_query(cb_id, t("callback.status_queried"))
             return
         if data.startswith("events:"):
             ref = data.split(":", 1)[1].strip()
             handle_command(chat_id, user_id, "/events {}".format(ref))
-            answer_callback_query(cb_id, "已查询事件")
+            answer_callback_query(cb_id, t("callback.events_queried"))
             return
         if data.startswith("accept:"):
             ref = data.split(":", 1)[1].strip()
@@ -891,13 +887,13 @@ def handle_callback_query(cb: Dict) -> None:
                 set_pending_action(chat_id, user_id, "accept_otp", {"task_ref": ref})
                 send_text(
                     chat_id,
-                    "验收任务 [{}] 需要2FA认证。\n请输入6位OTP验证码：".format(ref),
+                    t("msg.accept_need_2fa", ref=ref),
                     reply_markup=cancel_keyboard(),
                 )
-                answer_callback_query(cb_id, "请输入OTP")
+                answer_callback_query(cb_id, t("callback.enter_otp"))
             else:
                 handle_command(chat_id, user_id, "/accept {}".format(ref))
-                answer_callback_query(cb_id, "验收已提交")
+                answer_callback_query(cb_id, t("callback.acceptance_submitted"))
             return
         if data.startswith("reject:"):
             ref = data.split(":", 1)[1].strip()
@@ -905,18 +901,18 @@ def handle_callback_query(cb: Dict) -> None:
                 set_pending_action(chat_id, user_id, "reject_otp", {"task_ref": ref})
                 send_text(
                     chat_id,
-                    "拒绝任务 [{}] 需要2FA认证。\n请输入: <OTP> <拒绝原因>".format(ref),
+                    t("msg.reject_need_2fa", ref=ref),
                     reply_markup=cancel_keyboard(),
                 )
-                answer_callback_query(cb_id, "请输入OTP和原因")
+                answer_callback_query(cb_id, t("callback.enter_otp_reason"))
             else:
                 set_pending_action(chat_id, user_id, "reject_reason", {"task_ref": ref})
                 send_text(
                     chat_id,
-                    "请输入拒绝任务 [{}] 的原因：".format(ref),
+                    t("msg.enter_reject_reason", ref=ref),
                     reply_markup=cancel_keyboard(),
                 )
-                answer_callback_query(cb_id, "请输入拒绝原因")
+                answer_callback_query(cb_id, t("callback.enter_reject_reason"))
             return
         if data.startswith("retry:"):
             ref = data.split(":", 1)[1].strip()
@@ -924,34 +920,34 @@ def handle_callback_query(cb: Dict) -> None:
                 set_pending_action(chat_id, user_id, "retry_otp", {"task_ref": ref})
                 send_text(
                     chat_id,
-                    "重新开发任务 [{}] 需要2FA认证。\n请输入: <OTP> [补充说明]".format(ref),
+                    t("msg.retry_need_2fa", ref=ref),
                     reply_markup=cancel_keyboard(),
                 )
-                answer_callback_query(cb_id, "请输入OTP")
+                answer_callback_query(cb_id, t("callback.enter_otp"))
             else:
                 handle_command(chat_id, user_id, "/retry {}".format(ref))
-                answer_callback_query(cb_id, "重新开发已提交")
+                answer_callback_query(cb_id, t("callback.retry_submitted"))
             return
         if data.startswith("restart:"):
             ref = data.split(":", 1)[1].strip()
             if not is_ops_allowed(chat_id, user_id):
-                answer_callback_query(cb_id, "无权限", show_alert=True)
+                answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
                 return
-            answer_callback_query(cb_id, "正在重启服务...")
+            answer_callback_query(cb_id, t("callback.restarting"))
             try:
                 from service_manager import run_restart
                 ok = run_restart()
                 if ok:
-                    send_text(chat_id, "🔄 服务重启已执行 (任务 [{}])。".format(ref))
+                    send_text(chat_id, t("msg.restart_done", ref=ref))
                 else:
-                    send_text(chat_id, "❌ 重启失败: 重启脚本未找到或执行出错 (任务 [{}])。".format(ref))
+                    send_text(chat_id, t("msg.restart_failed_script", ref=ref))
             except Exception as exc:
-                send_text(chat_id, "❌ 重启失败: {} (任务 [{}])".format(str(exc)[:200], ref))
+                send_text(chat_id, t("msg.restart_failed", err=str(exc)[:200], ref=ref))
             return
         if data.startswith("skip_restart:"):
             ref = data.split(":", 1)[1].strip()
-            answer_callback_query(cb_id, "已跳过重启")
-            send_text(chat_id, "⏭ 已跳过重启 (任务 [{}])。".format(ref))
+            answer_callback_query(cb_id, t("callback.skip_restart"))
+            send_text(chat_id, t("msg.restart_skipped", ref=ref))
             return
         if data.startswith("cmd_cancel:"):
             ref = data.split(":", 1)[1].strip()
@@ -960,7 +956,7 @@ def handle_callback_query(cb: Dict) -> None:
             return
         if data.startswith("model_select:"):
             if not is_ops_allowed(chat_id, user_id):
-                answer_callback_query(cb_id, "无权限", show_alert=True)
+                answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
                 return
             rest = data[len("model_select:"):]
             if ":" in rest:
@@ -969,10 +965,10 @@ def handle_callback_query(cb: Dict) -> None:
                 provider, model = "", rest
             set_claude_model(model, provider=provider, changed_by=user_id)
             tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
-            answer_callback_query(cb_id, "已切换: {} {}".format(tag, model))
+            answer_callback_query(cb_id, t("callback.switched", tag=tag, model=model))
             send_text(
                 chat_id,
-                "模型已切换为: {} `{}`".format(tag, model),
+                t("msg.model_switched", tag=tag, model=model),
                 reply_markup=back_to_menu_keyboard(),
             )
             return
@@ -1008,7 +1004,7 @@ def handle_callback_query(cb: Dict) -> None:
         # ---- Pipeline preset selection callbacks ----
         if data.startswith("pipeline_preset:"):
             if not is_ops_allowed(chat_id, user_id):
-                answer_callback_query(cb_id, "无权限", show_alert=True)
+                answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
                 return
             preset_name = data[len("pipeline_preset:"):]
             if preset_name in PIPELINE_PRESETS:
@@ -1039,28 +1035,23 @@ def handle_callback_query(cb: Dict) -> None:
                 }.get(preset_name, preset_name)
                 send_text(
                     chat_id,
-                    "\u2699\ufe0f \u9636\u6bb5\u914d\u7f6e\u6982\u89c8\n"
-                    "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                    "\u5f53\u524d\u6d41\u6c34\u7ebf: {}\n\n"
-                    "\u70b9\u51fb\u9636\u6bb5\u6309\u94ae\u4fee\u6539\u6a21\u578b\uff0c\u5b8c\u6210\u540e\u70b9\u51fb\u300c\u2705 \u786e\u8ba4\u5e94\u7528\u300d\u751f\u6548".format(
-                        preset_display
-                    ),
+                    t("msg.stage_config_overview", pipeline=preset_display),
                     reply_markup=pipeline_stage_overview_keyboard(stages),
                 )
                 answer_callback_query(cb_id, "\u9009\u62e9\u9884\u8bbe: {}".format(preset_display))
             else:
-                answer_callback_query(cb_id, "未知预设", show_alert=True)
+                answer_callback_query(cb_id, t("callback.unknown_preset"), show_alert=True)
             return
 
         # ---- Role pipeline config callbacks ----
         if data.startswith("role_cfg:"):
             if not is_ops_allowed(chat_id, user_id):
-                answer_callback_query(cb_id, "无权限", show_alert=True)
+                answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
                 return
             role_name = data[len("role_cfg:"):]
             role_def = ROLE_DEFINITIONS.get(role_name)
             if not role_def:
-                answer_callback_query(cb_id, "未知角色", show_alert=True)
+                answer_callback_query(cb_id, t("callback.unknown_role"), show_alert=True)
                 return
             all_models = get_available_models()
             # Show all models (including unavailable) so users can pre-configure
@@ -1070,47 +1061,43 @@ def handle_callback_query(cb: Dict) -> None:
             ]
             send_text(
                 chat_id,
-                "选择 {} {} 使用的模型：".format(role_def.get("emoji", ""), role_def.get("label", role_name)),
+                t("msg.select_role_model", emoji=role_def.get("emoji", ""), label=role_def.get("label", role_name)),
                 reply_markup=role_model_select_keyboard(role_name, models),
             )
-            answer_callback_query(cb_id, "选择模型")
+            answer_callback_query(cb_id, t("callback.select_model"))
             return
 
         if data.startswith("role_model:"):
             if not is_ops_allowed(chat_id, user_id):
-                answer_callback_query(cb_id, "无权限", show_alert=True)
+                answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
                 return
             # Format: role_model:<role>:<provider>:<model_id>
             parts = data[len("role_model:"):].split(":", 2)
             if len(parts) < 3:
-                answer_callback_query(cb_id, "无效数据", show_alert=True)
+                answer_callback_query(cb_id, t("callback.invalid_data"), show_alert=True)
                 return
             role_name, provider, model_id = parts[0], parts[1], parts[2]
             role_def = ROLE_DEFINITIONS.get(role_name)
             if not role_def:
-                answer_callback_query(cb_id, "未知角色", show_alert=True)
+                answer_callback_query(cb_id, t("callback.unknown_role"), show_alert=True)
                 return
             try:
                 set_role_stage_model(role_name, model_id, provider=provider, changed_by=user_id)
             except ValueError as exc:
-                answer_callback_query(cb_id, "保存失败", show_alert=True)
+                answer_callback_query(cb_id, t("callback.save_failed"), show_alert=True)
                 send_text(chat_id, "\u274c \u4fdd\u5b58\u5931\u8d25\uff1a{}".format(exc),
                           reply_markup=back_to_menu_keyboard())
                 return
             tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
-            answer_callback_query(cb_id, "已设置: {} {}".format(tag, model_id))
+            answer_callback_query(cb_id, t("callback.saved", tag=tag, model=model_id))
             # Refresh the role pipeline config view
             stages = get_role_pipeline_stages()
             send_text(
                 chat_id,
-                "\U0001f3ad 角色流水线配置\n"
+                t("msg.role_pipeline_config") + "\n"
                 "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                "{} {} 已设置为: {} {}\n\n"
-                "当前配置:\n{}".format(
-                    role_def.get("emoji", ""), role_def.get("label", role_name),
-                    tag, model_id,
-                    format_role_pipeline_stages(stages),
-                ),
+                + t("msg.role_set", emoji=role_def.get("emoji", ""), label=role_def.get("label", role_name), tag=tag, model=model_id) + "\n\n"
+                + t("msg.role_config_current", config=format_role_pipeline_stages(stages)),
                 reply_markup=role_pipeline_config_keyboard(stages),
             )
             return
@@ -1320,44 +1307,35 @@ def handle_callback_query(cb: Dict) -> None:
             try:
                 idx = int(idx_str)
             except ValueError:
-                answer_callback_query(cb_id, "无效序号", show_alert=True)
+                answer_callback_query(cb_id, t("callback.invalid_index"), show_alert=True)
                 return
             candidates = read_workspace_candidates(chat_id, user_id)
             if not candidates:
-                send_text(chat_id, "候选列表已过期，请重新搜索。", reply_markup=back_to_menu_keyboard())
-                answer_callback_query(cb_id, "已过期")
+                send_text(chat_id, t("msg.candidates_expired"), reply_markup=back_to_menu_keyboard())
+                answer_callback_query(cb_id, t("callback.expired"))
                 return
             if idx < 1 or idx > len(candidates):
-                send_text(chat_id, "序号越界，有效范围: 1-{}".format(len(candidates)))
-                answer_callback_query(cb_id, "序号越界", show_alert=True)
+                send_text(chat_id, t("msg.index_out_of_range", max=len(candidates)))
+                answer_callback_query(cb_id, t("callback.index_out_of_range"), show_alert=True)
                 return
             target = candidates[idx - 1]
             clear_workspace_candidates(chat_id, user_id)
             if is_risky_workspace(target):
-                send_text(chat_id, "拒绝添加高风险目录: {}".format(str(target)))
-                answer_callback_query(cb_id, "高风险目录", show_alert=True)
+                send_text(chat_id, t("msg.reject_risky_dir", path=str(target)))
+                answer_callback_query(cb_id, t("callback.risky_dir"), show_alert=True)
                 return
             try:
                 from workspace_registry import add_workspace as _add_ws_fuzzy
                 ws = _add_ws_fuzzy(target, label=target.name, created_by=user_id)
                 send_text(
                     chat_id,
-                    "工作目录已添加:\n"
-                    "ID: {id}\n"
-                    "标签: {label}\n"
-                    "路径: {path}\n"
-                    "默认: {default}".format(
-                        id=ws["id"],
-                        label=ws["label"],
-                        path=ws["path"],
-                        default="是" if ws.get("is_default") else "否",
-                    ),
+                    t("msg.workspace_added", id=ws["id"], label=ws["label"], path=ws["path"], default=t("msg.yes") if ws.get("is_default") else t("msg.no")),
                     reply_markup=back_to_menu_keyboard(),
                 )
-                answer_callback_query(cb_id, "已添加")
+                answer_callback_query(cb_id, t("callback.added"))
             except ValueError as exc:
-                send_text(chat_id, "添加失败: {}".format(str(exc)))
-                answer_callback_query(cb_id, "添加失败", show_alert=True)
+                send_text(chat_id, t("msg.add_failed", err=str(exc)))
+                answer_callback_query(cb_id, t("callback.add_failed"), show_alert=True)
             return
 
         # ---- Search root remove callbacks ----
@@ -1439,8 +1417,8 @@ def handle_callback_query(cb: Dict) -> None:
 
         answer_callback_query(cb_id, "\u672a\u77e5\u6309\u94ae")
     except Exception as exc:
-        answer_callback_query(cb_id, "操作失败", show_alert=True)
-        send_text(chat_id, "按钮操作失败: {}".format(str(exc)[:500]))
+        answer_callback_query(cb_id, t("callback.operation_failed"), show_alert=True)
+        send_text(chat_id, t("callback.button_failed", err=str(exc)[:500]))
 
 
 def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:
@@ -1451,9 +1429,9 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
     if action == "main":
         clear_pending_action(chat_id, user_id)
         active_workspace = resolve_active_workspace()
-        auth_ready = "已启用" if get_auth_state() else "未初始化"
+        auth_ready = t("msg.enabled") if get_auth_state() else t("msg.not_initialized")
         backend = get_agent_backend()
-        model = get_claude_model() or "(未设置)"
+        model = get_claude_model() or t("msg.not_set")
         send_text(
             chat_id,
             WELCOME_TEXT.format(
@@ -1464,7 +1442,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             ),
             reply_markup=main_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "主菜单")
+        answer_callback_query(cb_id, t("callback.main_menu"))
         return
 
     # -- Cancel pending action --
@@ -1475,7 +1453,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             "\u5df2\u53d6\u6d88\u64cd\u4f5c\u3002",
             reply_markup=back_to_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "已取消")
+        answer_callback_query(cb_id, t("callback.cancelled"))
         return
 
     # -- Sub-menu: System Settings --
@@ -1492,7 +1470,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             ),
             reply_markup=system_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "系统设置")
+        answer_callback_query(cb_id, t("callback.system_settings"))
         return
 
     # -- Sub-menu: Archive Management --
@@ -1502,7 +1480,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             SUBMENU_TEXTS["archive"],
             reply_markup=archive_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "归档管理")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Sub-menu: Task Management --
@@ -1528,7 +1506,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             SUBMENU_TEXTS["ops"],
             reply_markup=ops_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "运维操作")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Sub-menu: Security --
@@ -1538,7 +1516,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             SUBMENU_TEXTS["security"],
             reply_markup=security_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "安全认证")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Sub-menu: Skills Management --
@@ -1548,7 +1526,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             SUBMENU_TEXTS["skills"],
             reply_markup=skills_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "技能管理")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Sub-menu: Workspace Management --
@@ -1558,7 +1536,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             SUBMENU_TEXTS["workspace"],
             reply_markup=workspace_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "工作区管理")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- New Task: show workspace selection if multiple workspaces --
@@ -1574,7 +1552,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
                 "\u8bf7\u9009\u62e9\u4efb\u52a1\u6267\u884c\u7684\u5de5\u4f5c\u533a\u57df:",
                 reply_markup=workspace_select_keyboard(workspaces, "ws_task_select"),
             )
-            answer_callback_query(cb_id, "选择工作区")
+            answer_callback_query(cb_id, t("callback.submitted"))
         else:
             set_pending_action(chat_id, user_id, "new_task")
             send_text(
@@ -1582,37 +1560,37 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
                 PENDING_PROMPTS["new_task"],
                 reply_markup=cancel_keyboard(),
             )
-            answer_callback_query(cb_id, "请输入任务内容")
+            answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Task List: execute directly --
     if action == "task_list":
         handle_command(chat_id, user_id, "/status")
-        answer_callback_query(cb_id, "查询任务列表")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Clear Task List: confirm before clearing (keeps running tasks) --
     if action == "clear_tasks":
         active = list_active_tasks(chat_id=chat_id)
         if not active:
-            send_text(chat_id, "当前没有活动任务，无需清空。", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无活动任务")
+            send_text(chat_id, t("msg.no_active_tasks"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("callback.submitted"))
             return
         running = [t for t in active if str(t.get("status") or "").strip().lower() == "processing"]
         clearable = len(active) - len(running)
         if clearable <= 0:
-            send_text(chat_id, "当前所有任务均在运行中，无法清空。", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "全部运行中")
+            send_text(chat_id, t("msg.all_tasks_running"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("callback.submitted"))
             return
-        msg = "确认清空任务列表？\n将移除 {} 个已归档/待验收任务。".format(clearable)
+        msg = t("msg.confirm_clear", count=clearable)
         if running:
-            msg += "\n（{} 个运行中的任务将保留）".format(len(running))
+            msg += "\n" + t("msg.running_kept", count=len(running))
         send_text(
             chat_id,
             msg,
             reply_markup=confirm_cancel_keyboard("clear_tasks"),
         )
-        answer_callback_query(cb_id, "请确认清空")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Screenshot: prompt for description --
@@ -1623,41 +1601,41 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["screenshot"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入截图说明")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- System Info: execute directly --
     if action == "info":
         handle_command(chat_id, user_id, "/info")
         send_text(chat_id, "", reply_markup=back_to_menu_keyboard()) if False else None
-        answer_callback_query(cb_id, "系统信息")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Project Summary --
     if action == "summary":
         _do_summary_command(chat_id, user_id)
-        answer_callback_query(cb_id, "项目总结")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Switch Backend: show selection keyboard --
     if action == "switch_backend":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "无权限执行此操作。", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无权限", show_alert=True)
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         current = get_agent_backend()
         send_text(
             chat_id,
-            "当前后端: {}\n请选择新的执行后端：".format(current),
+            t("msg.current_backend_select", backend=current),
             reply_markup=backend_select_keyboard(),
         )
-        answer_callback_query(cb_id, "选择后端")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Switch Model: show model list --
     if action == "switch_model":
         handle_command(chat_id, user_id, "/switch_model")
-        answer_callback_query(cb_id, "选择模型")
+        answer_callback_query(cb_id, t("callback.select_model"))
         return
 
     # -- Model List: show all models with status --
@@ -1687,7 +1665,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
     if action == "pipeline_config":
         if not is_ops_allowed(chat_id, user_id):
             send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无权限", show_alert=True)
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         preset_lines = []
         for k, v in PIPELINE_PRESETS.items():
@@ -1714,7 +1692,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             "{}".format(preset_info),
             reply_markup=pipeline_preset_keyboard(),
         )
-        answer_callback_query(cb_id, "选择流水线配置")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Pipeline Stage Overview: return to overview from model selection --
@@ -1759,27 +1737,25 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
     # -- Role Pipeline Config: show role config keyboard --
     if action == "role_pipeline_config":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "无权限执行此操作。", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无权限", show_alert=True)
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         stages = get_role_pipeline_stages()
         send_text(
             chat_id,
-            "\U0001f3ad 角色流水线配置\n"
+            t("msg.role_pipeline_config") + "\n"
             "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-            "当前配置:\n{}\n\n"
-            "点击角色按钮配置对应模型\n"
-            "未配置的角色使用全局模型".format(format_role_pipeline_stages(stages)),
+            + t("msg.role_config_current", config=format_role_pipeline_stages(stages)),
             reply_markup=role_pipeline_config_keyboard(stages),
         )
-        answer_callback_query(cb_id, "角色流水线配置")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Pipeline Config Custom: prompt for text --
     if action == "pipeline_config_custom":
         if not is_ops_allowed(chat_id, user_id):
             send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无权限", show_alert=True)
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         set_pending_action(chat_id, user_id, "pipeline_config_custom")
         send_text(
@@ -1787,19 +1763,19 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["pipeline_config_custom"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入配置")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Pipeline Status: execute directly --
     if action == "pipeline_status":
         handle_command(chat_id, user_id, "/show_pipeline")
-        answer_callback_query(cb_id, "流水线状态")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Archive Overview: execute directly --
     if action == "archive":
         handle_command(chat_id, user_id, "/archive")
-        answer_callback_query(cb_id, "归档概览")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Archive Search: prompt for keyword --
@@ -1810,7 +1786,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["archive_search"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入关键词")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Archive Show: prompt for ID --
@@ -1821,7 +1797,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["archive_show"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入ID")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Archive Log: prompt for keyword --
@@ -1832,14 +1808,14 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["archive_log"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入关键词")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Mgr Restart: prompt for OTP --
     if action == "mgr_restart":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "无权限执行此操作。", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无权限", show_alert=True)
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         set_pending_action(chat_id, user_id, "mgr_restart")
         send_text(
@@ -1847,14 +1823,14 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["mgr_restart"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入OTP")
+        answer_callback_query(cb_id, t("callback.enter_otp"))
         return
 
     # -- Mgr Reinit (Self-Update): prompt for OTP --
     if action == "mgr_reinit":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "无权限执行此操作。", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无权限", show_alert=True)
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         set_pending_action(chat_id, user_id, "mgr_reinit")
         send_text(
@@ -1862,14 +1838,14 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["mgr_reinit"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入OTP")
+        answer_callback_query(cb_id, t("callback.enter_otp"))
         return
 
     # -- Ops Restart: prompt for OTP --
     if action == "ops_restart":
         if not is_ops_allowed(chat_id, user_id):
             send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无权限", show_alert=True)
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         set_pending_action(chat_id, user_id, "ops_restart")
         send_text(
@@ -1877,38 +1853,38 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["ops_restart"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入OTP")
+        answer_callback_query(cb_id, t("callback.enter_otp"))
         return
 
     # -- Mgr Status: execute directly --
     if action == "mgr_status":
         handle_command(chat_id, user_id, "/mgr_status")
-        answer_callback_query(cb_id, "管理服务状态")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Auth Init: execute directly --
     if action == "auth_init":
         handle_command(chat_id, user_id, "/auth_init")
-        answer_callback_query(cb_id, "2FA初始化")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Auth Status: execute directly --
     if action == "auth_status":
         handle_command(chat_id, user_id, "/auth_status")
-        answer_callback_query(cb_id, "2FA状态")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Whoami: execute directly --
     if action == "whoami":
         handle_command(chat_id, user_id, "/ops_whoami")
-        answer_callback_query(cb_id, "身份信息")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Auth Debug: prompt for OTP --
     if action == "auth_debug":
         if not is_ops_allowed(chat_id, user_id):
             send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无权限", show_alert=True)
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         set_pending_action(chat_id, user_id, "auth_debug")
         send_text(
@@ -1916,14 +1892,14 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["auth_debug"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入OTP")
+        answer_callback_query(cb_id, t("callback.enter_otp"))
         return
 
     # -- Set Workspace: prompt for path + OTP --
     if action == "set_workspace":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "无权限执行此操作。", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无权限", show_alert=True)
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         set_pending_action(chat_id, user_id, "set_workspace")
         send_text(
@@ -1931,14 +1907,14 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["set_workspace"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入工作区+OTP")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Reset Workspace: prompt for OTP --
     if action == "reset_workspace":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "无权限执行此操作。", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "无权限", show_alert=True)
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         set_pending_action(chat_id, user_id, "reset_workspace")
         send_text(
@@ -1946,13 +1922,13 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["reset_workspace"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入OTP")
+        answer_callback_query(cb_id, t("callback.enter_otp"))
         return
 
     # -- Workspace List: execute directly --
     if action == "workspace_list":
         handle_command(chat_id, user_id, "/workspace_list")
-        answer_callback_query(cb_id, "工作目录列表")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Workspace Add: prompt for path --
@@ -1963,7 +1939,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["workspace_add"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "请输入路径")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     # -- Workspace Remove: show selection or prompt --
@@ -2064,10 +2040,10 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
     # -- Dispatch Status: execute directly --
     if action == "dispatch_status":
         handle_command(chat_id, user_id, "/dispatch_status")
-        answer_callback_query(cb_id, "调度器状态")
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
-    answer_callback_query(cb_id, "未知菜单操作")
+    answer_callback_query(cb_id, t("callback.unknown_button"))
 
 
 def _handle_confirm_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:
@@ -2080,10 +2056,10 @@ def _handle_confirm_callback(cb_id: str, data: str, chat_id: int, user_id: int) 
         removed = clear_active_tasks(chat_id)
         send_text(
             chat_id,
-            "已清空任务列表，共移除 {} 个已归档/待验收任务（运行中的任务已保留）。".format(removed),
+            t("msg.tasks_cleared", count=removed),
             reply_markup=back_to_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "已清空 {} 个任务".format(removed))
+        answer_callback_query(cb_id, t("callback.submitted"))
         return
 
     if action == "task_cancel":
@@ -2165,7 +2141,7 @@ def _handle_confirm_callback(cb_id: str, data: str, chat_id: int, user_id: int) 
             answer_callback_query(cb_id, "\u672a\u627e\u5230", show_alert=True)
         return
 
-    answer_callback_query(cb_id, "未知确认操作")
+    answer_callback_query(cb_id, t("callback.unknown_button"))
 
 
 # ---------------------------------------------------------------------------
@@ -2822,10 +2798,10 @@ def _handle_backend_select_callback(cb_id: str, data: str, chat_id: int, user_id
     """Handle backend_sel:* callback queries."""
     backend = data.split(":", 1)[1].strip()
     if not is_ops_allowed(chat_id, user_id):
-        answer_callback_query(cb_id, "无权限", show_alert=True)
+        answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
         return
     handle_command(chat_id, user_id, "/switch_backend {}".format(backend))
-    answer_callback_query(cb_id, "已切换: {}".format(backend))
+    answer_callback_query(cb_id, t("callback.switched", tag="", model=backend))
 
 
 def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
@@ -2926,9 +2902,9 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
     # -- Screenshot --
     if action == "screenshot":
         try:
-            run_screenshot_once(chat_id, txt or "请截图")
+            run_screenshot_once(chat_id, txt or "screenshot")
         except Exception as exc:
-            send_text(chat_id, "截图失败: {}".format(str(exc)[:1000]))
+            send_text(chat_id, t("msg.screenshot_failed", err=str(exc)[:1000]))
         return True
 
     # -- Archive Search --
@@ -3153,13 +3129,13 @@ def verify_risky_operation(chat_id: int, user_id: int, otp: Optional[str], usage
     if not is_ops_allowed(chat_id, user_id):
         return False, "not authorized for {}".format(usage)
     if not get_auth_state():
-        return False, "2FA 未初始化。请先执行 /auth_init"
+        return False, t("msg.2fa_not_init")
     token = (otp or "").strip()
     if not token:
-        return False, "用法: {}".format(usage)
+        return False, usage
     otp_window = int(os.getenv("AUTH_OTP_WINDOW", "2"))
     if not verify_otp(token, window=otp_window):
-        return False, "二次认证失败：OTP 无效或已过期"
+        return False, t("msg.2fa_failed")
     return True, None
 
 
@@ -3222,9 +3198,9 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
     txt = (text or "").strip()
     if txt.startswith("/menu") or txt.startswith("/start"):
         active_workspace = resolve_active_workspace()
-        auth_ready = "已启用" if get_auth_state() else "未初始化"
+        auth_ready = t("msg.enabled") if get_auth_state() else t("msg.not_initialized")
         backend = get_agent_backend()
-        model = get_claude_model() or "(未设置)"
+        model = get_claude_model() or t("msg.not_set")
         send_text(
             chat_id,
             WELCOME_TEXT.format(
@@ -3254,7 +3230,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                 task_code = task.get("task_code", "-")
                 send_text(
                     chat_id,
-                    "检测到该输入更像任务描述，已按任务创建: [{code}] {task_id}\n状态: pending\n内容: {text}".format(
+                    t("msg.task_created", code="{code}", task_id="{task_id}", text="{text}").format(
                         code=task_code,
                         task_id=task_id,
                         text=t[:200],
@@ -3262,16 +3238,16 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                     reply_markup=task_inline_keyboard(task_code),
                 )
                 return True
-            run_screenshot_once(chat_id, body or "请截图")
+            run_screenshot_once(chat_id, body or "screenshot")
         except Exception as exc:
-            send_text(chat_id, "截图失败: {}".format(str(exc)[:1000]))
+            send_text(chat_id, t("msg.screenshot_failed", err=str(exc)[:1000]))
         return True
 
     if txt.startswith("/ops_whoami"):
         active_workspace = resolve_active_workspace()
         send_text(
             chat_id,
-            "身份信息\n"
+            t("msg.identity_info") + "\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "chat_id={}\n"
             "user_id={}\n"
@@ -3290,21 +3266,21 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
 
     if txt.startswith("/info"):
         backend = get_agent_backend()
-        model = get_claude_model() or "(未设置)"
-        provider = get_model_provider() or "(未设置)"
+        model = get_claude_model() or t("msg.not_set")
+        provider = get_model_provider() or t("msg.not_set")
         active_workspace = resolve_active_workspace()
         lines = [
-            "系统信息",
+            t("msg.system_info"),
             "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "当前后端: {}".format(backend),
-            "AI模型: {}".format(model),
-            "模型提供商: {}".format(provider),
-            "工作区: {}".format(str(active_workspace)),
-            "2FA: {}".format("已启用" if get_auth_state() else "未初始化"),
+            t("msg.info_backend", backend=backend),
+            t("msg.info_model", model=model),
+            t("msg.info_provider", provider=provider),
+            t("msg.info_workspace", workspace=str(active_workspace)),
+            t("msg.info_2fa", status=t("msg.enabled") if get_auth_state() else t("msg.not_initialized")),
         ]
         if backend == "pipeline":
             stages = get_pipeline_stages()
-            lines.append("流水线: {}".format(format_pipeline_stages(stages)))
+            lines.append(t("msg.info_pipeline", pipeline=format_pipeline_stages(stages)))
         send_text(chat_id, "\n".join(lines), reply_markup=back_to_menu_keyboard())
         return True
 
@@ -3343,21 +3319,15 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         )
         send_text(
             chat_id,
-            (
-                "2FA {}。\n"
-                "{}\n"
-                "otpauth_uri={}\n"
-                "period={}秒, digits={}\n"
-                "seed_file={}\n"
-                "请将 secret/二维码信息保存到你的 authenticator。"
-            ).format(
-                "已初始化" if st.get("created") else "已存在，沿用现有配置",
+            t("msg.2fa_init_status", status=(t("msg.2fa_initialized") if st.get("created") else t("msg.2fa_existing")))
+            + "\n{}\notpauth_uri={}\nperiod={}s, digits={}\nseed_file={}\n".format(
                 secret_line,
                 st.get("otpauth_uri", ""),
                 st.get("period_sec", 60),
                 st.get("digits", 6),
                 st.get("seed_file", ""),
-            ),
+            )
+            + t("msg.2fa_save_reminder"),
             reply_markup=back_to_menu_keyboard(),
         )
         return True
@@ -3367,13 +3337,13 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if not st:
             send_text(
                 chat_id,
-                "2FA 未初始化。请先执行 /auth_init",
+                t("msg.2fa_not_init"),
                 reply_markup=back_to_menu_keyboard(),
             )
             return True
         send_text(
             chat_id,
-            "2FA 已启用\nsecret={}\nperiod={}秒, digits={}\nupdated_at={}".format(
+            t("msg.2fa_status_detail", secret="{}", period="{}", digits="{}", updated="{}").format(
                 st.get("secret_b32", "")[:4] + "***" + st.get("secret_b32", "")[-4:],
                 st.get("period_sec", 60),
                 st.get("digits", 6),
@@ -3389,7 +3359,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             return True
         otp = parse_otp(t)
         if not otp:
-            send_text(chat_id, "用法: /auth_debug <6位OTP>")
+            send_text(chat_id, t("msg.usage_auth_debug"))
             return True
         otp_window = int(os.getenv("AUTH_OTP_WINDOW", "2"))
         info = debug_verify_otp(otp, window=otp_window)
@@ -3440,16 +3410,15 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if stages:
                 send_text(
                     chat_id,
-                    "后端已切换为: pipeline\n流水线: {}".format(format_pipeline_stages(stages)),
+                    t("msg.backend_switched_pipeline", pipeline=format_pipeline_stages(stages)),
                 )
             else:
                 send_text(
                     chat_id,
-                    "后端已切换为: pipeline\n⚠️ 尚未配置流水线阶段，请用 /set_pipeline 配置。\n"
-                    "示例: /set_pipeline plan:openai code:claude verify:codex",
+                    t("msg.backend_switched_pipeline_empty"),
                 )
         else:
-            send_text(chat_id, "后端已切换为: {}\n新建任务将使用 {} 执行。".format(backend, backend))
+            send_text(chat_id, t("msg.backend_switched", backend=backend))
         return True
 
     if txt.startswith("/switch_model"):
@@ -3458,7 +3427,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             return True
         parts = txt.split(maxsplit=1)
         arg = parts[1].strip() if len(parts) >= 2 else ""
-        current_model = get_claude_model() or "(默认)"
+        current_model = get_claude_model() or t("msg.default_label")
         current_provider = get_model_provider() or "claude-cli"
 
         if arg:
@@ -3471,11 +3440,11 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                 provider = ""
             set_claude_model(arg, provider=provider, changed_by=user_id)
             tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
-            send_text(chat_id, "模型已切换为: {} `{}`".format(tag, arg))
+            send_text(chat_id, t("msg.model_switched", tag=tag, model=arg))
             return True
 
         # 无参数 → 从 API 拉取并展示 inline keyboard
-        send_text(chat_id, "正在获取可用模型列表...")
+        send_text(chat_id, t("msg.fetching_models"))
         try:
             models = get_available_models()
         except Exception:
@@ -3495,7 +3464,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         keyboard = {"inline_keyboard": rows}
         send_text(
             chat_id,
-            "当前模型: `{}` ({})\n\n选择新模型:".format(current_model, current_provider),
+            t("msg.current_model_select", model=current_model, provider=current_provider),
             reply_markup=keyboard,
         )
         return True
@@ -3508,16 +3477,15 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if len(parts) < 3:
             send_text(
                 chat_id,
-                "用法: /set_role_model <pm|dev|test|qa> <model|default> [openai|anthropic]\n"
-                "示例:\n"
-                "  /set_role_model pm gpt-4o openai\n"
+                t("msg.usage_set_role_model")
+                + "\n  /set_role_model pm gpt-4o openai\n"
                 "  /set_role_model qa claude-sonnet-4-6 anthropic\n"
                 "  /set_role_model test default",
             )
             return True
         role_name = parts[1].strip().lower()
         if role_name not in ROLE_DEFINITIONS:
-            send_text(chat_id, "未知角色: {}，可用: pm|dev|test|qa".format(role_name))
+            send_text(chat_id, t("msg.unknown_role", role=role_name))
             return True
         model_arg = parts[2].strip()
         if model_arg.lower() in {"default", "none", "clear"}:
@@ -3527,28 +3495,28 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             model_id = model_arg
             raw_provider = parts[3].strip().lower() if len(parts) >= 4 else ""
             if raw_provider and raw_provider not in {"anthropic", "openai"}:
-                send_text(chat_id, "provider 仅支持 openai | anthropic")
+                send_text(chat_id, t("msg.provider_only"))
                 return True
             provider = _infer_provider_from_model(model_id, raw_provider)
         try:
             set_role_stage_model(role_name, model_id, provider=provider, changed_by=user_id)
         except ValueError as exc:
-            send_text(chat_id, "设置失败: {}".format(exc))
+            send_text(chat_id, t("msg.save_failed", err=str(exc)))
             return True
         role_def = ROLE_DEFINITIONS.get(role_name, {})
         stages = get_role_pipeline_stages()
         if model_id:
             tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
-            summary = "{} {} 已设置为: {} {}".format(
+            summary = t("msg.role_set", emoji="{}", label="{}", tag="{}", model="{}").format(
                 role_def.get("emoji", ""), role_def.get("label", role_name), tag, model_id
             ).strip()
         else:
-            summary = "{} {} 已恢复为全局模型".format(
+            summary = t("msg.role_restored", emoji="{}", label="{}").format(
                 role_def.get("emoji", ""), role_def.get("label", role_name)
             ).strip()
         send_text(
             chat_id,
-            "{}\n\n当前角色流水线:\n{}".format(summary, format_role_pipeline_stages(stages)),
+            t("msg.role_pipeline_updated", summary=summary, config=format_role_pipeline_stages(stages)),
             reply_markup=role_pipeline_config_keyboard(stages),
         )
         return True
@@ -3563,12 +3531,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             preset_list = "\n".join("  {} → {}".format(k, format_pipeline_stages(v)) for k, v in PIPELINE_PRESETS.items())
             send_text(
                 chat_id,
-                "用法: /set_pipeline <stage:backend ...>\n"
-                "  示例1: /set_pipeline plan:openai code:claude verify:codex\n"
-                "  示例2: /set_pipeline plan:openai code:openai verify:codex\n\n"
-                "内置预设:\n{}\n\n"
-                "可用 backend: codex | claude | openai\n"
-                "可用 stage: plan, code, implement, verify, test, review, ...".format(preset_list),
+                t("msg.usage_set_pipeline", presets=preset_list),
             )
             return True
         # Check for preset name
@@ -3578,16 +3541,12 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             from config import _parse_pipeline_stages
             stages = _parse_pipeline_stages(raw)
         if not stages:
-            send_text(chat_id, "无法解析流水线配置: {!r}".format(raw))
+            send_text(chat_id, t("msg.pipeline_parse_error", config=repr(raw)))
             return True
         set_pipeline_stages(stages, changed_by=user_id)
         send_text(
             chat_id,
-            "流水线已配置并激活:\n{}\n\n"
-            "新建任务将按此流水线执行。\n"
-            "用 /show_pipeline 查看详情，/switch_backend codex 恢复单后端模式。".format(
-                format_pipeline_stages(stages)
-            ),
+            t("msg.pipeline_activated", stages=format_pipeline_stages(stages)),
         )
         return True
 
@@ -3597,22 +3556,17 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if backend != "pipeline":
             send_text(
                 chat_id,
-                "当前后端: {} (非流水线模式)\n"
-                "已保存流水线: {}\n\n"
-                "用 /switch_backend pipeline 激活流水线模式。".format(
-                    backend, format_pipeline_stages(stages) if stages else "(未配置)"
-                ),
+                t("msg.pipeline_not_active", backend=backend, pipeline=format_pipeline_stages(stages) if stages else t("config.not_configured")),
             )
             return True
         if not stages:
             send_text(
                 chat_id,
-                "当前后端: pipeline，但流水线阶段未配置。\n"
-                "请用 /set_pipeline 配置，例:\n"
-                "/set_pipeline plan:openai code:claude verify:codex",
+                t("msg.pipeline_not_configured")
+                + "\n/set_pipeline plan:openai code:claude verify:codex",
             )
             return True
-        lines = ["当前流水线 (后端=pipeline):"]
+        lines = [t("msg.current_pipeline")]
         for i, s in enumerate(stages, 1):
             name = s.get("name", "?")
             role_def = ROLE_DEFINITIONS.get(name)
@@ -3634,64 +3588,59 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                     lines.append("  {}. {} \u2192 {} {}".format(i, name, model, tag).rstrip())
                 else:
                     lines.append("  {}. {}({})".format(i, name, s.get("backend", "?")))
-        lines.append("\n内置预设: " + ", ".join(PIPELINE_PRESETS.keys()))
+        lines.append("\n" + t("msg.builtin_presets") + " " + ", ".join(PIPELINE_PRESETS.keys()))
         send_text(chat_id, "\n".join(lines))
         return True
 
     if txt.startswith("/mgr_status"):
         status = read_manager_status()
         if not status:
-            send_text(chat_id, "manager 未运行或状态文件不存在。\n可通过 start.ps1 启动 manager 服务。")
+            send_text(chat_id, t("msg.mgr_not_running"))
             return True
         services = status.get("services") or {}
-        lines = ["管理服务状态 (更新: {})".format(status.get("updated_at", "-"))]
+        lines = [t("msg.mgr_status", updated=status.get("updated_at", "-"))]
         for name, svc_status in services.items():
             lines.append("  {}: {}".format(name, svc_status))
-        lines.append("当前后端: {}".format(get_agent_backend()))
+        lines.append(t("msg.info_backend", backend=get_agent_backend()))
         lines.append("manager pid: {}".format(status.get("pid", "-")))
         send_text(chat_id, "\n".join(lines))
         return True
 
     if txt.startswith("/mgr_restart"):
         otp = parse_otp(t)
-        ok, msg = verify_risky_operation(chat_id, user_id, otp, "/mgr_restart <6位OTP>")
+        ok, msg = verify_risky_operation(chat_id, user_id, otp, "/mgr_restart <OTP>")
         if not ok:
             send_text(chat_id, msg or "operation blocked", reply_markup=back_to_menu_keyboard())
             return True
         request_id = write_manager_signal("restart", {}, user_id)
         send_text(
             chat_id,
-            "重启信号已发送 (request_id={})。\n"
-            "manager 将在 {}s 内响应，重启 coordinator + executor。".format(
-                request_id, os.getenv("MANAGER_POLL_SEC", "5")
-            ),
+            t("msg.mgr_restart_sent", request_id=request_id, timeout=os.getenv("MANAGER_POLL_SEC", "5")),
             reply_markup=back_to_menu_keyboard(),
         )
         return True
 
     if txt.startswith("/mgr_reinit"):
         otp = parse_otp(t)
-        ok, msg = verify_risky_operation(chat_id, user_id, otp, "/mgr_reinit <6位OTP>")
+        ok, msg = verify_risky_operation(chat_id, user_id, otp, "/mgr_reinit <OTP>")
         if not ok:
             send_text(chat_id, msg or "operation blocked", reply_markup=back_to_menu_keyboard())
             return True
         request_id = write_manager_signal("reinit", {}, user_id)
         send_text(
             chat_id,
-            "自我迭代更新信号已发送 (request_id={})。\n"
-            "manager 将执行: git pull → 重启所有服务。\n"
-            "服务重启期间 Telegram 消息可能短暂无响应。".format(request_id),
+            t("msg.mgr_reinit_sent", request_id=request_id),
             reply_markup=back_to_menu_keyboard(),
         )
         return True
 
     if txt.startswith("/ops_restart"):
         otp = parse_otp(t)
-        ok, msg = verify_risky_operation(chat_id, user_id, otp, "/ops_restart <6位OTP>")
+        ok, msg = verify_risky_operation(chat_id, user_id, otp, "/ops_restart <OTP>")
         if not ok:
             send_text(chat_id, msg or "operation blocked", reply_markup=back_to_menu_keyboard())
             return True
-        send_text(chat_id, "开始执行 restart-all...")
+        send_text(chat_id, t("msg.ops_restart_start"))
         ok, msg = run_restart_all(chat_id, user_id)
         send_text(
             chat_id,
@@ -3706,28 +3655,28 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             chat_id,
             user_id,
             otp,
-            "/ops_set_workspace_pick <序号> <6位OTP>",
+            "/ops_set_workspace_pick <index> <OTP>",
         )
         if not ok:
             send_text(chat_id, msg or "operation blocked")
             return True
         if idx is None or idx <= 0:
-            send_text(chat_id, "用法: /ops_set_workspace_pick <序号> <6位OTP>")
+            send_text(chat_id, t("msg.usage_ops_set_ws_pick"))
             return True
         candidates = read_workspace_candidates(chat_id, user_id)
         if not candidates:
-            send_text(chat_id, "没有可选候选，请先执行 /ops_set_workspace <path|关键词> <6位OTP>")
+            send_text(chat_id, t("msg.no_candidates"))
             return True
         if idx > len(candidates):
-            send_text(chat_id, "序号越界。当前可选范围: 1-{}".format(len(candidates)))
+            send_text(chat_id, t("msg.index_out_of_range", max=len(candidates)))
             return True
         target = candidates[idx - 1]
         if is_risky_workspace(target):
-            send_text(chat_id, "拒绝切换到高风险目录: {}".format(str(target)))
+            send_text(chat_id, t("msg.reject_risky_dir", path=str(target)))
             return True
         set_workspace_override(target, changed_by=user_id)
         clear_workspace_candidates(chat_id, user_id)
-        send_text(chat_id, "workspace 已切换为: {}".format(str(target)))
+        send_text(chat_id, t("msg.workspace_switched", path=str(target)))
         return True
 
     if txt.startswith("/ops_set_workspace"):
@@ -3736,47 +3685,47 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             chat_id,
             user_id,
             otp,
-            "/ops_set_workspace <path|default> <6位OTP>",
+            "/ops_set_workspace <path|default> <OTP>",
         )
         if not ok:
             send_text(chat_id, msg or "operation blocked")
             return True
         if not raw_path:
-            send_text(chat_id, "用法: /ops_set_workspace <path|default> <6位OTP>")
+            send_text(chat_id, t("msg.usage_ops_set_ws"))
             return True
         if raw_path.lower() in {"default", "reset"}:
             clear_workspace_override(changed_by=user_id)
             clear_workspace_candidates(chat_id, user_id)
-            send_text(chat_id, "workspace 已恢复为环境变量 CODEX_WORKSPACE")
+            send_text(chat_id, t("msg.workspace_reset"))
             return True
         p = Path(raw_path).expanduser()
         if p.exists() and p.is_dir():
             rp = p.resolve()
             if is_risky_workspace(rp):
-                send_text(chat_id, "拒绝切换到高风险目录: {}".format(str(rp)))
+                send_text(chat_id, t("msg.reject_risky_dir", path=str(rp)))
                 return True
             set_workspace_override(rp, changed_by=user_id)
             clear_workspace_candidates(chat_id, user_id)
-            send_text(chat_id, "workspace 已切换为: {}".format(str(rp)))
+            send_text(chat_id, t("msg.workspace_switched", path=str(rp)))
             return True
 
         candidates = find_git_workspace_candidates(raw_path)
         if not candidates:
-            send_text(chat_id, "未找到匹配的 Git 工作目录: {}".format(raw_path))
+            send_text(chat_id, t("msg.workspace_not_found", query=raw_path))
             return True
         if len(candidates) == 1:
             target = candidates[0]
             if is_risky_workspace(target):
-                send_text(chat_id, "拒绝切换到高风险目录: {}".format(str(target)))
+                send_text(chat_id, t("msg.reject_risky_dir", path=str(target)))
                 return True
             set_workspace_override(target, changed_by=user_id)
             clear_workspace_candidates(chat_id, user_id)
-            send_text(chat_id, "workspace 已切换为: {}".format(str(target)))
+            send_text(chat_id, t("msg.workspace_switched", path=str(target)))
             return True
 
         store_workspace_candidates(chat_id, user_id, raw_path, candidates)
         lines = [
-            "检索到多个 Git 工作目录，请使用 /ops_set_workspace_pick <序号> <6位OTP> 选择："
+            t("msg.multiple_workspaces")
         ]
         for idx, candidate in enumerate(candidates, 1):
             lines.append("{}. {}".format(idx, str(candidate)))
@@ -3827,20 +3776,20 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if archived:
                 send_text(
                     chat_id,
-                    "任务已归档，无需重复验收。\narchive_id={}\nstatus={}".format(
+                    t("msg.task_already_archived", archive_id="{}", status="{}").format(
                         archived.get("archive_id", ""),
                         status_tag(archived.get("status", "unknown")),
                     ),
                 )
                 return True
-            send_text(chat_id, "任务不存在: {}".format(task_ref))
+            send_text(chat_id, t("msg.task_not_found", ref=task_ref))
             return True
         stage = str(found.get("_stage") or "")
         if stage != "results":
-            send_text(chat_id, "任务尚未进入验收阶段，当前 stage={}".format(stage))
+            send_text(chat_id, t("msg.task_not_ready", stage=stage))
             return True
         if str(found.get("status") or "") not in {"pending_acceptance", "rejected", "completed", "failed"}:
-            send_text(chat_id, "该任务当前状态无需验收: {}".format(status_tag(found.get("status", "unknown"))))
+            send_text(chat_id, t("msg.task_no_accept", status=status_tag(found.get("status", "unknown"))))
             return True
 
         # ── Run post-acceptance tests before committing ──
@@ -3849,11 +3798,11 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if not test_result["passed"]:
                 error_detail = test_result.get("error") or ""
                 output = test_result.get("output") or ""
-                msg = "验收测试未通过，任务保持待验收状态。\n\n"
+                msg = t("msg.accept_test_failed") + "\n\n"
                 if error_detail:
-                    msg += "错误: {}\n".format(error_detail)
+                    msg += t("msg.error_prefix", err=error_detail) + "\n"
                 if output:
-                    msg += "测试输出:\n{}".format(output[:2000])
+                    msg += t("msg.test_output", output=output[:2000])
                 send_text(chat_id, msg)
                 return True
 
@@ -3904,16 +3853,16 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                 sha = commit_result.get("commit_sha", "")
                 files = commit_result.get("committed_files", [])
                 if files:
-                    git_commit_msg = "\nGit: 已提交变更 (commit={}, {} 个文件)".format(sha, len(files))
+                    git_commit_msg = "\nGit: commit={}, {} files".format(sha, len(files))
                 else:
-                    git_commit_msg = "\nGit: 无新增变更需要提交"
+                    git_commit_msg = "\nGit: no changes to commit"
             elif commit_result.get("error"):
-                git_commit_msg = "\nGit: 提交失败 - {}".format(commit_result["error"])
+                git_commit_msg = "\nGit: commit failed - {}".format(commit_result["error"])
         except Exception as exc:
-            git_commit_msg = "\nGit: 提交异常 - {}".format(str(exc)[:200])
+            git_commit_msg = "\nGit: commit error - {}".format(str(exc)[:200])
 
         # Build confirmation message and optional restart button
-        _accept_msg = "任务 [{code}] {task_id} 验收通过并归档。\n状态: 验收通过\narchive_id={archive_id}{git_msg}\n可用 /archive_show {archive_id} 查看归档详情。".format(
+        _accept_msg = t("msg.task_accepted", code="{code}", task_id="{task_id}", archive_id="{archive_id}", git_msg="{git_msg}").format(
             code=found.get("task_code", "-"),
             task_id=found.get("task_id", ""),
             archive_id=archive_meta.get("archive_id", ""),
@@ -3926,11 +3875,11 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             pass
         if _restart_needed:
             _task_ref = found.get("task_code") or found.get("task_id", "")
-            _accept_msg += "\n\n⚙️ 检测到核心模块变更，建议重启服务以生效。"
+            _accept_msg += "\n\n" + t("msg.core_module_changed")
             _restart_kb = {
                 "inline_keyboard": [[
-                    {"text": "🔄 重启服务", "callback_data": safe_callback_data("restart:{}".format(_task_ref))},
-                    {"text": "⏭ 跳过重启", "callback_data": safe_callback_data("skip_restart:{}".format(_task_ref))},
+                    {"text": t("msg.restart_service"), "callback_data": safe_callback_data("restart:{}".format(_task_ref))},
+                    {"text": t("msg.skip_restart"), "callback_data": safe_callback_data("skip_restart:{}".format(_task_ref))},
                 ]]
             }
             send_text(chat_id, _accept_msg, reply_markup=_restart_kb)
@@ -3973,32 +3922,29 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if not otp_token:
                 send_text(
                     chat_id,
-                    "2FA验收拒绝需要OTP认证。\n"
-                    "用法: /reject {} <OTP> <原因>".format(task_ref),
+                    t("msg.reject_need_otp", ref=task_ref),
                 )
                 return True
             if not verify_otp(otp_token, window=otp_window):
                 send_text(
                     chat_id,
-                    "2FA验证失败: OTP无效或已过期。\n"
-                    "重试: /reject {} <OTP> <原因>".format(task_ref),
+                    t("msg.reject_otp_failed", ref=task_ref),
                 )
                 return True
             reason = reject_parts[2].strip() if len(reject_parts) >= 3 else ""
             if not reason:
                 send_text(
                     chat_id,
-                    "拒绝任务必须提供原因。\n"
-                    "用法: /reject {} <OTP> <原因>".format(task_ref),
+                    t("msg.reject_need_reason_otp", ref=task_ref),
                 )
                 return True
         else:
             reason = " ".join(reject_parts[1:]).strip() if len(reject_parts) >= 2 else ""
             if not reason:
-                send_text(chat_id, "拒绝任务必须提供原因。\n用法: /reject <task_id|代号> <原因>")
+                send_text(chat_id, t("msg.reject_need_reason"))
                 return True
         if not task_ref:
-            send_text(chat_id, "用法: /reject <task_id|代号> <原因>")
+            send_text(chat_id, t("msg.usage_reject"))
             return True
         found = find_task(task_ref)
         if not found:
@@ -4006,20 +3952,20 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if archived:
                 send_text(
                     chat_id,
-                    "任务已归档，无法拒绝验收。\narchive_id={}\nstatus={}".format(
+                    t("msg.task_already_archived", archive_id="{}", status="{}").format(
                         archived.get("archive_id", ""),
                         status_tag(archived.get("status", "unknown")),
                     ),
                 )
                 return True
-            send_text(chat_id, "任务不存在: {}".format(task_ref))
+            send_text(chat_id, t("msg.task_not_found", ref=task_ref))
             return True
         stage = str(found.get("_stage") or "")
         if stage != "results":
-            send_text(chat_id, "任务尚未进入验收阶段，当前 stage={}".format(stage))
+            send_text(chat_id, t("msg.task_not_ready", stage=stage))
             return True
         if str(found.get("status") or "") not in {"pending_acceptance", "rejected", "completed", "failed"}:
-            send_text(chat_id, "该任务当前状态不可拒绝: {}".format(status_tag(found.get("status", "unknown"))))
+            send_text(chat_id, t("msg.task_no_reject", status=status_tag(found.get("status", "unknown"))))
             return True
 
         found["status"] = "rejected"
@@ -4062,36 +4008,36 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             try:
                 rb_result = rollback_to_checkpoint(checkpoint)
                 if rb_result.get("success"):
-                    git_rollback_msg = "\nGit: 已回退到检查点 {} (回退前: {})".format(
+                    git_rollback_msg = "\nGit: rolled back to {} (was: {})".format(
                         rb_result.get("current_commit", ""),
                         rb_result.get("reverted_commit", ""),
                     )
                 elif rb_result.get("error"):
-                    git_rollback_msg = "\nGit: 回退失败 - {}".format(rb_result["error"])
+                    git_rollback_msg = "\nGit: rollback failed - {}".format(rb_result["error"])
             except Exception as exc:
-                git_rollback_msg = "\nGit: 回退异常 - {}".format(str(exc)[:200])
+                git_rollback_msg = "\nGit: rollback error - {}".format(str(exc)[:200])
         else:
-            git_rollback_msg = "\nGit: 无检查点记录，跳过回退"
+            git_rollback_msg = "\nGit: no checkpoint, skipping rollback"
 
         _reject_code = found.get("task_code", "-")
         _reject_keyboard = {
             "inline_keyboard": [
                 [
-                    {"text": "查看状态", "callback_data": "status:{}".format(_reject_code)},
-                    {"text": "重新开发", "callback_data": "retry:{}".format(_reject_code)},
+                    {"text": t("task.view_progress"), "callback_data": "status:{}".format(_reject_code)},
+                    {"text": t("task.retry"), "callback_data": "retry:{}".format(_reject_code)},
                 ],
                 [
-                    {"text": "验收通过", "callback_data": "accept:{}".format(_reject_code)},
-                    {"text": "查看事件", "callback_data": "events:{}".format(_reject_code)},
+                    {"text": t("task.accept"), "callback_data": "accept:{}".format(_reject_code)},
+                    {"text": t("task.view_events"), "callback_data": "events:{}".format(_reject_code)},
                 ],
             ]
         }
         send_text(
             chat_id,
-            "任务 [{code}] {task_id} 已标记为验收拒绝。\n状态: 验收拒绝\n原因: {reason}{git_msg}\n可用 /retry {code} 重新开发；/accept {code} 可改为验收通过后归档。".format(
+            t("msg.task_rejected", code="{code}", task_id="{task_id}", reason="{reason}", git_msg="{git_msg}").format(
                 code=_reject_code,
                 task_id=found.get("task_id", ""),
-                reason=acceptance.get("reason", "(未提供)"),
+                reason=acceptance.get("reason", t("retry.no_reason")),
                 git_msg=git_rollback_msg,
             ),
             reply_markup=_reject_keyboard,
@@ -4131,15 +4077,13 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if not otp_token:
                 send_text(
                     chat_id,
-                    "2FA is required for retry.\n"
-                    "Usage: /retry {} <6-digit OTP> [补充说明]".format(task_ref),
+                    t("msg.retry_need_otp", ref=task_ref),
                 )
                 return True
             if not verify_otp(otp_token, window=otp_window):
                 send_text(
                     chat_id,
-                    "2FA failed: OTP invalid or expired.\n"
-                    "Retry: /retry {} <OTP> [补充说明]".format(task_ref),
+                    t("msg.retry_otp_failed", ref=task_ref),
                 )
                 return True
 
@@ -4149,13 +4093,13 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if archived:
                 send_text(
                     chat_id,
-                    "任务已验收通过并归档，无法重新开发。\narchive_id={}\nstatus={}".format(
+                    t("msg.task_already_archived", archive_id="{}", status="{}").format(
                         archived.get("archive_id", ""),
                         status_tag(archived.get("status", "unknown")),
                     ),
                 )
                 return True
-            send_text(chat_id, "任务不存在: {}".format(task_ref))
+            send_text(chat_id, t("msg.task_not_found", ref=task_ref))
             return True
 
         # AC-6: Workspace queue compatibility
@@ -4197,7 +4141,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             update_task_runtime(updated, status="queued", stage="pending")
             send_text(
                 chat_id,
-                "{}\n工作区当前有任务执行中，已加入队列（位置: 第{}个）。\n前一任务完成后将自动启动。".format(msg, pos),
+                t("msg.task_queued", msg=msg, pos=pos),
                 reply_markup=back_to_menu_keyboard(),
             )
         else:
@@ -4286,15 +4230,15 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
     if txt.startswith("/clear_tasks"):
         active = list_active_tasks(chat_id=chat_id)
         if not active:
-            send_text(chat_id, "当前没有活动任务，无需清空。", reply_markup=back_to_menu_keyboard())
+            send_text(chat_id, t("msg.no_active_tasks"), reply_markup=back_to_menu_keyboard())
             return True
         removed = clear_active_tasks(chat_id)
         if removed == 0:
-            send_text(chat_id, "当前所有任务均在运行中，无法清空。", reply_markup=back_to_menu_keyboard())
+            send_text(chat_id, t("msg.all_tasks_running"), reply_markup=back_to_menu_keyboard())
         else:
             send_text(
                 chat_id,
-                "已清空任务列表，共移除 {} 个已归档/待验收任务（运行中的任务已保留）。".format(removed),
+                t("msg.tasks_cleared", count=removed),
                 reply_markup=back_to_menu_keyboard(),
             )
         return True
@@ -4331,14 +4275,14 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if not merged:
                 send_text(
                     chat_id,
-                    "当前没有活动任务（含待验收）。",
+                    t("msg.no_active_tasks_status"),
                     reply_markup=back_to_menu_keyboard(),
                 )
                 return True
-            lines = ["活动任务列表（含待验收）:"]
+            lines = [t("msg.active_task_list")]
             for item in merged[:20]:
                 lines.append(
-                    "[{code}] {status}({status_tag}) {action}\n验收: {acceptance}\n任务ID={task_id}\n更新时间={updated}\n内容: {text}".format(
+                    t("msg.task_list_item", code="{code}", status="{status}", status_tag="{status_tag}", action="{action}", acceptance="{acceptance}", task_id="{task_id}", updated="{updated}", text="{text}").format(
                         code=item.get("task_code", "-"),
                         status=item.get("status", "unknown"),
                         status_tag=status_tag(item.get("status", "unknown")),
@@ -4360,7 +4304,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                 if st:
                     send_text(
                         chat_id,
-                        "任务 [{code}] {task_id} 状态: {status}({status_tag})\naction={action}\nstage={stage}\nupdated_at={updated}\nstarted_at={started}\nended_at={ended}\n结束标记={end_marker}\n概要: {summary}".format(
+                        "Task [{code}] {task_id} Status: {status}({status_tag})\naction={action}\nstage={stage}\nupdated_at={updated}\nstarted_at={started}\nended_at={ended}\nend_marker={end_marker}\nsummary: {summary}".format(
                             code=st.get("task_code", "-"),
                             task_id=st.get("task_id", ""),
                             status=st.get("status", "unknown"),
@@ -4371,7 +4315,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                             started=st.get("started_at", ""),
                             ended=st.get("ended_at", ""),
                             end_marker=str(bool(st.get("has_end_marker"))).lower(),
-                            summary=str(st.get("summary", "")).strip()[:300] or "(暂无概要)",
+                            summary=str(st.get("summary", "")).strip()[:300] or t("msg.no_summary_short"),
                         ),
                     )
                     return True
@@ -4379,7 +4323,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if archived:
                 send_text(
                     chat_id,
-                    "归档任务 [{code}] 状态: {status}({status_tag})\n验收: 验收通过(已归档)\naction={action}\narchive_id={archive_id}\ntask_id={task_id}\ncompleted_at={completed_at}\n概要: {summary}".format(
+                    "Archive [{code}] Status: {status}({status_tag})\nAccepted (archived)\naction={action}\narchive_id={archive_id}\ntask_id={task_id}\ncompleted_at={completed_at}\nsummary: {summary}".format(
                         code=archived.get("task_code", "-"),
                         status=archived.get("status", "unknown"),
                         status_tag=status_tag(archived.get("status", "unknown")),
@@ -4391,7 +4335,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                     ),
                 )
                 return True
-            send_text(chat_id, "任务不存在: {}".format(task_ref))
+            send_text(chat_id, t("msg.task_not_found", ref=task_ref))
             return True
         found = merge_task_with_status(found)
         executor = found.get("executor") or {}
@@ -4400,7 +4344,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         st = found.get("_status_snapshot") if isinstance(found.get("_status_snapshot"), dict) else {}
         send_text(
             chat_id,
-            "任务 [{code}] {task_id} 状态: {status}({status_tag})\n验收标识: {acceptance_tag}\naction={action}\nstage={stage}\nupdated_at={updated}\nstarted_at={started}\nended_at={ended}\n结束标记={end_marker}\nelapsed_ms={elapsed}\n概要: {summary}\n下一步: {next_action}\n验收文档: {doc_file}\n验收用例: {cases_file}".format(
+            "Task [{code}] {task_id} Status: {status}({status_tag})\nAcceptance: {acceptance_tag}\naction={action}\nstage={stage}\nupdated_at={updated}\nstarted_at={started}\nended_at={ended}\nend_marker={end_marker}\nelapsed_ms={elapsed}\nsummary: {summary}\nnext: {next_action}\ndoc: {doc_file}\ncases: {cases_file}".format(
                 code=code,
                 task_id=found.get("task_id", ""),
                 status=found.get("status", "unknown"),
@@ -4427,7 +4371,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
     if txt.startswith("/events"):
         parts = txt.split(maxsplit=1)
         if len(parts) < 2:
-            send_text(chat_id, "用法: /events <task_id|代号>")
+            send_text(chat_id, t("msg.usage_events"))
             return True
         task_ref = parts[1].strip()
         task_id = resolve_task_ref(task_ref) or task_ref
@@ -4445,7 +4389,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                 code = str(archived.get("task_code") or "-")
                 send_text(chat_id, build_events_text(task_id, code))
                 return True
-            send_text(chat_id, "任务不存在: {}".format(task_ref))
+            send_text(chat_id, t("msg.task_not_found", ref=task_ref))
             return True
         send_text(chat_id, build_events_text(str(st.get("task_id") or task_id), str(st.get("task_code") or "-")))
         return True
@@ -4453,20 +4397,20 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
     if txt.startswith("/archive_show"):
         parts = txt.split(maxsplit=1)
         if len(parts) < 2:
-            send_text(chat_id, "用法: /archive_show <archive_id|task_id|代号>")
+            send_text(chat_id, t("msg.usage_archive_show"))
             return True
         ref = parts[1].strip()
         item = find_archive_entry(ref)
         if not item:
             suggest = search_archive_entries(ref, limit=5)
             if not suggest:
-                send_text(chat_id, "未找到归档任务: {}".format(ref))
+                send_text(chat_id, t("msg.archive_not_found", ref=ref))
                 return True
-            send_text(chat_id, build_archive_list_text(suggest, "未精确命中，以下为相关归档任务:"))
+            send_text(chat_id, build_archive_list_text(suggest, t("msg.archive_fuzzy_matches")))
             return True
         send_text(
             chat_id,
-            "归档详情\narchive_id={archive_id}\n任务代号={code}\ntask_id={task_id}\naction={action}\nstatus={status}\ncompleted_at={completed_at}\n概要: {summary}".format(
+            t("msg.archive_detail", archive_id="{archive_id}", code="{code}", task_id="{task_id}", action="{action}", status="{status}", completed_at="{completed_at}", summary="{summary}").format(
                 archive_id=item.get("archive_id", ""),
                 code=item.get("task_code", "-"),
                 task_id=item.get("task_id", ""),
@@ -4483,20 +4427,20 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         ]:
             p = Path(str(item.get(key) or ""))
             if p.exists() and p.is_file():
-                send_text(chat_id, "{} 文件: {}".format(caption, str(p)))
+                send_text(chat_id, "{} {}: {}".format(caption, "file", str(p)))
         return True
 
     if txt.startswith("/archive_log"):
         parts = txt.split(maxsplit=1)
         if len(parts) < 2:
-            send_text(chat_id, "用法: /archive_log <语意关键词|archive_id|task_id|代号>")
+            send_text(chat_id, t("msg.usage_archive_log"))
             return True
         ref = parts[1].strip()
         exact = find_archive_entry(ref)
         if exact:
             send_text(
                 chat_id,
-                "归档日志\narchive_id={archive_id}\n任务代号={code}\ntask_id={task_id}\naction={action}\nstatus={status}\n概要: {summary}".format(
+                t("msg.archive_log_detail", archive_id="{archive_id}", code="{code}", task_id="{task_id}", action="{action}", status="{status}", summary="{summary}").format(
                     archive_id=exact.get("archive_id", ""),
                     code=exact.get("task_code", "-"),
                     task_id=exact.get("task_id", ""),
@@ -4512,20 +4456,20 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             ]:
                 p = Path(str(exact.get(key) or ""))
                 if p.exists() and p.is_file():
-                    send_text(chat_id, "{} 文件: {}".format(caption, str(p)))
+                    send_text(chat_id, "{} {}: {}".format(caption, "file", str(p)))
             return True
         matches = search_archive_entries(ref, limit=30)
         if not matches:
-            send_text(chat_id, "未找到相关归档日志: {}".format(ref))
+            send_text(chat_id, t("msg.archive_log_not_found", ref=ref))
             return True
         send_text(
             chat_id,
             build_archive_grouped_text(
                 matches,
-                "归档日志检索结果（关键词: {}）:".format(ref),
+                t("msg.archive_log_search", keyword=ref),
                 limit_per_group=4,
             )
-            + "\n可继续用 /archive_log <archive_id|task_id|代号> 拉取具体日志文件。",
+            + "\n" + t("msg.archive_log_hint"),
         )
         return True
 
@@ -4534,11 +4478,11 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if not query:
             grouped = grouped_archive_overview(limit_per_group=3)
             if not grouped:
-                send_text(chat_id, "暂无归档任务。", reply_markup=back_to_menu_keyboard())
+                send_text(chat_id, t("msg.no_archives"), reply_markup=back_to_menu_keyboard())
                 return True
-            lines = ["归档任务分类概览:"]
+            lines = [t("msg.archive_overview")]
             for action, info in grouped.items():
-                lines.append("类型 {}: {} 条".format(action, info.get("count", 0)))
+                lines.append(t("msg.type_count", action=action, count=info.get("count", 0)))
                 for item in (info.get("items") or []):
                     lines.append(
                         "  [{code}] {archive_id} {status} | {summary}".format(
@@ -4548,19 +4492,19 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                             summary=str(item.get("summary", "")).strip()[:60],
                         )
                     )
-            lines.append("点击 [归档检索] 可搜索归档任务。")
+            lines.append(t("msg.archive_search_hint"))
             send_text(chat_id, "\n".join(lines[:120]), reply_markup=back_to_menu_keyboard())
             return True
         matches = search_archive_entries(query, limit=20)
         if not matches:
-            send_text(chat_id, "未找到相关归档任务: {}".format(query), reply_markup=back_to_menu_keyboard())
+            send_text(chat_id, t("msg.archive_not_found", ref=query), reply_markup=back_to_menu_keyboard())
             return True
         if len(matches) > 8:
             send_text(
                 chat_id,
                 build_archive_grouped_text(
                     matches,
-                    "归档检索结果（关键词: {}）:".format(query),
+                    t("msg.archive_search_result", keyword=query),
                     limit_per_group=4,
                 ),
                 reply_markup=back_to_menu_keyboard(),
@@ -4568,7 +4512,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         else:
             send_text(
                 chat_id,
-                build_archive_list_text(matches, "归档检索结果（关键词: {}）:".format(query)),
+                build_archive_list_text(matches, t("msg.archive_search_result", keyword=query)),
                 reply_markup=back_to_menu_keyboard(),
             )
         return True
@@ -4578,7 +4522,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
     if txt.startswith("/workspace_add"):
         parts = txt.split(maxsplit=2)
         if len(parts) < 2:
-            send_text(chat_id, "用法: /workspace_add <路径|关键词> [标签]")
+            send_text(chat_id, t("msg.usage_workspace_add"))
             return True
         raw_path = parts[1].strip()
         label = parts[2].strip() if len(parts) >= 3 else ""
@@ -4586,32 +4530,23 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if p.exists() and p.is_dir():
             # Exact path provided
             if is_risky_workspace(p.resolve()):
-                send_text(chat_id, "拒绝添加高风险目录: {}".format(str(p.resolve())))
+                send_text(chat_id, t("msg.reject_risky_dir", path=str(p.resolve())))
                 return True
             try:
                 from workspace_registry import add_workspace
                 ws = add_workspace(p, label=label, created_by=user_id)
                 send_text(
                     chat_id,
-                    "工作目录已添加:\n"
-                    "ID: {id}\n"
-                    "标签: {label}\n"
-                    "路径: {path}\n"
-                    "默认: {default}".format(
-                        id=ws["id"],
-                        label=ws["label"],
-                        path=ws["path"],
-                        default="是" if ws.get("is_default") else "否",
-                    ),
+                    t("msg.workspace_added", id=ws["id"], label=ws["label"], path=ws["path"], default=t("msg.yes") if ws.get("is_default") else t("msg.no")),
                     reply_markup=back_to_menu_keyboard(),
                 )
             except ValueError as exc:
-                send_text(chat_id, "添加失败: {}".format(str(exc)))
+                send_text(chat_id, t("msg.add_failed", err=str(exc)))
             return True
 
         # Path doesn't exist — try fuzzy search if it looks like a keyword
         if _looks_like_path(raw_path):
-            send_text(chat_id, "路径不存在或不是目录: {}".format(raw_path))
+            send_text(chat_id, t("msg.path_not_exist", path=raw_path))
             return True
 
         # Fuzzy search for git workspaces matching the keyword
@@ -4619,42 +4554,32 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if not candidates:
             send_text(
                 chat_id,
-                "未找到匹配 '{}' 的 Git 工作目录。\n"
-                "请输入完整路径或检查搜索关键词。".format(raw_path),
+                t("msg.workspace_not_found", query=raw_path),
                 reply_markup=back_to_menu_keyboard(),
             )
             return True
         if len(candidates) == 1:
             target = candidates[0]
             if is_risky_workspace(target):
-                send_text(chat_id, "拒绝添加高风险目录: {}".format(str(target)))
+                send_text(chat_id, t("msg.reject_risky_dir", path=str(target)))
                 return True
             try:
                 from workspace_registry import add_workspace
                 ws = add_workspace(target, label=label or target.name, created_by=user_id)
                 send_text(
                     chat_id,
-                    "模糊匹配成功，工作目录已添加:\n"
-                    "ID: {id}\n"
-                    "标签: {label}\n"
-                    "路径: {path}\n"
-                    "默认: {default}".format(
-                        id=ws["id"],
-                        label=ws["label"],
-                        path=ws["path"],
-                        default="是" if ws.get("is_default") else "否",
-                    ),
+                    t("msg.workspace_added", id=ws["id"], label=ws["label"], path=ws["path"], default=t("msg.yes") if ws.get("is_default") else t("msg.no")),
                     reply_markup=back_to_menu_keyboard(),
                 )
             except ValueError as exc:
-                send_text(chat_id, "添加失败: {}".format(str(exc)))
+                send_text(chat_id, t("msg.add_failed", err=str(exc)))
             return True
 
         # Multiple matches — show interactive selection
         store_workspace_candidates(chat_id, user_id, raw_path, candidates)
         send_text(
             chat_id,
-            "检索到 {} 个匹配 '{}' 的 Git 工作目录，请选择:".format(len(candidates), raw_path),
+            t("msg.workspace_candidates", count=len(candidates), keyword=raw_path),
             reply_markup=fuzzy_workspace_add_keyboard(candidates),
         )
         return True
@@ -4662,20 +4587,20 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
     if txt.startswith("/workspace_remove"):
         parts = txt.split(maxsplit=1)
         if len(parts) < 2:
-            send_text(chat_id, "用法: /workspace_remove <工作目录ID>")
+            send_text(chat_id, t("msg.usage_workspace_remove"))
             return True
         ws_id = parts[1].strip()
         from workspace_registry import remove_workspace
         if remove_workspace(ws_id):
-            send_text(chat_id, "工作目录已移除: {}".format(ws_id), reply_markup=back_to_menu_keyboard())
+            send_text(chat_id, t("msg.workspace_dir_removed", id=ws_id), reply_markup=back_to_menu_keyboard())
         else:
-            send_text(chat_id, "工作目录未找到: {}".format(ws_id))
+            send_text(chat_id, t("msg.workspace_dir_not_found", id=ws_id))
         return True
 
     if txt.startswith("/workspace_default"):
         parts = txt.split(maxsplit=1)
         if len(parts) < 2:
-            send_text(chat_id, "用法: /workspace_default <工作目录ID>")
+            send_text(chat_id, t("msg.usage_workspace_default"))
             return True
         ws_id = parts[1].strip()
         from workspace_registry import set_default_workspace, get_workspace
@@ -4683,11 +4608,11 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             ws = get_workspace(ws_id)
             send_text(
                 chat_id,
-                "默认工作目录已设置: {} ({})".format(ws_id, ws.get("label", "") if ws else ""),
+                t("msg.default_workspace_set", id=ws_id, label=ws.get("label", "") if ws else ""),
                 reply_markup=back_to_menu_keyboard(),
             )
         else:
-            send_text(chat_id, "工作目录未找到: {}".format(ws_id))
+            send_text(chat_id, t("msg.workspace_dir_not_found", id=ws_id))
         return True
 
     if txt.startswith("/workspace_search_roots"):
@@ -4786,20 +4711,20 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if not workspaces:
             send_text(
                 chat_id,
-                "尚未注册任何工作目录。\n使用 /workspace_add <路径> [标签] 添加。",
+                t("msg.no_workspaces"),
                 reply_markup=back_to_menu_keyboard(),
             )
             return True
-        lines = ["注册的工作目录:"]
+        lines = [t("msg.workspace_list")]
         for ws in workspaces:
             flags = []
             if ws.get("is_default"):
-                flags.append("默认")
+                flags.append(t("msg.default_flag"))
             if not ws.get("active", True):
-                flags.append("停用")
+                flags.append(t("msg.disabled_flag"))
             flag_str = " [{}]".format(",".join(flags)) if flags else ""
             lines.append(
-                "{label}{flags}\n  ID: {id}\n  路径: {path}\n  并发: {concurrent}".format(
+                t("msg.workspace_list_item", label="{label}", flags="{flags}", id="{id}", path="{path}", concurrent="{concurrent}").format(
                     label=ws.get("label", ws["id"]),
                     flags=flag_str,
                     id=ws["id"],
@@ -4817,27 +4742,20 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if not workers:
             send_text(
                 chat_id,
-                "并行调度器未运行或无工作线程。\n"
-                "确保 EXECUTOR_MODE=parallel 或有多个工作目录注册。",
+                t("msg.dispatcher_not_running"),
                 reply_markup=back_to_menu_keyboard(),
             )
             return True
-        lines = ["并行调度器状态:"]
+        lines = [t("msg.dispatcher_status")]
         for ws_id, w in workers.items():
-            state = "运行中" if w.get("running") else "已停止"
-            busy = "忙碌({})".format(w.get("current_task_id", "")) if w.get("busy") else "空闲"
+            state = t("msg.running") if w.get("running") else t("msg.stopped")
+            busy = t("msg.busy", task=w.get("current_task_id", "")) if w.get("busy") else t("msg.idle")
             lines.append(
-                "{label} ({state})\n"
-                "  ID: {id}\n"
-                "  {busy} | 队列: {queue} | 完成: {done} | 失败: {fail}".format(
+                "{label} ({state})\n  ID: {id}\n".format(
                     label=w.get("ws_label", ws_id),
                     state=state,
                     id=ws_id,
-                    busy=busy,
-                    queue=w.get("queue_size", 0),
-                    done=w.get("tasks_completed", 0),
-                    fail=w.get("tasks_failed", 0),
-                )
+                ) + t("msg.worker_stats", busy=busy, queue=w.get("queue_size", 0), done=w.get("tasks_completed", 0), fail=w.get("tasks_failed", 0))
             )
         send_text(chat_id, "\n\n".join(lines), reply_markup=back_to_menu_keyboard())
         return True
