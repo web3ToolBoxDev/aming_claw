@@ -532,6 +532,32 @@ def back_to_menu_keyboard() -> Dict:
     }
 
 
+def pending_tasks_keyboard(tasks: List[Dict], action_prefix: str, show_desc: bool = True) -> Dict:
+    """Build an inline keyboard for selecting a task from a list.
+
+    Args:
+        tasks: Task dicts, each containing task_code + text/summary.
+        action_prefix: Callback prefix (accept/reject/retry/cancel).
+        show_desc: Whether to include short description in button text.
+    Returns:
+        Telegram InlineKeyboardMarkup dict.
+    """
+    rows: List[List[Dict]] = []
+    for t in tasks[:20]:
+        code = str(t.get("task_code") or "-")
+        if show_desc:
+            desc = str(t.get("text") or t.get("summary") or "").strip()
+            if len(desc) > 20:
+                desc = desc[:20] + "..."
+            label = "{} | {}".format(code, desc) if desc else code
+        else:
+            label = code
+        cb = safe_callback_data(action_prefix, code)
+        rows.append([{"text": label, "callback_data": cb}])
+    rows.append([{"text": "\u00ab \u8fd4\u56de\u4e3b\u83dc\u5355", "callback_data": "menu:main"}])
+    return {"inline_keyboard": rows}
+
+
 def task_list_action_keyboard() -> Dict:
     """Keyboard shown below task list: clear all + back to menu."""
     return {
@@ -799,15 +825,17 @@ HELP_TEXT = (
     "  /info - \u67e5\u770b\u7cfb\u7edf\u4fe1\u606f\n"
     "  /ops_whoami - \u67e5\u770b\u8eab\u4efd\u4fe1\u606f\n\n"
     "\u4efb\u52a1\u7ba1\u7406:\n"
-    "  /task <\u5185\u5bb9> - \u521b\u5efa\u65b0\u4efb\u52a1\n"
+    "  /task [\u5185\u5bb9] - \u521b\u5efa\u65b0\u4efb\u52a1\uff08\u65e0\u53c2\u6570\u65f6\u4ea4\u4e92\u5f0f\u9009\u62e9\u5de5\u4f5c\u533a\uff09\n"
     "  /status [\u4ee3\u53f7] - \u67e5\u770b\u4efb\u52a1\u5217\u8868\u6216\u5355\u4e2a\u4efb\u52a1\n"
     "  /events <\u4ee3\u53f7> - \u67e5\u770b\u4efb\u52a1\u4e8b\u4ef6\n"
-    "  /accept <\u4ee3\u53f7> [OTP] - \u9a8c\u6536\u4efb\u52a1\n"
-    "  /reject <\u4ee3\u53f7> [OTP] <\u539f\u56e0> - \u62d2\u7edd\u4efb\u52a1\n"
+    "  /accept [\u4ee3\u53f7] [OTP] - \u9a8c\u6536\u4efb\u52a1\uff08\u65e0\u53c2\u6570\u65f6\u5f39\u51fa\u5f85\u9a8c\u6536\u5217\u8868\uff09\n"
+    "  /reject [\u4ee3\u53f7] [OTP] <\u539f\u56e0> - \u62d2\u7edd\u4efb\u52a1\uff08\u65e0\u53c2\u6570\u65f6\u5f39\u51fa\u53ef\u62d2\u7edd\u5217\u8868\uff09\n"
+    "  /retry [\u4ee3\u53f7] [\u8865\u5145\u8bf4\u660e] - \u91cd\u8bd5\u4efb\u52a1\uff08\u65e0\u53c2\u6570\u65f6\u5f39\u51fa\u53ef\u91cd\u8bd5\u5217\u8868\uff09\n"
+    "  /cancel [\u4ee3\u53f7] - \u53d6\u6d88\u4efb\u52a1\uff08\u65e0\u53c2\u6570\u65f6\u5f39\u51fa\u53ef\u53d6\u6d88\u5217\u8868\uff09\n"
     "  /clear_tasks - \u6e05\u7a7a\u4efb\u52a1\u5217\u8868\n\n"
     "\u540e\u7aef & \u6a21\u578b:\n"
-    "  /switch_backend <codex|claude|pipeline> - \u5207\u6362\u540e\u7aef\n"
-    "  /switch_model [\u6a21\u578bID] - \u5207\u6362AI\u6a21\u578b\n"
+    "  /switch_backend [\u540e\u7aef] - \u5207\u6362\u540e\u7aef\uff08\u65e0\u53c2\u6570\u65f6\u5f39\u51fa\u9009\u62e9\u83dc\u5355\uff09\n"
+    "  /switch_model [\u6a21\u578bID] - \u5207\u6362AI\u6a21\u578b\uff08\u65e0\u53c2\u6570\u65f6\u5f39\u51fa\u9009\u62e9\u83dc\u5355\uff09\n"
     "  /set_role_model <\u89d2\u8272> <\u6a21\u578b|default> [provider] - \u8bbe\u7f6e\u89d2\u8272\u6d41\u6c34\u7ebf\u6a21\u578b\n"
     "  /set_pipeline <\u914d\u7f6e> - \u8bbe\u7f6e\u6d41\u6c34\u7ebf\n"
     "  /show_pipeline - \u67e5\u770b\u6d41\u6c34\u7ebf\u914d\u7f6e\n\n"

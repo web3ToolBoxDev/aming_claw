@@ -82,6 +82,7 @@ from interactive_menu import (
     cancel_keyboard,
     back_to_menu_keyboard,
     confirm_cancel_keyboard,
+    pending_tasks_keyboard,
     task_list_action_keyboard,
     task_mgmt_menu_keyboard,
     task_status_list_keyboard,
@@ -927,6 +928,11 @@ def handle_callback_query(cb: Dict) -> None:
             else:
                 handle_command(chat_id, user_id, "/retry {}".format(ref))
                 answer_callback_query(cb_id, "重新开发已提交")
+            return
+        if data.startswith("cmd_cancel:"):
+            ref = data.split(":", 1)[1].strip()
+            handle_command(chat_id, user_id, "/cancel {}".format(ref))
+            answer_callback_query(cb_id, "\u5df2\u53d6\u6d88")
             return
         if data.startswith("model_select:"):
             if not is_ops_allowed(chat_id, user_id):
@@ -3202,6 +3208,28 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         send_text(chat_id, "\n".join(lines), reply_markup=back_to_menu_keyboard())
         return True
 
+    # -- /task (no args): interactive workspace selection + task input --
+    if t == "/task":
+        from workspace_registry import ensure_current_workspace_registered, list_workspaces as _list_ws_cmd
+        ensure_current_workspace_registered()
+        workspaces = _list_ws_cmd()
+        if len(workspaces) > 1:
+            send_text(
+                chat_id,
+                "\U0001f4dd \u65b0\u5efa\u4efb\u52a1\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u8bf7\u9009\u62e9\u4efb\u52a1\u6267\u884c\u7684\u5de5\u4f5c\u533a\u57df:",
+                reply_markup=workspace_select_keyboard(workspaces, "ws_task_select"),
+            )
+        else:
+            set_pending_action(chat_id, user_id, "new_task")
+            send_text(
+                chat_id,
+                PENDING_PROMPTS["new_task"],
+                reply_markup=cancel_keyboard(),
+            )
+        return True
+
     if t.startswith("/auth_init"):
         st = init_authenticator(issuer="aming-claw", account_name="telegram-ops")
         secret_line = (
@@ -3284,11 +3312,21 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if not is_ops_allowed(chat_id, user_id):
             send_text(chat_id, "not authorized for /switch_backend")
             return True
+        if not backend:
+            # No args: show backend selection inline keyboard
+            send_text(
+                chat_id,
+                "\U0001f504 \u5207\u6362\u540e\u7aef\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u5f53\u524d\u540e\u7aef: {}\n\u8bf7\u9009\u62e9\u65b0\u7684\u540e\u7aef\uff1a".format(get_agent_backend()),
+                reply_markup=backend_select_keyboard(),
+            )
+            return True
         if backend not in KNOWN_BACKENDS:
             send_text(
                 chat_id,
-                "用法: /switch_backend <{}>\n当前后端: {}".format(
-                    "|".join(sorted(KNOWN_BACKENDS)), get_agent_backend()
+                "\u672a\u77e5\u540e\u7aef: {}\n\u53ef\u7528: {}".format(
+                    backend, "|".join(sorted(KNOWN_BACKENDS))
                 ),
             )
             return True
@@ -3644,7 +3682,22 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
     if t.startswith("/accept"):
         parts = t.split(maxsplit=2)
         if len(parts) < 2:
-            send_text(chat_id, "用法: /accept <task_id|代号> [OTP]")
+            # No args: show pending_acceptance tasks as interactive list
+            tasks = _collect_tasks_by_status(chat_id, "pending_acceptance")
+            if not tasks:
+                send_text(
+                    chat_id,
+                    "\U0001f4ed \u5f53\u524d\u6ca1\u6709\u5f85\u9a8c\u6536\u7684\u4efb\u52a1\u3002",
+                    reply_markup=back_to_menu_keyboard(),
+                )
+                return True
+            send_text(
+                chat_id,
+                "\u2705 \u5f85\u9a8c\u6536\u4efb\u52a1\uff08\u5171 {} \u4e2a\uff09\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u8bf7\u9009\u62e9\u8981\u9a8c\u6536\u7684\u4efb\u52a1\uff1a".format(len(tasks)),
+                reply_markup=pending_tasks_keyboard(tasks, "accept"),
+            )
             return True
         task_ref = parts[1].strip()
         otp_token = parts[2].strip() if len(parts) >= 3 else None
@@ -3777,7 +3830,22 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         raw_reject = t[len("/reject"):].strip()
         reject_parts = raw_reject.split(None, 2)
         if not reject_parts:
-            send_text(chat_id, "用法: /reject <task_id|代号> <原因>")
+            # No args: show pending_acceptance tasks as interactive list
+            tasks = _collect_tasks_by_status(chat_id, "pending_acceptance")
+            if not tasks:
+                send_text(
+                    chat_id,
+                    "\U0001f4ed \u5f53\u524d\u6ca1\u6709\u53ef\u62d2\u7edd\u7684\u4efb\u52a1\u3002",
+                    reply_markup=back_to_menu_keyboard(),
+                )
+                return True
+            send_text(
+                chat_id,
+                "\u274c \u53ef\u62d2\u7edd\u4efb\u52a1\uff08\u5171 {} \u4e2a\uff09\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u8bf7\u9009\u62e9\u8981\u62d2\u7edd\u7684\u4efb\u52a1\uff1a".format(len(tasks)),
+                reply_markup=pending_tasks_keyboard(tasks, "reject"),
+            )
             return True
         task_ref = reject_parts[0]
         if _requires_acceptance_2fa():
@@ -3915,7 +3983,22 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         raw_retry = t[len("/retry"):].strip()
         retry_parts = raw_retry.split(None, 1)
         if not retry_parts:
-            send_text(chat_id, "用法: /retry <task_id|代号> [补充说明]")
+            # No args: show rejected tasks as interactive list
+            tasks = _collect_tasks_by_status(chat_id, "rejected")
+            if not tasks:
+                send_text(
+                    chat_id,
+                    "\U0001f4ed \u5f53\u524d\u6ca1\u6709\u53ef\u91cd\u8bd5\u7684\u4efb\u52a1\u3002",
+                    reply_markup=back_to_menu_keyboard(),
+                )
+                return True
+            send_text(
+                chat_id,
+                "\U0001f504 \u53ef\u91cd\u8bd5\u4efb\u52a1\uff08\u5171 {} \u4e2a\uff09\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u8bf7\u9009\u62e9\u8981\u91cd\u8bd5\u7684\u4efb\u52a1\uff1a".format(len(tasks)),
+                reply_markup=pending_tasks_keyboard(tasks, "retry"),
+            )
             return True
         task_ref = retry_parts[0]
         extra_instruction = retry_parts[1] if len(retry_parts) >= 2 else ""
@@ -4006,6 +4089,79 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                     updated.get("task_code", "-"),
                 ),
             )
+        return True
+
+    # -- /cancel: cancel processing/queued tasks --
+    if t.startswith("/cancel"):
+        cancel_parts = t.split(maxsplit=1)
+        cancel_arg = cancel_parts[1].strip() if len(cancel_parts) >= 2 else ""
+        if cancel_arg:
+            # Direct cancel by ref
+            found = find_task(cancel_arg)
+            if not found:
+                send_text(chat_id, "\u4efb\u52a1\u4e0d\u5b58\u5728: {}".format(cancel_arg), reply_markup=back_to_menu_keyboard())
+                return True
+            task_id = str(found.get("task_id") or "")
+            st = task_status_snapshot(task_id)
+            current_status = str((st or found).get("status") or found.get("status") or "").strip().lower()
+            if current_status not in ("pending", "processing", "queued"):
+                send_text(
+                    chat_id,
+                    "\u4ec5\u53ef\u53d6\u6d88\u5f85\u5904\u7406/\u6267\u884c\u4e2d/\u6392\u961f\u4e2d\u7684\u4efb\u52a1\uff0c\u5f53\u524d\u72b6\u6001: {}".format(current_status),
+                    reply_markup=back_to_menu_keyboard(),
+                )
+                return True
+            # Remove from workspace queue if queued
+            if current_status == "queued":
+                ws_id = str(found.get("target_workspace_id", "")).strip()
+                if ws_id:
+                    remove_from_queue(ws_id, task_id)
+            # Remove pending file
+            pending_path = task_file("pending", task_id)
+            if pending_path.exists():
+                pending_path.unlink()
+            processing_path = task_file("processing", task_id)
+            if processing_path.exists():
+                processing_path.unlink()
+            update_task_runtime(found, status="cancelled", stage="results")
+            mark_task_finished(found, status="cancelled", stage="results", error="\u7528\u6237\u53d6\u6d88")
+            send_text(
+                chat_id,
+                "\u2705 \u4efb\u52a1 [{}] \u5df2\u53d6\u6d88\u3002".format(cancel_arg),
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return True
+        # No args: show cancellable tasks (processing + queued + pending)
+        tasks_processing = _collect_tasks_by_status(chat_id, "processing")
+        tasks_pending = _collect_tasks_by_status(chat_id, "pending")
+        # Also collect queued tasks
+        tasks_queued: List[Dict] = []
+        active = list_active_tasks(chat_id=chat_id)
+        for item in active:
+            tid = str(item.get("task_id") or "")
+            st = task_status_snapshot(tid) if tid else None
+            cs = str((st or item).get("status") or item.get("status") or "").strip().lower()
+            if cs == "queued":
+                enriched = dict(item)
+                if st:
+                    enriched["status"] = st.get("status", enriched.get("status"))
+                    enriched["task_code"] = st.get("task_code", enriched.get("task_code", "-"))
+                tasks_queued.append(enriched)
+        all_cancellable = tasks_pending + tasks_processing + tasks_queued
+        if not all_cancellable:
+            send_text(
+                chat_id,
+                "\U0001f4ed \u5f53\u524d\u6ca1\u6709\u53ef\u53d6\u6d88\u7684\u4efb\u52a1\u3002",
+                reply_markup=back_to_menu_keyboard(),
+            )
+            return True
+        send_text(
+            chat_id,
+            "\u26d4 \u53ef\u53d6\u6d88\u4efb\u52a1\uff08\u5171 {} \u4e2a\uff09\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            "\u8bf7\u9009\u62e9\u8981\u53d6\u6d88\u7684\u4efb\u52a1\uff1a".format(len(all_cancellable)),
+            reply_markup=pending_tasks_keyboard(all_cancellable, "cmd_cancel"),
+        )
         return True
 
     if t.startswith("/clear_tasks"):
