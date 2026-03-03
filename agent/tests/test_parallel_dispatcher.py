@@ -119,8 +119,13 @@ class TestParallelDispatcher(unittest.TestCase):
         self.ws1.mkdir()
         self.ws2 = Path(self.tmp.name) / "project-b"
         self.ws2.mkdir()
+        # Mock resolve_active_workspace to return ws1 so ensure_current_workspace_registered
+        # doesn't auto-register the real cwd as an extra workspace
+        self._patcher = patch("workspace.resolve_active_workspace", return_value=self.ws1)
+        self._patcher.start()
 
     def tearDown(self):
+        self._patcher.stop()
         os.environ.pop("SHARED_VOLUME_PATH", None)
         self.tmp.cleanup()
 
