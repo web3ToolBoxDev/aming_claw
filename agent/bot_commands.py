@@ -777,7 +777,7 @@ def build_archive_list_text(items: List[Dict], title: str) -> str:
     lines = [title]
     for item in items:
         lines.append(
-            t("msg.archive_list_item", code="{code}", status="{status}", action="{action}", archive_id="{archive_id}", task_id="{task_id}", summary="{summary}").format(
+            t("msg.archive_list_item",
                 code=item.get("task_code", "-"),
                 status=item.get("status", "unknown"),
                 action=item.get("action", "unknown"),
@@ -798,7 +798,7 @@ def build_archive_grouped_text(items: List[Dict], title: str, limit_per_group: i
         lines.append(t("msg.type_count", action=action, count=info.get("count", 0)))
         for item in (info.get("items") or []):
             lines.append(
-                t("msg.archive_group_item", code="{code}", status="{status}", archive_id="{archive_id}", task_id="{task_id}", summary="{summary}").format(
+                t("msg.archive_group_item",
                     code=item.get("task_code", "-"),
                     status=item.get("status", "unknown"),
                     archive_id=item.get("archive_id", ""),
@@ -3249,11 +3249,11 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             return True
         send_text(
             chat_id,
-            t("msg.2fa_status_detail", secret="{}", period="{}", digits="{}", updated="{}").format(
-                st.get("secret_b32", "")[:4] + "***" + st.get("secret_b32", "")[-4:],
-                st.get("period_sec", 60),
-                st.get("digits", 6),
-                st.get("updated_at", ""),
+            t("msg.2fa_status_detail",
+                secret=st.get("secret_b32", "")[:4] + "***" + st.get("secret_b32", "")[-4:],
+                period=st.get("period_sec", 60),
+                digits=st.get("digits", 6),
+                updated=st.get("updated_at", ""),
             ),
             reply_markup=back_to_menu_keyboard(),
         )
@@ -3409,12 +3409,12 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         stages = get_role_pipeline_stages()
         if model_id:
             tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
-            summary = t("msg.role_set", emoji="{}", label="{}", tag="{}", model="{}").format(
-                role_def.get("emoji", ""), role_def.get("label", role_name), tag, model_id
+            summary = t("msg.role_set",
+                emoji=role_def.get("emoji", ""), label=role_def.get("label", role_name), tag=tag, model=model_id
             ).strip()
         else:
-            summary = t("msg.role_restored", emoji="{}", label="{}").format(
-                role_def.get("emoji", ""), role_def.get("label", role_name)
+            summary = t("msg.role_restored",
+                emoji=role_def.get("emoji", ""), label=role_def.get("label", role_name)
             ).strip()
         send_text(
             chat_id,
@@ -3676,9 +3676,9 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if archived:
                 send_text(
                     chat_id,
-                    t("msg.task_already_archived", archive_id="{}", status="{}").format(
-                        archived.get("archive_id", ""),
-                        status_tag(archived.get("status", "unknown")),
+                    t("msg.task_already_archived",
+                        archive_id=archived.get("archive_id", ""),
+                        status=status_tag(archived.get("status", "unknown")),
                     ),
                 )
                 return True
@@ -3762,7 +3762,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             git_commit_msg = "\nGit: commit error - {}".format(str(exc)[:200])
 
         # Build confirmation message and optional restart button
-        _accept_msg = t("msg.task_accepted", code="{code}", task_id="{task_id}", archive_id="{archive_id}", git_msg="{git_msg}").format(
+        _accept_msg = t("msg.task_accepted",
             code=found.get("task_code", "-"),
             task_id=found.get("task_id", ""),
             archive_id=archive_meta.get("archive_id", ""),
@@ -3850,9 +3850,9 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if archived:
                 send_text(
                     chat_id,
-                    t("msg.task_already_archived", archive_id="{}", status="{}").format(
-                        archived.get("archive_id", ""),
-                        status_tag(archived.get("status", "unknown")),
+                    t("msg.task_already_archived",
+                        archive_id=archived.get("archive_id", ""),
+                        status=status_tag(archived.get("status", "unknown")),
                     ),
                 )
                 return True
@@ -3932,7 +3932,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         }
         send_text(
             chat_id,
-            t("msg.task_rejected", code="{code}", task_id="{task_id}", reason="{reason}", git_msg="{git_msg}").format(
+            t("msg.task_rejected",
                 code=_reject_code,
                 task_id=found.get("task_id", ""),
                 reason=acceptance.get("reason", t("retry.no_reason")),
@@ -3989,9 +3989,9 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if archived:
                 send_text(
                     chat_id,
-                    t("msg.task_already_archived", archive_id="{}", status="{}").format(
-                        archived.get("archive_id", ""),
-                        status_tag(archived.get("status", "unknown")),
+                    t("msg.task_already_archived",
+                        archive_id=archived.get("archive_id", ""),
+                        status=status_tag(archived.get("status", "unknown")),
                     ),
                 )
                 return True
@@ -4176,7 +4176,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             lines = [t("msg.active_task_list")]
             for item in merged[:20]:
                 lines.append(
-                    t("msg.task_list_item", code="{code}", status="{status}", status_tag="{status_tag}", action="{action}", acceptance="{acceptance}", task_id="{task_id}", updated="{updated}", text="{text}").format(
+                    t("msg.task_list_item",
                         code=item.get("task_code", "-"),
                         status=item.get("status", "unknown"),
                         status_tag=status_tag(item.get("status", "unknown")),
@@ -4334,7 +4334,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         if exact:
             send_text(
                 chat_id,
-                t("msg.archive_log_detail", archive_id="{archive_id}", code="{code}", task_id="{task_id}", action="{action}", status="{status}", summary="{summary}").format(
+                t("msg.archive_log_detail",
                     archive_id=exact.get("archive_id", ""),
                     code=exact.get("task_code", "-"),
                     task_id=exact.get("task_id", ""),
@@ -4613,7 +4613,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
                 flags.append(t("msg.disabled_flag"))
             flag_str = " [{}]".format(",".join(flags)) if flags else ""
             lines.append(
-                t("msg.workspace_list_item", label="{label}", flags="{flags}", id="{id}", path="{path}", concurrent="{concurrent}").format(
+                t("msg.workspace_list_item",
                     label=ws.get("label", ws["id"]),
                     flags=flag_str,
                     id=ws["id"],
