@@ -26,6 +26,7 @@ from backends import (  # noqa: E402
     _ANALYSIS_STAGES,
     _is_role_pipeline,
     _build_role_context,
+    _extract_text_from_claude_json,
     build_pipeline_stage_prompt,
     detect_stage_noop,
 )
@@ -500,6 +501,103 @@ class TestPipelinePresetHasRolePipeline(unittest.TestCase):
         kb = pipeline_preset_keyboard()
         all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
         self.assertTrue(any("role_pipeline" in d for d in all_data))
+
+
+class TestExtractTextFromClaudeJson(unittest.TestCase):
+    """Tests for _extract_text_from_claude_json helper."""
+
+    def test_simple_string_content(self):
+        """Single assistant message with string content."""
+        import json
+        raw = json.dumps({"role": "assistant", "content": "验收报告内容"})
+        result = _extract_text_from_claude_json(raw)
+        self.assertEqual(result, "验收报告内容")
+
+    def test_mixed_text_and_tool_use(self):
+        """Assistant message with text + tool_use blocks — only text extracted."""
+        import json
+        raw = json.dumps({"role": "assistant", "content": [
+            {"type": "text", "text": "分析结果第一部分"},
+            {"type": "tool_use", "id": "call_1", "name": "read_file", "input": {}},
+            {"type": "text", "text": "分析结果第二部分"},
+        ]})
+        result = _extract_text_from_claude_json(raw)
+        self.assertIn("分析结果第一部分", result)
+        self.assertIn("分析结果第二部分", result)
+        self.assertNotIn("read_file", result)
+
+    def test_multiple_assistant_messages(self):
+        """List of messages — only assistant text extracted, in order."""
+        import json
+        raw = json.dumps([
+            {"role": "user", "content": "请分析"},
+            {"role": "assistant", "content": "第一段回复"},
+            {"role": "user", "content": "继续"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "第二段回复"},
+            ]},
+        ])
+        result = _extract_text_from_claude_json(raw)
+        self.assertIn("第一段回复", result)
+        self.assertIn("第二段回复", result)
+        self.assertNotIn("请分析", result)
+
+    def test_empty_input(self):
+        """Empty / None input returns empty string without error."""
+        self.assertEqual(_extract_text_from_claude_json(""), "")
+        self.assertEqual(_extract_text_from_claude_json("   "), "")
+
+    def test_invalid_json(self):
+        """Non-JSON input returns empty string without error."""
+        self.assertEqual(_extract_text_from_claude_json("not json at all"), "")
+        self.assertEqual(_extract_text_from_claude_json("{broken"), "")
+
+    def test_no_assistant_messages(self):
+        """JSON with no assistant role returns empty string."""
+        import json
+        raw = json.dumps([{"role": "user", "content": "hello"}])
+        self.assertEqual(_extract_text_from_claude_json(raw), "")
+
+
+class TestQaPromptForbidsTools(unittest.TestCase):
+    """Verify QA prompt includes tool-prohibition instructions."""
+
+    def test_qa_prompt_forbids_tools(self):
+        prompt = _STAGE_ROLE_PROMPTS["qa"]
+        self.assertIn("禁止使用工具", prompt)
+
+    def test_qa_prompt_context_based(self):
+        prompt = _STAGE_ROLE_PROMPTS["qa"]
+        self.assertIn("仅基于已提供的上下文", prompt)
+
+
+class TestQaNoopRetryCount(unittest.TestCase):
+    """Verify QA stage gets at least 2 noop retries."""
+
+    @patch("backends.run_claude")
+    def test_qa_gets_extra_retries(self, mock_run):
+        """QA stage should retry at least 2 times on noop (3 total attempts)."""
+        # First two calls return noop (empty), third returns valid output
+        long_output = "验收报告 " * 20
+        mock_run.side_effect = [
+            {"last_message": "", "stdout": "", "returncode": 0,
+             "stderr": "", "elapsed_ms": 100, "cmd": [], "timeout_retries": 0,
+             "workspace": "/tmp", "git_changed_files": [], "attempt_tag": ""},
+            {"last_message": "", "stdout": "", "returncode": 0,
+             "stderr": "", "elapsed_ms": 100, "cmd": [], "timeout_retries": 0,
+             "workspace": "/tmp", "git_changed_files": [], "attempt_tag": ""},
+            {"last_message": long_output, "stdout": long_output, "returncode": 0,
+             "stderr": "", "elapsed_ms": 100, "cmd": [], "timeout_retries": 0,
+             "workspace": "/tmp", "git_changed_files": [], "attempt_tag": ""},
+        ]
+        from backends import run_stage_with_retry
+        task = {"task_id": "test-qa-retry", "text": "test"}
+        stage = {"name": "qa", "backend": "claude"}
+        with patch.dict(os.environ, {"TASK_NOOP_RETRIES": "1"}):
+            result = run_stage_with_retry(task, stage, "test prompt", 3)
+        # Should have succeeded on the 3rd attempt (2 retries)
+        self.assertEqual(result["last_message"], long_output)
+        self.assertEqual(mock_run.call_count, 3)
 
 
 if __name__ == "__main__":

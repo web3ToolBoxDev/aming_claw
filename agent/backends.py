@@ -10,6 +10,7 @@ Contains:
 - run_codex_with_retry, run_claude_with_retry, run_stage_with_retry
 - process_codex, process_claude, process_pipeline
 """
+import json
 import logging
 import os
 import re
@@ -299,7 +300,47 @@ def run_codex(task: Dict, extra_guard: str = "", attempt_tag: str = "",
     }
 
 
-def run_claude(task: Dict, extra_guard: str = "", attempt_tag: str = "", prompt_override: Optional[str] = None) -> Dict:
+def _extract_text_from_claude_json(raw: str) -> str:
+    """Extract assistant text content from Claude CLI JSON output.
+
+    Handles single message object or list of messages.
+    Skips tool_use content blocks, extracts only text blocks.
+    Returns empty string on any parse error (never raises).
+    """
+    if not raw or not raw.strip():
+        return ""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return ""
+
+    # Normalize to list of messages
+    if isinstance(data, dict):
+        messages = [data]
+    elif isinstance(data, list):
+        messages = data
+    else:
+        return ""
+
+    texts = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+    return "\n".join(texts)
+
+
+def run_claude(task: Dict, extra_guard: str = "", attempt_tag: str = "",
+               prompt_override: Optional[str] = None,
+               output_format: str = "text") -> Dict:
     # Claude CLI needs the actual project directory (not the isolated search-workspace)
     # so it can read and modify project source files.
     workspace = resolve_active_workspace()
@@ -324,7 +365,8 @@ def run_claude(task: Dict, extra_guard: str = "", attempt_tag: str = "", prompt_
     if extra_guard:
         prompt = prompt + "\n\n" + extra_guard.strip() + "\n"
     # Pass prompt via stdin to avoid Windows cmd.exe truncating multi-line arguments.
-    cmd = [claude_bin, "-p", "--output-format", "text"]
+    fmt = output_format if output_format in ("text", "json") else "text"
+    cmd = [claude_bin, "-p", "--output-format", fmt]
     if model:
         cmd += ["--model", model]
     if dangerous:
@@ -371,7 +413,14 @@ def run_claude(task: Dict, extra_guard: str = "", attempt_tag: str = "", prompt_
     after_changed = get_git_changed_files(workspace) or []
     new_changed = [f for f in after_changed if f not in before_changed]
 
-    stdout = (proc.stdout or "").strip()
+    raw_stdout = (proc.stdout or "").strip()
+    # For JSON output format, extract assistant text from JSON structure.
+    # Falls back to raw stdout if JSON parsing fails.
+    if fmt == "json" and raw_stdout:
+        extracted = _extract_text_from_claude_json(raw_stdout)
+        stdout = extracted.strip() if extracted else raw_stdout
+    else:
+        stdout = raw_stdout
     return {
         "returncode": proc.returncode,
         "stdout": stdout[-12000:],
@@ -648,6 +697,8 @@ _STAGE_ROLE_PROMPTS = {
     ),
     "qa": (
         "你是QA验收专家，负责对照需求文档中的验收标准，审计代码变更和测试结果。\n"
+        "所有分析所需上下文（PM需求、Dev变更、Test结果）已在【前序阶段输出】中完整提供，必须仅基于已提供的上下文进行分析。\n"
+        "禁止使用工具（禁止读文件、执行命令、查看git记录），直接基于已有信息输出验收报告。\n"
         "禁止回复确认语，禁止请求用户补充信息，直接输出验收报告。\n\n"
         "【输出要求 - 验收报告】\n"
         "1) 逐项对照验收标准检查：\n"
@@ -723,6 +774,10 @@ def run_stage_with_retry(task: Dict, stage: Dict, prompt: str, stage_idx: int) -
     stage_model = (stage.get("model") or "").strip()
     stage_provider = (stage.get("provider") or "").strip()
     max_noop_retries = int(os.getenv("TASK_NOOP_RETRIES", "1"))
+    # QA is the final pipeline stage — a noop wastes all prior stages' work.
+    # Give QA at least 2 retries (3 total attempts).
+    if stage_name == "qa":
+        max_noop_retries = max(2, max_noop_retries)
     base_tag = "s{}_{}".format(stage_idx, stage_name)
 
     from config import get_claude_model, get_model_provider
@@ -757,8 +812,11 @@ def run_stage_with_retry(task: Dict, stage: Dict, prompt: str, stage_idx: int) -
     def _run(p: str, tag: str) -> Dict:
         # For analysis stages: prefer Claude CLI which handles analysis well.
         # Codex CLI 'exec' mode only acknowledges analysis prompts.
+        # Use JSON output format for analysis stages to capture assistant text
+        # even when the model ends with a tool call (no trailing text block).
         if is_analysis:
-            return run_claude(task, attempt_tag=tag, prompt_override=p)
+            return run_claude(task, attempt_tag=tag, prompt_override=p,
+                              output_format="json")
 
         # Code execution stages: route based on provider/backend.
         # openai provider -> Codex CLI (uses subscription, no API key needed)
