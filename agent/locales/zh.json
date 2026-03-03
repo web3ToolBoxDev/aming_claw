@@ -56,7 +56,12 @@
     "next_page": "下一页 »",
     "archive_mgmt": "📂 归档管理",
     "refresh": "🔄 刷新",
-    "switch_language": "🌐 切换语言 / Language"
+    "switch_language": "🌐 切换语言 / Language",
+    "skill_eng_practice_on": "🇬🇧 英文需求练习: ✅开启",
+    "skill_eng_practice_off": "🇬🇧 英文需求练习: ⬜关闭",
+    "eng_confirm_correct": "✅ 中文意思正确，创建任务",
+    "eng_confirm_chinese": "✏️ 中文意思不对，用中文重新描述",
+    "eng_confirm_retry": "🔄 用英文重新描述"
   },
   "task": {
     "view_detail": "📄 查看详情",
@@ -187,7 +192,9 @@
     "set_as_default": "已设为默认",
     "model_unavailable": "模型不可用",
     "save_failed": "保存失败",
-    "perm_insufficient": "⚠️ 权限不足，仅授权用户可修改模型配置"
+    "perm_insufficient": "⚠️ 权限不足，仅授权用户可修改模型配置",
+    "eng_practice_enabled": "🇬🇧 英文需求练习已开启",
+    "eng_practice_disabled": "🇬🇧 英文需求练习已关闭"
   },
   "msg": {
     "task_created": "📝 任务已创建\n━━━━━━━━━━━━━━━━━━━━━━━━\n代号: [{code}]\n任务ID: {task_id}\n状态: pending\n内容: {text}",
@@ -488,7 +495,11 @@
     "rejection_reason_doc": "\n\n拒绝原因: {reason}",
     "error_info_doc": "\n\n错误信息: {err}",
     "preset_arrow": "  {key} →\n{value}",
-    "preset_arrow_inline": "  {key} → {value}"
+    "preset_arrow_inline": "  {key} → {value}",
+    "eng_practice_status_on": "\n🇬🇧 英文需求练习: 已开启",
+    "eng_practice_status_off": "\n🇬🇧 英文需求练习: 已关闭",
+    "eng_practice_eval_failed": "⚠️ AI 评估失败，直接使用原文创建任务。",
+    "eng_practice_result": "📝 英文评估结果\n━━━━━━━━━━━━━━━━━━━━━━━━\n📌 原文: {original}\n✏️ 纠正: {corrected}\n{issues}\n🇨🇳 中文意思: {chinese_meaning}\n━━━━━━━━━━━━━━━━━━━━━━━━\n请确认中文意思是否正确："
   },
   "welcome": {
     "title": "Aming Claw 控制面板\n━━━━━━━━━━━━━━━━━━━━━━━━\n后端: {backend}  |  2FA: {auth}\n模型: {model}\n工作区: {workspace}\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n点击按钮操作，或直接发文字与AI对话\n发送 /help 查看所有支持的命令"
@@ -502,7 +513,7 @@
     "ops": "🔧 运维操作\n━━━━━━━━━━━━━━━━━━━━━━━━\n服务重启、工作区管理等运维操作\n需要OTP验证的操作会提示输入\n━━━━━━━━━━━━━━━━━━━━━━━━\n选择要执行的操作:",
     "security": "🔒 安全认证\n━━━━━━━━━━━━━━━━━━━━━━━━\n2FA设置、身份验证和安全管理\n━━━━━━━━━━━━━━━━━━━━━━━━\n选择要执行的操作:",
     "workspace": "📁 工作区管理\n━━━━━━━━━━━━━━━━━━━━━━━━\n管理工作目录：添加、删除、设置默认\n查看任务队列和调度器状态\n━━━━━━━━━━━━━━━━━━━━━━━━\n选择要执行的操作:",
-    "skills": "🧩 技能管理\n━━━━━━━━━━━━━━━━━━━━━━━━\n可用技能列表：\n📷 截图 - 对当前工作区进行截图\n📊 项目总结 - AI 分析最近提交，生成项目概况\n━━━━━━━━━━━━━━━━━━━━━━━━\n选择要执行的操作:",
+    "skills": "🧩 技能管理\n━━━━━━━━━━━━━━━━━━━━━━━━\n可用技能列表：\n📷 截图 - 对当前工作区进行截图\n📊 项目总结 - AI 分析最近提交，生成项目概况\n🇬🇧 英文需求练习 - 创建任务时用英文描述需求，AI 纠错并翻译\n━━━━━━━━━━━━━━━━━━━━━━━━\n选择要执行的操作:",
     "task_mgmt": "📋 任务管理\n━━━━━━━━━━━━━━━━━━━━━━━━\n当前共 {active_count} 个活跃任务\n━━━━━━━━━━━━━━━━━━━━━━━━\n选择要查看的任务状态:",
     "archive_mgmt": "归档管理",
     "task_mgmt_label": "任务管理"
@@ -525,7 +536,9 @@
     "workspace_set_default": "⭐ 设置默认工作目录\n━━━━━━━━━━━━━━━━━━━━━━━━\n请输入要设置为默认的工作目录ID:\n\n示例: ws-abc12345",
     "search_root_add": "🔍 添加搜索根目录\n━━━━━━━━━━━━━━━━━━━━━━━━\n请输入要添加的搜索根目录路径\n模糊搜索将在这些目录下递归查找 .git 项目\n\n示例: C:\\Users\\me\\Documents\n多个路径用分号分隔: D:\\projects;E:\\repos",
     "new_task_with_workspace": "📝 新建任务\n━━━━━━━━━━━━━━━━━━━━━━━━\n已选择工作区: {ws_label}\n请输入任务详细描述，发送文字即可创建:\n\n示例: 在 src/utils.py 中添加日志功能",
-    "new_task_ws_select": "📝 新建任务\n━━━━━━━━━━━━━━━━━━━━━━━━\n请选择任务执行的工作区域:"
+    "new_task_ws_select": "📝 新建任务\n━━━━━━━━━━━━━━━━━━━━━━━━\n请选择任务执行的工作区域:",
+    "eng_practice_input": "🇬🇧 英文需求练习\n━━━━━━━━━━━━━━━━━━━━━━━━\n请用英文描述你的任务需求:\n\nExample: Add a login button to the homepage",
+    "eng_practice_confirm": "请确认以上评估结果："
   },
   "role": {
     "pm": "产品经理",

@@ -31,6 +31,7 @@ from config import (
     add_workspace_search_root, get_workspace_search_roots,
     remove_workspace_search_root, set_workspace_search_roots,
     set_config_language,
+    get_skill_english_practice, set_skill_english_practice,
 )
 from model_registry import get_available_models, make_label, format_model_list_text, find_model
 from auth import debug_verify_otp, get_auth_state, init_authenticator, verify_otp
@@ -105,6 +106,7 @@ from interactive_menu import (
     HELP_TEXT,
     SUBMENU_TEXTS,
     PENDING_PROMPTS,
+    eng_practice_confirm_keyboard,
 )
 from workspace_queue import (
     enqueue_task,
@@ -1243,13 +1245,20 @@ def handle_callback_query(cb: Dict) -> None:
             if not ws:
                 answer_callback_query(cb_id, t("callback.workspace_not_found"), show_alert=True)
                 return
-            set_pending_action(chat_id, user_id, "new_task_with_workspace", {"ws_id": ws_id, "ws_label": ws.get("label", ws_id)})
-            send_text(
-                chat_id,
-                PENDING_PROMPTS["new_task_with_workspace"].format(ws_label=ws.get("label", ws_id)),
-                reply_markup=cancel_keyboard(),
-            )
-            answer_callback_query(cb_id, t("callback.selected", label=ws.get("label", ws_id)))
+            ws_label = ws.get("label", ws_id)
+            eng_on = get_skill_english_practice()
+            if eng_on:
+                set_pending_action(chat_id, user_id, "eng_practice_input", {"ws_id": ws_id, "ws_label": ws_label})
+                send_text(chat_id, str(PENDING_PROMPTS["eng_practice_input"]),
+                          reply_markup=cancel_keyboard())
+            else:
+                set_pending_action(chat_id, user_id, "new_task_with_workspace", {"ws_id": ws_id, "ws_label": ws_label})
+                send_text(
+                    chat_id,
+                    PENDING_PROMPTS["new_task_with_workspace"].format(ws_label=ws_label),
+                    reply_markup=cancel_keyboard(),
+                )
+            answer_callback_query(cb_id, t("callback.selected", label=ws_label))
             return
 
         # ---- Project summary workspace selection callback ----
@@ -1518,6 +1527,78 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         answer_callback_query(cb_id, t("callback.submitted"))
         return
 
+    # -- Skill: English Practice Toggle --
+    if action == "skill_eng_practice_toggle":
+        current = get_skill_english_practice()
+        new_val = not current
+        set_skill_english_practice(new_val, changed_by=user_id)
+        msg = t("callback.eng_practice_enabled") if new_val else t("callback.eng_practice_disabled")
+        send_text(
+            chat_id,
+            msg,
+            reply_markup=skills_menu_keyboard(),
+        )
+        answer_callback_query(cb_id, msg)
+        return
+
+    # -- English Practice Confirm: correct → create task --
+    if action == "eng_confirm_correct":
+        pending = get_pending_action(chat_id, user_id)
+        if not pending or pending.get("action") != "eng_practice_confirm":
+            answer_callback_query(cb_id, t("callback.expired"), show_alert=True)
+            return
+        ctx = pending.get("context") or {}
+        corrected = ctx.get("corrected_text", ctx.get("original_text", ""))
+        ws_id = ctx.get("ws_id", "")
+        ws_label = ctx.get("ws_label", "")
+        if ws_id:
+            task_id = create_task_for_workspace(chat_id, user_id, corrected, ws_id, ws_label)
+        else:
+            task_id = create_task(chat_id, user_id, "/task {}".format(corrected))
+        task = load_json(task_file("pending", task_id))
+        task_code = task.get("task_code", "-")
+        if ws_id:
+            send_text(chat_id, t("msg.task_created_ws", code=task_code, task_id=task_id, ws=ws_label, text=corrected[:200]),
+                      reply_markup=task_inline_keyboard(task_code))
+        else:
+            send_text(chat_id, t("msg.task_created_simple", code=task_code, task_id=task_id, text=corrected[:200]),
+                      reply_markup=task_inline_keyboard(task_code))
+        answer_callback_query(cb_id, t("callback.submitted"))
+        return
+
+    # -- English Practice Confirm: switch to Chinese input --
+    if action == "eng_confirm_chinese":
+        pending = get_pending_action(chat_id, user_id)
+        if not pending or pending.get("action") != "eng_practice_confirm":
+            answer_callback_query(cb_id, t("callback.expired"), show_alert=True)
+            return
+        ctx = pending.get("context") or {}
+        ws_id = ctx.get("ws_id", "")
+        ws_label = ctx.get("ws_label", "")
+        if ws_id:
+            set_pending_action(chat_id, user_id, "new_task_with_workspace", {"ws_id": ws_id, "ws_label": ws_label})
+            send_text(chat_id, PENDING_PROMPTS["new_task_with_workspace"].format(ws_label=ws_label),
+                      reply_markup=cancel_keyboard())
+        else:
+            set_pending_action(chat_id, user_id, "new_task")
+            send_text(chat_id, str(PENDING_PROMPTS["new_task"]), reply_markup=cancel_keyboard())
+        answer_callback_query(cb_id, t("callback.submitted"))
+        return
+
+    # -- English Practice Confirm: retry English input --
+    if action == "eng_confirm_retry":
+        pending = get_pending_action(chat_id, user_id)
+        if not pending or pending.get("action") != "eng_practice_confirm":
+            answer_callback_query(cb_id, t("callback.expired"), show_alert=True)
+            return
+        ctx = pending.get("context") or {}
+        ws_id = ctx.get("ws_id", "")
+        ws_label = ctx.get("ws_label", "")
+        set_pending_action(chat_id, user_id, "eng_practice_input", {"ws_id": ws_id, "ws_label": ws_label})
+        send_text(chat_id, str(PENDING_PROMPTS["eng_practice_input"]), reply_markup=cancel_keyboard())
+        answer_callback_query(cb_id, t("callback.submitted"))
+        return
+
     # -- Sub-menu: Workspace Management --
     if action == "sub_workspace":
         send_text(
@@ -1554,19 +1635,26 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         from workspace_registry import ensure_current_workspace_registered, list_workspaces as _list_ws_for_task
         ensure_current_workspace_registered()
         workspaces = _list_ws_for_task()
+        eng_on = get_skill_english_practice()
+        eng_status = t("msg.eng_practice_status_on") if eng_on else t("msg.eng_practice_status_off")
         if len(workspaces) > 1:
             send_text(
                 chat_id,
-                t("prompt.new_task_ws_select"),
+                t("prompt.new_task_ws_select") + eng_status,
                 reply_markup=workspace_select_keyboard(workspaces, "ws_task_select"),
             )
             answer_callback_query(cb_id, t("callback.submitted"))
         else:
-            set_pending_action(chat_id, user_id, "new_task")
-            send_text(
-                chat_id,
-                PENDING_PROMPTS["new_task"],
-                reply_markup=cancel_keyboard(),
+            if eng_on:
+                set_pending_action(chat_id, user_id, "eng_practice_input")
+                send_text(chat_id, str(PENDING_PROMPTS["eng_practice_input"]),
+                          reply_markup=cancel_keyboard())
+            else:
+                set_pending_action(chat_id, user_id, "new_task")
+                send_text(
+                    chat_id,
+                    str(PENDING_PROMPTS["new_task"]) + eng_status,
+                    reply_markup=cancel_keyboard(),
             )
             answer_callback_query(cb_id, t("callback.submitted"))
         return
@@ -2832,6 +2920,55 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
             )
         return True
 
+    # -- English Practice: user sends English text --
+    if action == "eng_practice_input":
+        ws_id = context.get("ws_id", "")
+        ws_label = context.get("ws_label", "")
+        try:
+            eval_result = _evaluate_english_text(txt)
+        except Exception:
+            eval_result = None
+        if not eval_result:
+            # AI evaluation failed - fallback: create task with original text
+            send_text(chat_id, t("msg.eng_practice_eval_failed"))
+            if ws_id:
+                task_id = create_task_for_workspace(chat_id, user_id, txt, ws_id, ws_label)
+            else:
+                task_id = create_task(chat_id, user_id, "/task {}".format(txt))
+            task = load_json(task_file("pending", task_id))
+            task_code = task.get("task_code", "-")
+            if ws_id:
+                send_text(chat_id, t("msg.task_created_ws", code=task_code, task_id=task_id, ws=ws_label, text=txt[:200]),
+                          reply_markup=task_inline_keyboard(task_code))
+            else:
+                send_text(chat_id, t("msg.task_created_simple", code=task_code, task_id=task_id, text=txt[:200]),
+                          reply_markup=task_inline_keyboard(task_code))
+            return True
+        # Format issues
+        issues_lines = []
+        for issue in eval_result.get("issues", []):
+            issue_type = issue.get("type", "")
+            orig = issue.get("original", "")
+            suggestion = issue.get("suggestion", "")
+            explanation = issue.get("explanation", "")
+            issues_lines.append("  - [{type}] \"{orig}\" → \"{sug}\" ({exp})".format(
+                type=issue_type, orig=orig, sug=suggestion, exp=explanation))
+        issues_text = "\n".join(issues_lines) if issues_lines else "  (No issues found)"
+        result_msg = t("msg.eng_practice_result",
+                       original=eval_result.get("original", txt),
+                       corrected=eval_result.get("corrected", txt),
+                       issues=issues_text,
+                       chinese_meaning=eval_result.get("chinese_meaning", ""))
+        send_text(chat_id, result_msg, reply_markup=eng_practice_confirm_keyboard())
+        set_pending_action(chat_id, user_id, "eng_practice_confirm", {
+            "ws_id": ws_id,
+            "ws_label": ws_label,
+            "original_text": txt,
+            "corrected_text": eval_result.get("corrected", txt),
+            "chinese_meaning": eval_result.get("chinese_meaning", ""),
+        })
+        return True
+
     # -- Screenshot --
     if action == "screenshot":
         try:
@@ -3224,19 +3361,26 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         from workspace_registry import ensure_current_workspace_registered, list_workspaces as _list_ws_cmd
         ensure_current_workspace_registered()
         workspaces = _list_ws_cmd()
+        eng_on = get_skill_english_practice()
+        eng_status = t("msg.eng_practice_status_on") if eng_on else t("msg.eng_practice_status_off")
         if len(workspaces) > 1:
             send_text(
                 chat_id,
-                t("msg.new_task_ws_panel"),
+                t("msg.new_task_ws_panel") + eng_status,
                 reply_markup=workspace_select_keyboard(workspaces, "ws_task_select"),
             )
         else:
-            set_pending_action(chat_id, user_id, "new_task")
-            send_text(
-                chat_id,
-                PENDING_PROMPTS["new_task"],
-                reply_markup=cancel_keyboard(),
-            )
+            if eng_on:
+                set_pending_action(chat_id, user_id, "eng_practice_input")
+                send_text(chat_id, str(PENDING_PROMPTS["eng_practice_input"]),
+                          reply_markup=cancel_keyboard())
+            else:
+                set_pending_action(chat_id, user_id, "new_task")
+                send_text(
+                    chat_id,
+                    str(PENDING_PROMPTS["new_task"]) + eng_status,
+                    reply_markup=cancel_keyboard(),
+                )
         return True
 
     if txt.startswith("/auth_init"):
@@ -4735,6 +4879,53 @@ def create_task_for_workspace(chat_id: int, user_id: int, text: str, ws_id: str,
     task["task_code"] = register_task_created(task)
     save_json(task_file("pending", task_id), task)
     return task_id
+
+
+def _evaluate_english_text(user_text: str) -> Optional[Dict]:
+    """Call AI (claude -p) to evaluate user's English requirement text.
+
+    Returns a dict with keys: original, corrected, issues, chinese_meaning.
+    Returns None on failure.
+    """
+    import json as _json
+    prompt = (
+        'You are an English writing tutor. Evaluate the following requirement description '
+        'written by a non-native speaker.\n\n'
+        'User\'s text: "{}"\n\n'
+        'Please respond in the following JSON format ONLY (no markdown, no extra text):\n'
+        '{{\n'
+        '  "original": "...",\n'
+        '  "corrected": "...",\n'
+        '  "issues": [{{"type": "grammar|vocabulary|expression", "original": "...", '
+        '"suggestion": "...", "explanation": "..."}}],\n'
+        '  "chinese_meaning": "..."\n'
+        '}}'
+    ).format(user_text.replace('"', '\\"'))
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True, text=True, timeout=60,
+        )
+        output = (result.stdout or "").strip()
+        # Try to extract JSON from output (may be wrapped in markdown code block)
+        if "```" in output:
+            # Extract content between ``` markers
+            parts = output.split("```")
+            for part in parts[1:]:
+                # Skip the language tag line if present
+                lines = part.strip().split("\n", 1)
+                if len(lines) > 1 and lines[0].strip().lower() in ("json", ""):
+                    output = lines[1].strip()
+                    break
+                elif lines[0].strip().startswith("{"):
+                    output = part.strip()
+                    break
+        data = _json.loads(output)
+        if isinstance(data, dict) and "corrected" in data:
+            return data
+    except Exception:
+        pass
+    return None
 
 
 def _auto_launch_queued_task(accepted_task: Dict, chat_id: int) -> None:

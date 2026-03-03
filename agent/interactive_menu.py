@@ -316,11 +316,17 @@ def ops_menu_keyboard() -> Dict:
 
 def skills_menu_keyboard() -> Dict:
     """Sub-menu: skills management."""
+    from config import get_skill_english_practice
+    eng_on = get_skill_english_practice()
+    eng_label = t("menu.skill_eng_practice_on") if eng_on else t("menu.skill_eng_practice_off")
     return {
         "inline_keyboard": [
             [
                 {"text": t("menu.screenshot"), "callback_data": "menu:screenshot"},
                 {"text": t("menu.project_summary"), "callback_data": "menu:summary"},
+            ],
+            [
+                {"text": eng_label, "callback_data": "menu:skill_eng_practice_toggle"},
             ],
             [
                 {"text": t("menu.back_main"), "callback_data": "menu:main"},
@@ -952,4 +958,17 @@ PENDING_PROMPTS = {
     "workspace_set_default": _LazyTranslation("prompt.workspace_set_default"),
     "search_root_add": _LazyTranslation("prompt.search_root_add"),
     "new_task_with_workspace": _LazyTranslation("prompt.new_task_with_workspace"),
+    "eng_practice_input": _LazyTranslation("prompt.eng_practice_input"),
+    "eng_practice_confirm": _LazyTranslation("prompt.eng_practice_confirm"),
 }
+
+
+def eng_practice_confirm_keyboard() -> Dict:
+    """Confirmation keyboard after AI English evaluation."""
+    return {
+        "inline_keyboard": [
+            [{"text": t("menu.eng_confirm_correct"), "callback_data": "menu:eng_confirm_correct"}],
+            [{"text": t("menu.eng_confirm_chinese"), "callback_data": "menu:eng_confirm_chinese"}],
+            [{"text": t("menu.eng_confirm_retry"), "callback_data": "menu:eng_confirm_retry"}],
+        ]
+    }

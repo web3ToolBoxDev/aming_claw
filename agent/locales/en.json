@@ -56,7 +56,12 @@
     "next_page": "Next »",
     "archive_mgmt": "📂 Archives",
     "refresh": "🔄 Refresh",
-    "switch_language": "🌐 Language"
+    "switch_language": "🌐 Language",
+    "skill_eng_practice_on": "🇬🇧 English Practice: ✅ON",
+    "skill_eng_practice_off": "🇬🇧 English Practice: ⬜OFF",
+    "eng_confirm_correct": "✅ Meaning correct, create task",
+    "eng_confirm_chinese": "✏️ Meaning wrong, describe in Chinese",
+    "eng_confirm_retry": "🔄 Re-describe in English"
   },
   "task": {
     "view_detail": "📄 Details",
@@ -187,7 +192,9 @@
     "set_as_default": "Set default",
     "model_unavailable": "Unavailable",
     "save_failed": "Save failed",
-    "perm_insufficient": "⚠️ Insufficient permissions"
+    "perm_insufficient": "⚠️ Insufficient permissions",
+    "eng_practice_enabled": "🇬🇧 English Practice enabled",
+    "eng_practice_disabled": "🇬🇧 English Practice disabled"
   },
   "msg": {
     "task_created": "📝 Task Created\n━━━━━━━━━━━━━━━━━━━━━━━━\nCode: [{code}]\nTask ID: {task_id}\nStatus: pending\nContent: {text}",
@@ -488,7 +495,11 @@
     "rejection_reason_doc": "\n\nRejection reason: {reason}",
     "error_info_doc": "\n\nError info: {err}",
     "preset_arrow": "  {key} →\n{value}",
-    "preset_arrow_inline": "  {key} → {value}"
+    "preset_arrow_inline": "  {key} → {value}",
+    "eng_practice_status_on": "\n🇬🇧 English Practice: ON",
+    "eng_practice_status_off": "\n🇬🇧 English Practice: OFF",
+    "eng_practice_eval_failed": "⚠️ AI evaluation failed, creating task with original text.",
+    "eng_practice_result": "📝 English Evaluation\n━━━━━━━━━━━━━━━━━━━━━━━━\n📌 Original: {original}\n✏️ Corrected: {corrected}\n{issues}\n🇨🇳 Chinese meaning: {chinese_meaning}\n━━━━━━━━━━━━━━━━━━━━━━━━\nPlease confirm if the meaning is correct:"
   },
   "welcome": {
     "title": "Aming Claw Dashboard\n━━━━━━━━━━━━━━━━━━━━━━━━\nBackend: {backend}  |  2FA: {auth}\nModel: {model}\nWorkspace: {workspace}\n━━━━━━━━━━━━━━━━━━━━━━━━\n\nClick buttons or send text to chat with AI\nSend /help for all commands"
@@ -502,7 +513,7 @@
     "ops": "🔧 Operations\n━━━━━━━━━━━━━━━━━━━━━━━━\nService restart, workspace management\nOTP required operations will prompt for input\n━━━━━━━━━━━━━━━━━━━━━━━━\nSelect an operation:",
     "security": "🔒 Security\n━━━━━━━━━━━━━━━━━━━━━━━━\n2FA setup, identity verification\n━━━━━━━━━━━━━━━━━━━━━━━━\nSelect an operation:",
     "workspace": "📁 Workspace\n━━━━━━━━━━━━━━━━━━━━━━━━\nManage workspaces: add, remove, set default\nView task queue and dispatcher status\n━━━━━━━━━━━━━━━━━━━━━━━━\nSelect an operation:",
-    "skills": "🧩 Skills\n━━━━━━━━━━━━━━━━━━━━━━━━\nAvailable skills:\n📷 Screenshot - Capture workspace\n📊 Summary - AI project analysis\n━━━━━━━━━━━━━━━━━━━━━━━━\nSelect an operation:",
+    "skills": "🧩 Skills\n━━━━━━━━━━━━━━━━━━━━━━━━\nAvailable skills:\n📷 Screenshot - Capture workspace\n📊 Summary - AI project analysis\n🇬🇧 English Practice - Describe tasks in English, AI corrects & translates\n━━━━━━━━━━━━━━━━━━━━━━━━\nSelect an operation:",
     "task_mgmt": "📋 Task Management\n━━━━━━━━━━━━━━━━━━━━━━━━\n{active_count} active tasks\n━━━━━━━━━━━━━━━━━━━━━━━━\nSelect task status:",
     "archive_mgmt": "Archive Management",
     "task_mgmt_label": "Task Management"
@@ -525,7 +536,9 @@
     "workspace_set_default": "⭐ Set Default Workspace\n━━━━━━━━━━━━━━━━━━━━━━━━\nEnter workspace ID:\n\nExample: ws-abc12345",
     "search_root_add": "🔍 Add Search Root\n━━━━━━━━━━━━━━━━━━━━━━━━\nEnter search root directory path\nFuzzy search will find .git projects recursively\n\nExample: C:\\Users\\me\\Documents",
     "new_task_with_workspace": "📝 New Task\n━━━━━━━━━━━━━━━━━━━━━━━━\nWorkspace: {ws_label}\nDescribe the task and send:\n\nExample: Add logging to src/utils.py",
-    "new_task_ws_select": "📝 New Task\n━━━━━━━━━━━━━━━━━━━━━━━━\nSelect workspace for task execution:"
+    "new_task_ws_select": "📝 New Task\n━━━━━━━━━━━━━━━━━━━━━━━━\nSelect workspace for task execution:",
+    "eng_practice_input": "🇬🇧 English Practice\n━━━━━━━━━━━━━━━━━━━━━━━━\nDescribe your task in English:\n\nExample: Add a login button to the homepage",
+    "eng_practice_confirm": "Please confirm the evaluation above:"
   },
   "role": {
     "pm": "PM",

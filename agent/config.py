@@ -456,6 +456,37 @@ def add_workspace_search_root(root: str,
     return True, resolved
 
 
+# ── Skill: English Practice ───────────────────────────────────────────────
+
+def get_skill_english_practice() -> bool:
+    """Return whether the English practice skill is enabled (default False)."""
+    p = _config_path()
+    if p.exists():
+        try:
+            data = load_json(p)
+            return bool(data.get("skill_english_practice", False))
+        except Exception:
+            pass
+    return False
+
+
+def set_skill_english_practice(enabled: bool, changed_by: Optional[int] = None) -> None:
+    """Persist the English practice skill toggle to runtime config."""
+    p = _config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if p.exists():
+        try:
+            existing = load_json(p)
+        except Exception:
+            pass
+    existing["skill_english_practice"] = bool(enabled)
+    existing["updated_at"] = utc_iso()
+    if changed_by is not None:
+        existing["changed_by"] = changed_by
+    save_json(p, existing)
+
+
 def remove_workspace_search_root(index: int,
                                  changed_by: Optional[int] = None) -> Tuple[bool, str]:
     """Remove a search root by 1-based index. Returns (success, message)."""
