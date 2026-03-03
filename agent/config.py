@@ -63,6 +63,13 @@ ROLE_DEFINITIONS: Dict[str, Dict] = {
 
 ROLE_PIPELINE_ORDER = ["pm", "dev", "test", "qa"]
 
+# Emoji mapping for non-role pipeline stages
+STAGE_EMOJI: Dict[str, str] = {
+    "plan":   "\U0001f4dd",  # 📝
+    "code":   "\U0001f4bb",  # 💻
+    "verify": "\u2714\ufe0f",  # ✔️
+}
+
 
 def _config_path():
     return tasks_root() / "state" / "agent_config.json"

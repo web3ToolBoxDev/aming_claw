@@ -412,6 +412,78 @@ def role_model_select_keyboard(role_name: str, models: List[Dict]) -> Dict:
     return {"inline_keyboard": rows}
 
 
+def pipeline_stage_overview_keyboard(stages: List[Dict]) -> Dict:
+    """Inline keyboard for the pipeline stage overview page.
+
+    Each stage is shown as a button with its emoji, name, and current model.
+    Bottom rows contain "confirm apply" and "back to preset selection" buttons.
+
+    Args:
+        stages: list of dicts with keys name/backend/model/provider.
+    """
+    from config import ROLE_DEFINITIONS, STAGE_EMOJI
+    rows: List[List[Dict]] = []
+    for idx, stage in enumerate(stages):
+        name = stage.get("name", "?")
+        model = stage.get("model", "")
+        provider = stage.get("provider", "")
+        # Resolve emoji: try role definitions first, then stage emoji map
+        role_def = ROLE_DEFINITIONS.get(name)
+        if role_def:
+            emoji = role_def.get("emoji", "")
+        else:
+            emoji = STAGE_EMOJI.get(name, "\u2699\ufe0f")  # fallback ⚙️
+        # Build display text
+        if model:
+            tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
+            btn_text = "{} {}: {} {}".format(emoji, name, model, tag).strip()
+        else:
+            btn_text = "{} {}: \uff08\u9ed8\u8ba4\uff09".format(emoji, name)
+        rows.append([{"text": btn_text,
+                       "callback_data": "pipeline_stage_cfg:{}".format(idx)}])
+    rows.append([{"text": "\u2705 \u786e\u8ba4\u5e94\u7528", "callback_data": "pipeline_apply"}])
+    rows.append([{"text": "\u00ab \u8fd4\u56de\u9009\u62e9\u9884\u8bbe", "callback_data": "menu:pipeline_config"}])
+    return {"inline_keyboard": rows}
+
+
+def pipeline_stage_model_keyboard(stage_index: int, stage_name: str,
+                                  models: List[Dict]) -> Dict:
+    """Inline keyboard for selecting a model for a specific pipeline stage.
+
+    Reuses the same provider-grouped layout as ``role_model_select_keyboard``
+    but with ``stage_model:{index}:{provider}:{model_id}`` callback data.
+
+    Args:
+        stage_index: zero-based stage index in the pending stages list.
+        stage_name: human-readable stage name for display purposes.
+        models: unified model list from ``get_available_models()``.
+    """
+    from model_registry import make_label
+    rows: List[List[Dict]] = []
+    grouped: Dict[str, List[Dict]] = {}
+    for m in models:
+        grouped.setdefault(m.get("provider", "unknown"), []).append(m)
+    provider_labels = {"anthropic": "\u2500\u2500 Anthropic (Claude) \u2500\u2500",
+                       "openai": "\u2500\u2500 OpenAI \u2500\u2500"}
+    for provider in ["anthropic", "openai"]:
+        provider_models = grouped.get(provider)
+        if not provider_models:
+            continue
+        rows.append([{"text": provider_labels.get(provider, provider),
+                       "callback_data": "noop:section"}])
+        for m in provider_models:
+            available = m.get("status", "available") == "available"
+            label = make_label(m)
+            if not available:
+                reason = m.get("unavailable_reason", "")
+                label = "\u26d4 {} ({})".format(label, reason[:20]) if reason else "\u26d4 " + label
+            cb_data = "stage_model:{}:{}:{}".format(stage_index, m["provider"], m["id"])
+            rows.append([{"text": label, "callback_data": cb_data}])
+    rows.append([{"text": "\u00ab \u8fd4\u56de\u6982\u89c8",
+                   "callback_data": "menu:pipeline_stage_overview"}])
+    return {"inline_keyboard": rows}
+
+
 def model_list_keyboard(models: List[Dict], current_default: str = "") -> Dict:
     """Build keyboard for model list page with set-default and refresh buttons."""
     rows: List[List[Dict]] = []

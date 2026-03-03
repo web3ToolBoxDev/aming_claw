@@ -21,7 +21,7 @@ from utils import (
 )
 from config import (
     KNOWN_BACKENDS, KNOWN_CLAUDE_MODELS, PIPELINE_PRESETS,
-    ROLE_DEFINITIONS, ROLE_PIPELINE_ORDER,
+    ROLE_DEFINITIONS, ROLE_PIPELINE_ORDER, STAGE_EMOJI,
     format_pipeline_stages, format_role_pipeline_stages,
     get_agent_backend, get_claude_model, get_model_provider,
     get_pipeline_stages, get_role_pipeline_stages,
@@ -74,6 +74,8 @@ from interactive_menu import (
     search_roots_keyboard,
     backend_select_keyboard,
     pipeline_preset_keyboard,
+    pipeline_stage_overview_keyboard,
+    pipeline_stage_model_keyboard,
     role_pipeline_config_keyboard,
     role_model_select_keyboard,
     model_list_keyboard,
@@ -992,33 +994,30 @@ def handle_callback_query(cb: Dict) -> None:
                             if rc.get("model"):
                                 stage["model"] = rc["model"]
                                 stage["provider"] = rc.get("provider", "")
-                set_pipeline_stages(stages, changed_by=user_id)
-                answer_callback_query(cb_id, "流水线已配置")
-                if preset_name == "role_pipeline":
-                    stage_display = format_role_pipeline_stages(stages)
-                    send_text(
-                        chat_id,
-                        "\u2699\ufe0f \u6d41\u6c34\u7ebf\u5df2\u914d\u7f6e\n"
-                        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                        "\u9884\u8bbe: {}\n"
-                        "\u9636\u6bb5:\n{}\n\n"
-                        "\u65b0\u5efa\u4efb\u52a1\u5c06\u6309\u6b64\u6d41\u6c34\u7ebf\u6267\u884c".format(
-                            preset_name, stage_display
-                        ),
-                        reply_markup=back_to_menu_keyboard(),
-                    )
-                else:
-                    send_text(
-                        chat_id,
-                        "\u2699\ufe0f \u6d41\u6c34\u7ebf\u5df2\u914d\u7f6e\n"
-                        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                        "\u9884\u8bbe: {}\n"
-                        "\u9636\u6bb5: {}\n\n"
-                        "\u65b0\u5efa\u4efb\u52a1\u5c06\u6309\u6b64\u6d41\u6c34\u7ebf\u6267\u884c".format(
-                            preset_name, format_pipeline_stages(stages)
-                        ),
-                        reply_markup=back_to_menu_keyboard(),
-                    )
+                # Store stages in pending action instead of applying immediately
+                set_pending_action(chat_id, user_id, "pipeline_configure", {
+                    "preset_name": preset_name,
+                    "stages": stages,
+                })
+                # Show stage overview page for per-stage model adjustment
+                preset_display = {
+                    "plan_code_verify": "plan + code + verify",
+                    "plan_code": "plan + code",
+                    "code_verify": "code + verify",
+                    "claude_codex": "claude + codex",
+                    "role_pipeline": "\U0001f3ad \u89d2\u8272\u6d41\u6c34\u7ebf",
+                }.get(preset_name, preset_name)
+                send_text(
+                    chat_id,
+                    "\u2699\ufe0f \u9636\u6bb5\u914d\u7f6e\u6982\u89c8\n"
+                    "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                    "\u5f53\u524d\u6d41\u6c34\u7ebf: {}\n\n"
+                    "\u70b9\u51fb\u9636\u6bb5\u6309\u94ae\u4fee\u6539\u6a21\u578b\uff0c\u5b8c\u6210\u540e\u70b9\u51fb\u300c\u2705 \u786e\u8ba4\u5e94\u7528\u300d\u751f\u6548".format(
+                        preset_display
+                    ),
+                    reply_markup=pipeline_stage_overview_keyboard(stages),
+                )
+                answer_callback_query(cb_id, "\u9009\u62e9\u9884\u8bbe: {}".format(preset_display))
             else:
                 answer_callback_query(cb_id, "未知预设", show_alert=True)
             return
@@ -1084,6 +1083,150 @@ def handle_callback_query(cb: Dict) -> None:
                 ),
                 reply_markup=role_pipeline_config_keyboard(stages),
             )
+            return
+
+        # ---- Pipeline stage configuration callbacks (overview wizard) ----
+        if data.startswith("pipeline_stage_cfg:"):
+            if not is_ops_allowed(chat_id, user_id):
+                answer_callback_query(cb_id, "\u65e0\u6743\u9650", show_alert=True)
+                return
+            idx_str = data[len("pipeline_stage_cfg:"):]
+            pending = peek_pending_action(chat_id, user_id)
+            if not pending or pending.get("action") != "pipeline_configure":
+                # Pending action lost — fall back to preset selection
+                send_text(
+                    chat_id,
+                    "\u2699\ufe0f \u914d\u7f6e\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u9884\u8bbe\u3002",
+                    reply_markup=pipeline_preset_keyboard(),
+                )
+                answer_callback_query(cb_id, "\u8bf7\u91cd\u65b0\u9009\u62e9")
+                return
+            stages = pending.get("context", {}).get("stages", [])
+            try:
+                stage_index = int(idx_str)
+            except (ValueError, TypeError):
+                answer_callback_query(cb_id, "\u65e0\u6548\u6570\u636e", show_alert=True)
+                return
+            if stage_index < 0 or stage_index >= len(stages):
+                answer_callback_query(cb_id, "\u65e0\u6548\u9636\u6bb5", show_alert=True)
+                return
+            stage = stages[stage_index]
+            stage_name = stage.get("name", "?")
+            all_models = get_available_models()
+            models = all_models if all_models else [
+                {"id": m, "provider": "anthropic"} for m in KNOWN_CLAUDE_MODELS
+            ]
+            # Resolve emoji for title
+            role_def = ROLE_DEFINITIONS.get(stage_name)
+            emoji = role_def.get("emoji", "") if role_def else STAGE_EMOJI.get(stage_name, "\u2699\ufe0f")
+            send_text(
+                chat_id,
+                "\U0001f527 \u914d\u7f6e\u300c{} {}\u300d\u9636\u6bb5\u6a21\u578b\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u9009\u62e9\u8981\u4f7f\u7528\u7684\u6a21\u578b\uff1a".format(emoji, stage_name),
+                reply_markup=pipeline_stage_model_keyboard(stage_index, stage_name, models),
+            )
+            answer_callback_query(cb_id, "\u9009\u62e9\u6a21\u578b")
+            return
+
+        if data.startswith("stage_model:"):
+            if not is_ops_allowed(chat_id, user_id):
+                answer_callback_query(cb_id, "\u65e0\u6743\u9650", show_alert=True)
+                return
+            # Format: stage_model:<index>:<provider>:<model_id>
+            parts = data[len("stage_model:"):].split(":", 2)
+            if len(parts) < 3:
+                answer_callback_query(cb_id, "\u65e0\u6548\u6570\u636e", show_alert=True)
+                return
+            idx_str, provider, model_id = parts[0], parts[1], parts[2]
+            pending = peek_pending_action(chat_id, user_id)
+            if not pending or pending.get("action") != "pipeline_configure":
+                send_text(
+                    chat_id,
+                    "\u2699\ufe0f \u914d\u7f6e\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u9884\u8bbe\u3002",
+                    reply_markup=pipeline_preset_keyboard(),
+                )
+                answer_callback_query(cb_id, "\u8bf7\u91cd\u65b0\u9009\u62e9")
+                return
+            ctx = pending.get("context", {})
+            stages = ctx.get("stages", [])
+            try:
+                stage_index = int(idx_str)
+            except (ValueError, TypeError):
+                answer_callback_query(cb_id, "\u65e0\u6548\u6570\u636e", show_alert=True)
+                return
+            if stage_index < 0 or stage_index >= len(stages):
+                answer_callback_query(cb_id, "\u65e0\u6548\u9636\u6bb5", show_alert=True)
+                return
+            # Update pending action stages in-place
+            stages[stage_index]["model"] = model_id
+            stages[stage_index]["provider"] = provider
+            set_pending_action(chat_id, user_id, "pipeline_configure", ctx)
+            tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
+            answer_callback_query(cb_id, "\u5df2\u8bbe\u7f6e: {} {}".format(tag, model_id))
+            # Return to overview page with updated stages
+            preset_name = ctx.get("preset_name", "")
+            preset_display = {
+                "plan_code_verify": "plan + code + verify",
+                "plan_code": "plan + code",
+                "code_verify": "code + verify",
+                "claude_codex": "claude + codex",
+                "role_pipeline": "\U0001f3ad \u89d2\u8272\u6d41\u6c34\u7ebf",
+            }.get(preset_name, preset_name)
+            send_text(
+                chat_id,
+                "\u2699\ufe0f \u9636\u6bb5\u914d\u7f6e\u6982\u89c8\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "\u5f53\u524d\u6d41\u6c34\u7ebf: {}\n\n"
+                "\u70b9\u51fb\u9636\u6bb5\u6309\u94ae\u4fee\u6539\u6a21\u578b\uff0c\u5b8c\u6210\u540e\u70b9\u51fb\u300c\u2705 \u786e\u8ba4\u5e94\u7528\u300d\u751f\u6548".format(
+                    preset_display
+                ),
+                reply_markup=pipeline_stage_overview_keyboard(stages),
+            )
+            return
+
+        if data == "pipeline_apply":
+            if not is_ops_allowed(chat_id, user_id):
+                answer_callback_query(cb_id, "\u65e0\u6743\u9650", show_alert=True)
+                return
+            pending = get_pending_action(chat_id, user_id)
+            if not pending or pending.get("action") != "pipeline_configure":
+                send_text(
+                    chat_id,
+                    "\u2699\ufe0f \u914d\u7f6e\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u9884\u8bbe\u3002",
+                    reply_markup=pipeline_preset_keyboard(),
+                )
+                answer_callback_query(cb_id, "\u8bf7\u91cd\u65b0\u9009\u62e9")
+                return
+            ctx = pending.get("context", {})
+            stages = ctx.get("stages", [])
+            preset_name = ctx.get("preset_name", "")
+            # Apply: persist pipeline stages
+            set_pipeline_stages(stages, changed_by=user_id)
+            # If role_pipeline, also sync role_pipeline_stages
+            if preset_name == "role_pipeline":
+                set_role_pipeline_stages(stages, changed_by=user_id)
+            # Build confirmation summary
+            summary_lines = []
+            for s in stages:
+                name = s.get("name", "?")
+                model = s.get("model", "")
+                prov = s.get("provider", "")
+                if model:
+                    tag = "[C]" if prov == "anthropic" else "[O]" if prov == "openai" else ""
+                    summary_lines.append("  {}: {} {}".format(name, model, tag).rstrip())
+                else:
+                    summary_lines.append("  {}: \uff08\u9ed8\u8ba4\uff09".format(name))
+            summary = "\n".join(summary_lines)
+            send_text(
+                chat_id,
+                "\u2705 \u6d41\u6c34\u7ebf\u914d\u7f6e\u5df2\u751f\u6548\uff01\n"
+                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                "{}\n\n"
+                "\u540e\u7aef\u5df2\u5207\u6362\u4e3a: pipeline".format(summary),
+                reply_markup=back_to_menu_keyboard(),
+            )
+            answer_callback_query(cb_id, "\u914d\u7f6e\u5df2\u5e94\u7528")
             return
 
         # ---- Workspace selection callbacks ----
@@ -1513,6 +1656,45 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             reply_markup=pipeline_preset_keyboard(),
         )
         answer_callback_query(cb_id, "选择流水线配置")
+        return
+
+    # -- Pipeline Stage Overview: return to overview from model selection --
+    if action == "pipeline_stage_overview":
+        if not is_ops_allowed(chat_id, user_id):
+            send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, "\u65e0\u6743\u9650", show_alert=True)
+            return
+        pending = peek_pending_action(chat_id, user_id)
+        if not pending or pending.get("action") != "pipeline_configure":
+            # Pending action lost — fall back to preset selection
+            send_text(
+                chat_id,
+                "\u2699\ufe0f \u914d\u7f6e\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u9884\u8bbe\u3002",
+                reply_markup=pipeline_preset_keyboard(),
+            )
+            answer_callback_query(cb_id, "\u8bf7\u91cd\u65b0\u9009\u62e9")
+            return
+        ctx = pending.get("context", {})
+        stages = ctx.get("stages", [])
+        preset_name = ctx.get("preset_name", "")
+        preset_display = {
+            "plan_code_verify": "plan + code + verify",
+            "plan_code": "plan + code",
+            "code_verify": "code + verify",
+            "claude_codex": "claude + codex",
+            "role_pipeline": "\U0001f3ad \u89d2\u8272\u6d41\u6c34\u7ebf",
+        }.get(preset_name, preset_name)
+        send_text(
+            chat_id,
+            "\u2699\ufe0f \u9636\u6bb5\u914d\u7f6e\u6982\u89c8\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            "\u5f53\u524d\u6d41\u6c34\u7ebf: {}\n\n"
+            "\u70b9\u51fb\u9636\u6bb5\u6309\u94ae\u4fee\u6539\u6a21\u578b\uff0c\u5b8c\u6210\u540e\u70b9\u51fb\u300c\u2705 \u786e\u8ba4\u5e94\u7528\u300d\u751f\u6548".format(
+                preset_display
+            ),
+            reply_markup=pipeline_stage_overview_keyboard(stages),
+        )
+        answer_callback_query(cb_id, "\u9636\u6bb5\u6982\u89c8")
         return
 
     # -- Role Pipeline Config: show role config keyboard --

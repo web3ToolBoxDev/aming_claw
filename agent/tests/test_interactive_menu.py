@@ -28,6 +28,8 @@ from interactive_menu import (  # noqa: E402
     ops_menu_keyboard,
     peek_pending_action,
     pipeline_preset_keyboard,
+    pipeline_stage_model_keyboard,
+    pipeline_stage_overview_keyboard,
     search_roots_keyboard,
     security_menu_keyboard,
     set_pending_action,
@@ -386,6 +388,139 @@ class TestTaskDetailKeyboard(unittest.TestCase):
             kb = task_detail_keyboard("T0001", status)
             texts = [btn["text"] for row in kb["inline_keyboard"] for btn in row]
             self.assertTrue(any("返回" in t for t in texts), "Missing back button for status={}".format(status))
+
+
+class TestPipelineStageOverviewKeyboard(unittest.TestCase):
+    """Tests for pipeline_stage_overview_keyboard()."""
+
+    def _assert_valid_keyboard(self, kb):
+        self.assertIn("inline_keyboard", kb)
+        for row in kb["inline_keyboard"]:
+            for btn in row:
+                self.assertIn("text", btn)
+                self.assertIn("callback_data", btn)
+
+    def _all_data(self, kb):
+        return [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+
+    def _all_text(self, kb):
+        return [btn["text"] for row in kb["inline_keyboard"] for btn in row]
+
+    def test_basic_stages(self):
+        stages = [
+            {"name": "plan", "backend": "claude", "model": "claude-opus-4-6", "provider": "anthropic"},
+            {"name": "code", "backend": "claude"},
+            {"name": "verify", "backend": "codex", "model": "gpt-4.1", "provider": "openai"},
+        ]
+        kb = pipeline_stage_overview_keyboard(stages)
+        self._assert_valid_keyboard(kb)
+        data = self._all_data(kb)
+        # Stage buttons
+        self.assertIn("pipeline_stage_cfg:0", data)
+        self.assertIn("pipeline_stage_cfg:1", data)
+        self.assertIn("pipeline_stage_cfg:2", data)
+        # Confirm and back buttons
+        self.assertIn("pipeline_apply", data)
+        self.assertIn("menu:pipeline_config", data)
+
+    def test_model_display(self):
+        stages = [
+            {"name": "plan", "backend": "claude", "model": "claude-opus-4-6", "provider": "anthropic"},
+            {"name": "code", "backend": "claude"},
+        ]
+        kb = pipeline_stage_overview_keyboard(stages)
+        texts = self._all_text(kb)
+        # First stage shows model name with [C] tag
+        self.assertTrue(any("claude-opus-4-6" in t and "[C]" in t for t in texts))
+        # Second stage shows default marker
+        self.assertTrue(any("\uff08\u9ed8\u8ba4\uff09" in t for t in texts))
+
+    def test_role_stages_use_role_emoji(self):
+        stages = [
+            {"name": "pm", "backend": "claude"},
+            {"name": "dev", "backend": "claude"},
+        ]
+        kb = pipeline_stage_overview_keyboard(stages)
+        texts = self._all_text(kb)
+        # Should use role emojis from ROLE_DEFINITIONS
+        self.assertTrue(any("\U0001f4cb" in t for t in texts))  # 📋 pm
+        self.assertTrue(any("\U0001f4bb" in t for t in texts))  # 💻 dev
+
+    def test_confirm_button_present(self):
+        stages = [{"name": "code", "backend": "claude"}]
+        kb = pipeline_stage_overview_keyboard(stages)
+        texts = self._all_text(kb)
+        self.assertTrue(any("\u2705" in t and "\u786e\u8ba4\u5e94\u7528" in t for t in texts))
+
+    def test_back_button_present(self):
+        stages = [{"name": "code", "backend": "claude"}]
+        kb = pipeline_stage_overview_keyboard(stages)
+        texts = self._all_text(kb)
+        self.assertTrue(any("\u8fd4\u56de\u9009\u62e9\u9884\u8bbe" in t for t in texts))
+
+    def test_empty_stages(self):
+        kb = pipeline_stage_overview_keyboard([])
+        self._assert_valid_keyboard(kb)
+        # Only confirm + back buttons
+        self.assertEqual(len(kb["inline_keyboard"]), 2)
+
+
+class TestPipelineStageModelKeyboard(unittest.TestCase):
+    """Tests for pipeline_stage_model_keyboard()."""
+
+    def _assert_valid_keyboard(self, kb):
+        self.assertIn("inline_keyboard", kb)
+        for row in kb["inline_keyboard"]:
+            for btn in row:
+                self.assertIn("text", btn)
+                self.assertIn("callback_data", btn)
+
+    def _all_data(self, kb):
+        return [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+
+    def test_model_buttons_with_stage_index(self):
+        models = [
+            {"id": "claude-opus-4-6", "provider": "anthropic", "status": "available"},
+            {"id": "gpt-4.1", "provider": "openai", "status": "available"},
+        ]
+        kb = pipeline_stage_model_keyboard(1, "code", models)
+        self._assert_valid_keyboard(kb)
+        data = self._all_data(kb)
+        self.assertTrue(any("stage_model:1:anthropic:claude-opus-4-6" in d for d in data))
+        self.assertTrue(any("stage_model:1:openai:gpt-4.1" in d for d in data))
+
+    def test_back_button_goes_to_overview(self):
+        models = [{"id": "claude-opus-4-6", "provider": "anthropic", "status": "available"}]
+        kb = pipeline_stage_model_keyboard(0, "plan", models)
+        data = self._all_data(kb)
+        self.assertIn("menu:pipeline_stage_overview", data)
+
+    def test_unavailable_model_has_marker(self):
+        models = [
+            {"id": "gpt-4.1", "provider": "openai", "status": "unavailable",
+             "unavailable_reason": "API key missing"},
+        ]
+        kb = pipeline_stage_model_keyboard(0, "plan", models)
+        texts = [btn["text"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertTrue(any("\u26d4" in t for t in texts))
+
+    def test_provider_grouping(self):
+        models = [
+            {"id": "claude-opus-4-6", "provider": "anthropic", "status": "available"},
+            {"id": "claude-sonnet-4-6", "provider": "anthropic", "status": "available"},
+            {"id": "gpt-4.1", "provider": "openai", "status": "available"},
+        ]
+        kb = pipeline_stage_model_keyboard(2, "verify", models)
+        texts = [btn["text"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertTrue(any("Anthropic" in t for t in texts))
+        self.assertTrue(any("OpenAI" in t for t in texts))
+
+    def test_empty_models(self):
+        kb = pipeline_stage_model_keyboard(0, "plan", [])
+        self._assert_valid_keyboard(kb)
+        # Only back button
+        self.assertEqual(len(kb["inline_keyboard"]), 1)
+        self.assertEqual(kb["inline_keyboard"][0][0]["callback_data"], "menu:pipeline_stage_overview")
 
 
 if __name__ == "__main__":
