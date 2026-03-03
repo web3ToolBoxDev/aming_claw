@@ -37,30 +37,39 @@ def acceptance_root() -> Path:
 
 
 def _is_qa_boilerplate(text: str) -> bool:
-    """Detect QA boilerplate responses that don't contain actual audit results."""
+    """Detect QA boilerplate responses that don't contain actual audit results.
+
+    QA models sometimes return template text like "请提供以下材料..." or
+    "已切换为QA验收专家模式" instead of actual audit results.
+    """
     if not text:
         return True
-    markers = [
+    boilerplate_markers = [
         "请提供以下材料",
         "已切换为",
         "把材料发来后",
         "收到后我会输出",
         "收到后我将",
         "我将按",
-        "请提供",
         "我直接开始审计",
     ]
-    for m in markers:
-        if m in text:
-            # Check if the text also has real verdict content
-            verdict_markers = ["验收结论", "✓通过", "✗未通过", "⚠部分通过",
-                               "总体结论", "通过", "不通过"]
-            has_verdict = any(v in text for v in verdict_markers
-                             if v not in ("通过", "不通过")  # avoid matching boilerplate "通过/不通过"
-                             or text.count(v) > 1)
-            if not has_verdict:
-                return True
-    return False
+    has_boilerplate = any(m in text for m in boilerplate_markers)
+    if not has_boilerplate:
+        return False
+    # Check if there's an actual verdict WITH a value (not just listing "验收结论" in template)
+    import re
+    real_verdict_patterns = [
+        r"验收结论[：:]\s*\S",      # "验收结论：通过" (has value)
+        r"总体结论[：:]\s*\S",      # "总体结论：有条件通过"
+        r"✓通过",                   # actual checkmark
+        r"✗未通过",                 # actual X mark
+        r"⚠部分通过",              # actual warning
+        r"^\d+[.)]\s*.*[：:]\s*[✓✗⚠]", # numbered items with verdict marks
+    ]
+    for pattern in real_verdict_patterns:
+        if re.search(pattern, text, re.MULTILINE):
+            return False
+    return True
 
 
 def _generate_auto_verdict(stages: list) -> str:
