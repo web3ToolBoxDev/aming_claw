@@ -952,7 +952,7 @@ def handle_callback_query(cb: Dict) -> None:
         if data.startswith("cmd_cancel:"):
             ref = data.split(":", 1)[1].strip()
             handle_command(chat_id, user_id, "/cancel {}".format(ref))
-            answer_callback_query(cb_id, "\u5df2\u53d6\u6d88")
+            answer_callback_query(cb_id, t("callback.cancelled"))
             return
         if data.startswith("model_select:"):
             if not is_ops_allowed(chat_id, user_id):
@@ -976,7 +976,7 @@ def handle_callback_query(cb: Dict) -> None:
         # ---- Model default selection callbacks (from model list page) ----
         if data.startswith("model_default:"):
             if not is_ops_allowed(chat_id, user_id):
-                answer_callback_query(cb_id, "\u26a0\ufe0f \u6743\u9650\u4e0d\u8db3\uff0c\u4ec5\u6388\u6743\u7528\u6237\u53ef\u4fee\u6539\u6a21\u578b\u914d\u7f6e", show_alert=True)
+                answer_callback_query(cb_id, t("callback.perm_insufficient"), show_alert=True)
                 return
             rest = data[len("model_default:"):]
             if ":" in rest:
@@ -986,17 +986,17 @@ def handle_callback_query(cb: Dict) -> None:
             # Check model availability
             m = find_model(model_id)
             if m and m.get("status") == "unavailable":
-                reason = m.get("unavailable_reason", "\u4e0d\u53ef\u7528")
-                answer_callback_query(cb_id, "\u6a21\u578b\u4e0d\u53ef\u7528", show_alert=True)
+                reason = m.get("unavailable_reason", t("msg.not_available"))
+                answer_callback_query(cb_id, t("callback.model_unavailable"), show_alert=True)
                 send_text(chat_id, "\u274c \u8bbe\u7f6e\u5931\u8d25\uff1a\u6a21\u578b {} \u5f53\u524d\u4e0d\u53ef\u7528\uff08{}）".format(model_id, reason),
                           reply_markup=back_to_menu_keyboard())
                 return
             set_claude_model(model_id, provider=provider, changed_by=user_id)
             tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
-            answer_callback_query(cb_id, "\u5df2\u8bbe\u4e3a\u9ed8\u8ba4")
+            answer_callback_query(cb_id, t("callback.set_as_default"))
             send_text(
                 chat_id,
-                "\u5df2\u5c06\u9ed8\u8ba4\u6a21\u578b\u8bbe\u4e3a {} `{}`\uff0c\u7ba1\u7ebf\u4e2d\u672a\u5355\u72ec\u914d\u7f6e\u7684\u8282\u70b9\u5c06\u4f7f\u7528\u6b64\u6a21\u578b".format(tag, model_id),
+                t("msg.default_model_set", tag=tag, model=model_id),
                 reply_markup=back_to_menu_keyboard(),
             )
             return
@@ -1031,14 +1031,14 @@ def handle_callback_query(cb: Dict) -> None:
                     "plan_code": "plan + code",
                     "code_verify": "code + verify",
                     "claude_codex": "claude + codex",
-                    "role_pipeline": "\U0001f3ad \u89d2\u8272\u6d41\u6c34\u7ebf",
+                    "role_pipeline": t("msg.role_pipeline_config"),
                 }.get(preset_name, preset_name)
                 send_text(
                     chat_id,
                     t("msg.stage_config_overview", pipeline=preset_display),
                     reply_markup=pipeline_stage_overview_keyboard(stages),
                 )
-                answer_callback_query(cb_id, "\u9009\u62e9\u9884\u8bbe: {}".format(preset_display))
+                answer_callback_query(cb_id, t("callback.select_preset", name=preset_display))
             else:
                 answer_callback_query(cb_id, t("callback.unknown_preset"), show_alert=True)
             return
@@ -1085,7 +1085,7 @@ def handle_callback_query(cb: Dict) -> None:
                 set_role_stage_model(role_name, model_id, provider=provider, changed_by=user_id)
             except ValueError as exc:
                 answer_callback_query(cb_id, t("callback.save_failed"), show_alert=True)
-                send_text(chat_id, "\u274c \u4fdd\u5b58\u5931\u8d25\uff1a{}".format(exc),
+                send_text(chat_id, t("msg.save_failed", err=str(exc)),
                           reply_markup=back_to_menu_keyboard())
                 return
             tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
@@ -1105,7 +1105,7 @@ def handle_callback_query(cb: Dict) -> None:
         # ---- Pipeline stage configuration callbacks (overview wizard) ----
         if data.startswith("pipeline_stage_cfg:"):
             if not is_ops_allowed(chat_id, user_id):
-                answer_callback_query(cb_id, "\u65e0\u6743\u9650", show_alert=True)
+                answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
                 return
             idx_str = data[len("pipeline_stage_cfg:"):]
             pending = peek_pending_action(chat_id, user_id)
@@ -1113,19 +1113,19 @@ def handle_callback_query(cb: Dict) -> None:
                 # Pending action lost — fall back to preset selection
                 send_text(
                     chat_id,
-                    "\u2699\ufe0f \u914d\u7f6e\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u9884\u8bbe\u3002",
+                    t("msg.config_expired"),
                     reply_markup=pipeline_preset_keyboard(),
                 )
-                answer_callback_query(cb_id, "\u8bf7\u91cd\u65b0\u9009\u62e9")
+                answer_callback_query(cb_id, t("callback.please_reselect"))
                 return
             stages = pending.get("context", {}).get("stages", [])
             try:
                 stage_index = int(idx_str)
             except (ValueError, TypeError):
-                answer_callback_query(cb_id, "\u65e0\u6548\u6570\u636e", show_alert=True)
+                answer_callback_query(cb_id, t("callback.invalid_data"), show_alert=True)
                 return
             if stage_index < 0 or stage_index >= len(stages):
-                answer_callback_query(cb_id, "\u65e0\u6548\u9636\u6bb5", show_alert=True)
+                answer_callback_query(cb_id, t("callback.invalid_stage"), show_alert=True)
                 return
             stage = stages[stage_index]
             stage_name = stage.get("name", "?")
@@ -1138,49 +1138,47 @@ def handle_callback_query(cb: Dict) -> None:
             emoji = role_def.get("emoji", "") if role_def else STAGE_EMOJI.get(stage_name, "\u2699\ufe0f")
             send_text(
                 chat_id,
-                "\U0001f527 \u914d\u7f6e\u300c{} {}\u300d\u9636\u6bb5\u6a21\u578b\n"
-                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                "\u9009\u62e9\u8981\u4f7f\u7528\u7684\u6a21\u578b\uff1a".format(emoji, stage_name),
+                t("msg.configure_stage_model", emoji=emoji, name=stage_name),
                 reply_markup=pipeline_stage_model_keyboard(stage_index, stage_name, models),
             )
-            answer_callback_query(cb_id, "\u9009\u62e9\u6a21\u578b")
+            answer_callback_query(cb_id, t("callback.select_model"))
             return
 
         if data.startswith("stage_model:"):
             if not is_ops_allowed(chat_id, user_id):
-                answer_callback_query(cb_id, "\u65e0\u6743\u9650", show_alert=True)
+                answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
                 return
             # Format: stage_model:<index>:<provider>:<model_id>
             parts = data[len("stage_model:"):].split(":", 2)
             if len(parts) < 3:
-                answer_callback_query(cb_id, "\u65e0\u6548\u6570\u636e", show_alert=True)
+                answer_callback_query(cb_id, t("callback.invalid_data"), show_alert=True)
                 return
             idx_str, provider, model_id = parts[0], parts[1], parts[2]
             pending = peek_pending_action(chat_id, user_id)
             if not pending or pending.get("action") != "pipeline_configure":
                 send_text(
                     chat_id,
-                    "\u2699\ufe0f \u914d\u7f6e\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u9884\u8bbe\u3002",
+                    t("msg.config_expired"),
                     reply_markup=pipeline_preset_keyboard(),
                 )
-                answer_callback_query(cb_id, "\u8bf7\u91cd\u65b0\u9009\u62e9")
+                answer_callback_query(cb_id, t("callback.please_reselect"))
                 return
             ctx = pending.get("context", {})
             stages = ctx.get("stages", [])
             try:
                 stage_index = int(idx_str)
             except (ValueError, TypeError):
-                answer_callback_query(cb_id, "\u65e0\u6548\u6570\u636e", show_alert=True)
+                answer_callback_query(cb_id, t("callback.invalid_data"), show_alert=True)
                 return
             if stage_index < 0 or stage_index >= len(stages):
-                answer_callback_query(cb_id, "\u65e0\u6548\u9636\u6bb5", show_alert=True)
+                answer_callback_query(cb_id, t("callback.invalid_stage"), show_alert=True)
                 return
             # Update pending action stages in-place
             stages[stage_index]["model"] = model_id
             stages[stage_index]["provider"] = provider
             set_pending_action(chat_id, user_id, "pipeline_configure", ctx)
             tag = "[C]" if provider == "anthropic" else "[O]" if provider == "openai" else ""
-            answer_callback_query(cb_id, "\u5df2\u8bbe\u7f6e: {} {}".format(tag, model_id))
+            answer_callback_query(cb_id, t("callback.saved", tag=tag, model=model_id))
             # Return to overview page with updated stages
             preset_name = ctx.get("preset_name", "")
             preset_display = {
@@ -1188,32 +1186,27 @@ def handle_callback_query(cb: Dict) -> None:
                 "plan_code": "plan + code",
                 "code_verify": "code + verify",
                 "claude_codex": "claude + codex",
-                "role_pipeline": "\U0001f3ad \u89d2\u8272\u6d41\u6c34\u7ebf",
+                "role_pipeline": t("msg.role_pipeline_config"),
             }.get(preset_name, preset_name)
             send_text(
                 chat_id,
-                "\u2699\ufe0f \u9636\u6bb5\u914d\u7f6e\u6982\u89c8\n"
-                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                "\u5f53\u524d\u6d41\u6c34\u7ebf: {}\n\n"
-                "\u70b9\u51fb\u9636\u6bb5\u6309\u94ae\u4fee\u6539\u6a21\u578b\uff0c\u5b8c\u6210\u540e\u70b9\u51fb\u300c\u2705 \u786e\u8ba4\u5e94\u7528\u300d\u751f\u6548".format(
-                    preset_display
-                ),
+                t("msg.stage_config_overview", pipeline=preset_display),
                 reply_markup=pipeline_stage_overview_keyboard(stages),
             )
             return
 
         if data == "pipeline_apply":
             if not is_ops_allowed(chat_id, user_id):
-                answer_callback_query(cb_id, "\u65e0\u6743\u9650", show_alert=True)
+                answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
                 return
             pending = get_pending_action(chat_id, user_id)
             if not pending or pending.get("action") != "pipeline_configure":
                 send_text(
                     chat_id,
-                    "\u2699\ufe0f \u914d\u7f6e\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u9884\u8bbe\u3002",
+                    t("msg.config_expired"),
                     reply_markup=pipeline_preset_keyboard(),
                 )
-                answer_callback_query(cb_id, "\u8bf7\u91cd\u65b0\u9009\u62e9")
+                answer_callback_query(cb_id, t("callback.please_reselect"))
                 return
             ctx = pending.get("context", {})
             stages = ctx.get("stages", [])
@@ -1237,13 +1230,10 @@ def handle_callback_query(cb: Dict) -> None:
             summary = "\n".join(summary_lines)
             send_text(
                 chat_id,
-                "\u2705 \u6d41\u6c34\u7ebf\u914d\u7f6e\u5df2\u751f\u6548\uff01\n"
-                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                "{}\n\n"
-                "\u540e\u7aef\u5df2\u5207\u6362\u4e3a: pipeline".format(summary),
+                t("msg.pipeline_applied", summary=summary),
                 reply_markup=back_to_menu_keyboard(),
             )
-            answer_callback_query(cb_id, "\u914d\u7f6e\u5df2\u5e94\u7528")
+            answer_callback_query(cb_id, t("callback.config_applied"))
             return
 
         # ---- Workspace selection callbacks ----
@@ -1252,7 +1242,7 @@ def handle_callback_query(cb: Dict) -> None:
             from workspace_registry import get_workspace as _get_ws_sel
             ws = _get_ws_sel(ws_id)
             if not ws:
-                answer_callback_query(cb_id, "\u5de5\u4f5c\u533a\u57df\u4e0d\u5b58\u5728", show_alert=True)
+                answer_callback_query(cb_id, t("callback.workspace_not_found"), show_alert=True)
                 return
             set_pending_action(chat_id, user_id, "new_task_with_workspace", {"ws_id": ws_id, "ws_label": ws.get("label", ws_id)})
             send_text(
@@ -1260,7 +1250,7 @@ def handle_callback_query(cb: Dict) -> None:
                 PENDING_PROMPTS["new_task_with_workspace"].format(ws_label=ws.get("label", ws_id)),
                 reply_markup=cancel_keyboard(),
             )
-            answer_callback_query(cb_id, "\u5df2\u9009: {}".format(ws.get("label", ws_id)))
+            answer_callback_query(cb_id, t("callback.selected", label=ws.get("label", ws_id)))
             return
 
         # ---- Project summary workspace selection callback ----
@@ -1269,9 +1259,9 @@ def handle_callback_query(cb: Dict) -> None:
             from workspace_registry import get_workspace as _get_ws_sum
             ws = _get_ws_sum(ws_id)
             if not ws:
-                answer_callback_query(cb_id, "\u5de5\u4f5c\u533a\u4e0d\u5b58\u5728", show_alert=True)
+                answer_callback_query(cb_id, t("callback.workspace_not_found"), show_alert=True)
                 return
-            answer_callback_query(cb_id, "\u751f\u6210\u603b\u7ed3...")
+            answer_callback_query(cb_id, t("callback.generating_summary"))
             _generate_and_send_summary(chat_id, Path(ws["path"]))
             return
 
@@ -1279,11 +1269,11 @@ def handle_callback_query(cb: Dict) -> None:
             ws_id = data.split(":", 1)[1].strip()
             from workspace_registry import remove_workspace as _rm_ws
             if _rm_ws(ws_id):
-                send_text(chat_id, "\u5de5\u4f5c\u76ee\u5f55\u5df2\u79fb\u9664: {}".format(ws_id), reply_markup=back_to_menu_keyboard())
-                answer_callback_query(cb_id, "\u5df2\u5220\u9664")
+                send_text(chat_id, t("msg.workspace_dir_removed", id=ws_id), reply_markup=back_to_menu_keyboard())
+                answer_callback_query(cb_id, t("callback.deleted"))
             else:
-                send_text(chat_id, "\u5de5\u4f5c\u76ee\u5f55\u672a\u627e\u5230: {}".format(ws_id))
-                answer_callback_query(cb_id, "\u672a\u627e\u5230", show_alert=True)
+                send_text(chat_id, t("msg.workspace_dir_not_found", id=ws_id))
+                answer_callback_query(cb_id, t("callback.ws_not_found"), show_alert=True)
             return
 
         if data.startswith("ws_default:"):
@@ -1293,13 +1283,13 @@ def handle_callback_query(cb: Dict) -> None:
                 ws = _get_ws_d(ws_id)
                 send_text(
                     chat_id,
-                    "\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55\u5df2\u8bbe\u7f6e: {} ({})".format(ws_id, ws.get("label", "") if ws else ""),
+                    t("msg.default_workspace_set", id=ws_id, label=ws.get("label", "") if ws else ""),
                     reply_markup=back_to_menu_keyboard(),
                 )
-                answer_callback_query(cb_id, "\u5df2\u8bbe\u7f6e\u9ed8\u8ba4")
+                answer_callback_query(cb_id, t("callback.default_set"))
             else:
-                send_text(chat_id, "\u5de5\u4f5c\u76ee\u5f55\u672a\u627e\u5230: {}".format(ws_id))
-                answer_callback_query(cb_id, "\u672a\u627e\u5230", show_alert=True)
+                send_text(chat_id, t("msg.workspace_dir_not_found", id=ws_id))
+                answer_callback_query(cb_id, t("callback.ws_not_found"), show_alert=True)
             return
 
         if data.startswith("ws_fuzzy_add:"):
@@ -1344,20 +1334,20 @@ def handle_callback_query(cb: Dict) -> None:
             try:
                 idx = int(idx_str)
             except ValueError:
-                answer_callback_query(cb_id, "\u65e0\u6548\u5e8f\u53f7", show_alert=True)
+                answer_callback_query(cb_id, t("callback.invalid_index"), show_alert=True)
                 return
             ok, msg = remove_workspace_search_root(idx, changed_by=user_id)
             if ok:
                 roots = get_workspace_search_roots()
                 send_text(
                     chat_id,
-                    "\u2705 \u5df2\u5220\u9664\u641c\u7d22\u6839\u76ee\u5f55: {}".format(msg),
+                    t("msg.search_root_deleted", path=msg),
                     reply_markup=search_roots_keyboard(roots),
                 )
-                answer_callback_query(cb_id, "\u5df2\u5220\u9664")
+                answer_callback_query(cb_id, t("callback.deleted"))
             else:
-                send_text(chat_id, "\u5220\u9664\u5931\u8d25: {}".format(msg))
-                answer_callback_query(cb_id, "\u5220\u9664\u5931\u8d25", show_alert=True)
+                send_text(chat_id, t("msg.search_root_delete_failed", msg=msg))
+                answer_callback_query(cb_id, t("callback.delete_failed"), show_alert=True)
             return
 
         # ---- Task management callbacks ----
@@ -1371,19 +1361,19 @@ def handle_callback_query(cb: Dict) -> None:
             ref = data.split(":", 1)[1].strip()
             send_text(
                 chat_id,
-                "\u786e\u8ba4\u53d6\u6d88\u4efb\u52a1 [{}]\uff1f\u53d6\u6d88\u540e\u4efb\u52a1\u5c06\u4e0d\u4f1a\u88ab\u6267\u884c\u3002".format(ref),
+                t("msg.confirm_cancel_task", ref=ref),
                 reply_markup=confirm_cancel_keyboard("task_cancel", ref),
             )
-            answer_callback_query(cb_id, "\u8bf7\u786e\u8ba4\u53d6\u6d88")
+            answer_callback_query(cb_id, t("callback.confirm_cancel"))
             return
         if data.startswith("task_delete:"):
             ref = data.split(":", 1)[1].strip()
             send_text(
                 chat_id,
-                "\u786e\u8ba4\u5220\u9664\u4efb\u52a1 [{}]\uff1f\u5220\u9664\u540e\u5c06\u4ece\u6d3b\u8dc3\u5217\u8868\u79fb\u9664\u3002".format(ref),
+                t("msg.confirm_delete_task", ref=ref),
                 reply_markup=confirm_cancel_keyboard("task_delete", ref),
             )
-            answer_callback_query(cb_id, "\u8bf7\u786e\u8ba4\u5220\u9664")
+            answer_callback_query(cb_id, t("callback.confirm_delete"))
             return
         if data.startswith("task_doc:"):
             _handle_task_doc_callback(cb_id, data, chat_id, user_id)
@@ -1401,10 +1391,10 @@ def handle_callback_query(cb: Dict) -> None:
             ref = data.split(":", 1)[1].strip()
             send_text(
                 chat_id,
-                "\u786e\u8ba4\u5220\u9664\u5f52\u6863\u8bb0\u5f55 [{}]\uff1f".format(ref),
+                t("msg.confirm_delete_archive", ref=ref),
                 reply_markup=confirm_cancel_keyboard("archive_delete", ref),
             )
-            answer_callback_query(cb_id, "\u8bf7\u786e\u8ba4\u5220\u9664")
+            answer_callback_query(cb_id, t("callback.confirm_delete"))
             return
         if data.startswith("tasks_page:"):
             _handle_tasks_page_callback(cb_id, data, chat_id, user_id)
@@ -1415,7 +1405,7 @@ def handle_callback_query(cb: Dict) -> None:
             _handle_confirm_callback(cb_id, data, chat_id, user_id)
             return
 
-        answer_callback_query(cb_id, "\u672a\u77e5\u6309\u94ae")
+        answer_callback_query(cb_id, t("callback.unknown_button"))
     except Exception as exc:
         answer_callback_query(cb_id, t("callback.operation_failed"), show_alert=True)
         send_text(chat_id, t("callback.button_failed", err=str(exc)[:500]))
@@ -1450,7 +1440,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         clear_pending_action(chat_id, user_id)
         send_text(
             chat_id,
-            "\u5df2\u53d6\u6d88\u64cd\u4f5c\u3002",
+            t("msg.cancelled_op"),
             reply_markup=back_to_menu_keyboard(),
         )
         answer_callback_query(cb_id, t("callback.cancelled"))
@@ -1459,8 +1449,8 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
     # -- Sub-menu: System Settings --
     if action == "sub_system":
         backend = get_agent_backend()
-        model = get_claude_model() or "(\u672a\u8bbe\u7f6e)"
-        provider = get_model_provider() or "(\u672a\u8bbe\u7f6e)"
+        model = get_claude_model() or t("msg.not_set")
+        provider = get_model_provider() or t("msg.not_set")
         send_text(
             chat_id,
             SUBMENU_TEXTS["system"].format(
@@ -1547,9 +1537,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         if len(workspaces) > 1:
             send_text(
                 chat_id,
-                "\U0001f4dd \u65b0\u5efa\u4efb\u52a1\n"
-                "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                "\u8bf7\u9009\u62e9\u4efb\u52a1\u6267\u884c\u7684\u5de5\u4f5c\u533a\u57df:",
+                t("prompt.new_task_ws_select"),
                 reply_markup=workspace_select_keyboard(workspaces, "ws_task_select"),
             )
             answer_callback_query(cb_id, t("callback.submitted"))
@@ -1649,7 +1637,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             "\U0001f4cb \u6a21\u578b\u6e05\u5355\n"
             "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         )
-        footer = "\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u9ed8\u8ba4\u6a21\u578b: {}".format(current_default or "(\u672a\u8bbe\u7f6e)")
+        footer = "\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u9ed8\u8ba4\u6a21\u578b: {}".format(current_default or t("msg.not_set"))
         full_text = header + text + footer
         if len(full_text) > 4000:
             full_text = full_text[:3990] + "\n..."
@@ -1658,13 +1646,13 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             full_text,
             reply_markup=model_list_keyboard(models, current_default),
         )
-        answer_callback_query(cb_id, "\u5df2\u5237\u65b0" if force else "\u6a21\u578b\u6e05\u5355")
+        answer_callback_query(cb_id, t("msg.refreshed") if force else t("msg.model_list_label"))
         return
 
     # -- Pipeline Config: show preset selection --
     if action == "pipeline_config":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
             answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         preset_lines = []
@@ -1698,18 +1686,18 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
     # -- Pipeline Stage Overview: return to overview from model selection --
     if action == "pipeline_stage_overview":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "\u65e0\u6743\u9650", show_alert=True)
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         pending = peek_pending_action(chat_id, user_id)
         if not pending or pending.get("action") != "pipeline_configure":
             # Pending action lost — fall back to preset selection
             send_text(
                 chat_id,
-                "\u2699\ufe0f \u914d\u7f6e\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u9884\u8bbe\u3002",
+                t("msg.config_expired"),
                 reply_markup=pipeline_preset_keyboard(),
             )
-            answer_callback_query(cb_id, "\u8bf7\u91cd\u65b0\u9009\u62e9")
+            answer_callback_query(cb_id, t("callback.please_reselect"))
             return
         ctx = pending.get("context", {})
         stages = ctx.get("stages", [])
@@ -1719,19 +1707,14 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             "plan_code": "plan + code",
             "code_verify": "code + verify",
             "claude_codex": "claude + codex",
-            "role_pipeline": "\U0001f3ad \u89d2\u8272\u6d41\u6c34\u7ebf",
+            "role_pipeline": t("msg.role_pipeline_config"),
         }.get(preset_name, preset_name)
         send_text(
             chat_id,
-            "\u2699\ufe0f \u9636\u6bb5\u914d\u7f6e\u6982\u89c8\n"
-            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-            "\u5f53\u524d\u6d41\u6c34\u7ebf: {}\n\n"
-            "\u70b9\u51fb\u9636\u6bb5\u6309\u94ae\u4fee\u6539\u6a21\u578b\uff0c\u5b8c\u6210\u540e\u70b9\u51fb\u300c\u2705 \u786e\u8ba4\u5e94\u7528\u300d\u751f\u6548".format(
-                preset_display
-            ),
+            t("msg.stage_config_overview", pipeline=preset_display),
             reply_markup=pipeline_stage_overview_keyboard(stages),
         )
-        answer_callback_query(cb_id, "\u9636\u6bb5\u6982\u89c8")
+        answer_callback_query(cb_id, t("msg.stage_overview_label"))
         return
 
     # -- Role Pipeline Config: show role config keyboard --
@@ -1754,7 +1737,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
     # -- Pipeline Config Custom: prompt for text --
     if action == "pipeline_config_custom":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
             answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         set_pending_action(chat_id, user_id, "pipeline_config_custom")
@@ -1844,7 +1827,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
     # -- Ops Restart: prompt for OTP --
     if action == "ops_restart":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
             answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         set_pending_action(chat_id, user_id, "ops_restart")
@@ -1883,7 +1866,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
     # -- Auth Debug: prompt for OTP --
     if action == "auth_debug":
         if not is_ops_allowed(chat_id, user_id):
-            send_text(chat_id, "\u65e0\u6743\u9650\u6267\u884c\u6b64\u64cd\u4f5c\u3002", reply_markup=back_to_menu_keyboard())
+            send_text(chat_id, t("callback.no_permission"), reply_markup=back_to_menu_keyboard())
             answer_callback_query(cb_id, t("callback.no_permission"), show_alert=True)
             return
         set_pending_action(chat_id, user_id, "auth_debug")
@@ -1947,15 +1930,15 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         from workspace_registry import list_workspaces as _list_ws_rm
         workspaces = _list_ws_rm(include_inactive=True)
         if not workspaces:
-            send_text(chat_id, "\u5c1a\u672a\u6ce8\u518c\u4efb\u4f55\u5de5\u4f5c\u76ee\u5f55\u3002", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "\u65e0\u5de5\u4f5c\u76ee\u5f55")
+            send_text(chat_id, t("msg.no_workspaces_short"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("msg.no_workspaces_label"))
             return
         send_text(
             chat_id,
             "\u2796 \u5220\u9664\u5de5\u4f5c\u76ee\u5f55\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u8bf7\u9009\u62e9\u8981\u5220\u9664\u7684\u5de5\u4f5c\u76ee\u5f55:",
             reply_markup=workspace_select_keyboard(workspaces, "ws_remove"),
         )
-        answer_callback_query(cb_id, "\u9009\u62e9\u8981\u5220\u9664\u7684\u5de5\u4f5c\u76ee\u5f55")
+        answer_callback_query(cb_id, t("msg.select_ws_remove"))
         return
 
     # -- Workspace Set Default: show selection --
@@ -1963,15 +1946,15 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         from workspace_registry import list_workspaces as _list_ws_def
         workspaces = _list_ws_def()
         if not workspaces:
-            send_text(chat_id, "\u5c1a\u672a\u6ce8\u518c\u4efb\u4f55\u5de5\u4f5c\u76ee\u5f55\u3002", reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "\u65e0\u5de5\u4f5c\u76ee\u5f55")
+            send_text(chat_id, t("msg.no_workspaces_short"), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("msg.no_workspaces_label"))
             return
         send_text(
             chat_id,
             "\u2b50 \u8bbe\u7f6e\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u8bf7\u9009\u62e9\u8981\u8bbe\u7f6e\u4e3a\u9ed8\u8ba4\u7684\u5de5\u4f5c\u76ee\u5f55:",
             reply_markup=workspace_select_keyboard(workspaces, "ws_default"),
         )
-        answer_callback_query(cb_id, "\u9009\u62e9\u9ed8\u8ba4\u5de5\u4f5c\u76ee\u5f55")
+        answer_callback_query(cb_id, t("msg.select_ws_default"))
         return
 
     # -- Workspace Search Roots: show current roots with management UI --
@@ -1994,7 +1977,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
                 "\u70b9\u51fb \u2795 \u6dfb\u52a0\u641c\u7d22\u6839\u76ee\u5f55\uff0c\u6269\u5927\u6a21\u7cca\u641c\u7d22\u8303\u56f4\u3002"
             )
         send_text(chat_id, text, reply_markup=search_roots_keyboard(roots))
-        answer_callback_query(cb_id, "\u641c\u7d22\u6839\u76ee\u5f55")
+        answer_callback_query(cb_id, t("msg.search_roots_label"))
         return
 
     # -- Search Root Add: prompt for path --
@@ -2005,7 +1988,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
             PENDING_PROMPTS["search_root_add"],
             reply_markup=cancel_keyboard(),
         )
-        answer_callback_query(cb_id, "\u8bf7\u8f93\u5165\u8def\u5f84")
+        answer_callback_query(cb_id, t("msg.enter_path"))
         return
 
     # -- Workspace Queue Status: show all queues --
@@ -2017,7 +2000,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
                 "\u5f53\u524d\u6240\u6709\u5de5\u4f5c\u533a\u57df\u65e0\u6392\u961f\u4efb\u52a1\u3002",
                 reply_markup=back_to_menu_keyboard(),
             )
-            answer_callback_query(cb_id, "\u65e0\u6392\u961f\u4efb\u52a1")
+            answer_callback_query(cb_id, t("msg.no_queued_tasks"))
             return
         from workspace_registry import get_workspace as _get_ws_q
         lines = ["\U0001f4ca \u5de5\u4f5c\u533a\u57df\u4efb\u52a1\u961f\u5217:"]
@@ -2034,7 +2017,7 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
                     (tsk.get("text", "") or "")[:60],
                 ))
         send_text(chat_id, "\n".join(lines), reply_markup=back_to_menu_keyboard())
-        answer_callback_query(cb_id, "\u961f\u5217\u72b6\u6001")
+        answer_callback_query(cb_id, t("msg.queue_status_label"))
         return
 
     # -- Dispatch Status: execute directly --
@@ -2065,20 +2048,20 @@ def _handle_confirm_callback(cb_id: str, data: str, chat_id: int, user_id: int) 
     if action == "task_cancel":
         ctx = parts[2] if len(parts) > 2 else ""
         if not ctx:
-            answer_callback_query(cb_id, "\u65e0\u6548\u64cd\u4f5c", show_alert=True)
+            answer_callback_query(cb_id, t("msg.invalid_operation"), show_alert=True)
             return
         found = find_task(ctx)
         if not found:
-            send_text(chat_id, "\u4efb\u52a1\u4e0d\u5b58\u5728: {}".format(ctx), reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "\u4efb\u52a1\u4e0d\u5b58\u5728")
+            send_text(chat_id, t("msg.task_not_found", ref=ctx), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("msg.task_not_found_short"))
             return
         current_status = str(found.get("status") or "").strip().lower()
         st = task_status_snapshot(str(found.get("task_id") or ""))
         if st:
             current_status = str(st.get("status") or current_status).strip().lower()
         if current_status != "pending":
-            send_text(chat_id, "\u4ec5\u53ef\u53d6\u6d88\u5f85\u5904\u7406\u4efb\u52a1\uff0c\u5f53\u524d\u72b6\u6001: {}".format(current_status), reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "\u65e0\u6cd5\u53d6\u6d88", show_alert=True)
+            send_text(chat_id, t("msg.only_cancel_pending", status=current_status), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("msg.cannot_cancel"), show_alert=True)
             return
         task_id = str(found.get("task_id") or "")
         # Remove pending file
@@ -2087,19 +2070,19 @@ def _handle_confirm_callback(cb_id: str, data: str, chat_id: int, user_id: int) 
             pending_path.unlink()
         # Update status
         update_task_runtime(found, status="cancelled", stage="results")
-        mark_task_finished(found, status="cancelled", stage="results", error="\u7528\u6237\u53d6\u6d88")
+        mark_task_finished(found, status="cancelled", stage="results", error=t("msg.user_cancelled"))
         send_text(
             chat_id,
-            "\u2705 \u4efb\u52a1 [{}] \u5df2\u53d6\u6d88\u3002".format(ctx),
+            t("msg.task_cancelled", ref=ctx),
             reply_markup=task_mgmt_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "\u5df2\u53d6\u6d88")
+        answer_callback_query(cb_id, t("callback.cancelled"))
         return
 
     if action == "task_delete":
         ctx = parts[2] if len(parts) > 2 else ""
         if not ctx:
-            answer_callback_query(cb_id, "\u65e0\u6548\u64cd\u4f5c", show_alert=True)
+            answer_callback_query(cb_id, t("msg.invalid_operation"), show_alert=True)
             return
         task_id = resolve_task_ref(ctx) or ctx
         # Remove from active list
@@ -2117,28 +2100,28 @@ def _handle_confirm_callback(cb_id: str, data: str, chat_id: int, user_id: int) 
                 p.unlink()
         send_text(
             chat_id,
-            "\u2705 \u4efb\u52a1 [{}] \u5df2\u5220\u9664\u3002".format(ctx),
+            t("msg.task_deleted", ref=ctx),
             reply_markup=task_mgmt_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "\u5df2\u5220\u9664")
+        answer_callback_query(cb_id, t("callback.deleted"))
         return
 
     if action == "archive_delete":
         ctx = parts[2] if len(parts) > 2 else ""
         if not ctx:
-            answer_callback_query(cb_id, "\u65e0\u6548\u64cd\u4f5c", show_alert=True)
+            answer_callback_query(cb_id, t("msg.invalid_operation"), show_alert=True)
             return
         removed = _remove_archive_entry(ctx)
         if removed:
             send_text(
                 chat_id,
-                "\u2705 \u5f52\u6863\u8bb0\u5f55 [{}] \u5df2\u5220\u9664\u3002".format(ctx),
+                t("msg.archive_deleted", ref=ctx),
                 reply_markup=task_mgmt_menu_keyboard(),
             )
-            answer_callback_query(cb_id, "\u5df2\u5220\u9664")
+            answer_callback_query(cb_id, t("callback.deleted"))
         else:
-            send_text(chat_id, "\u5f52\u6863\u8bb0\u5f55\u672a\u627e\u5230: {}".format(ctx), reply_markup=back_to_menu_keyboard())
-            answer_callback_query(cb_id, "\u672a\u627e\u5230", show_alert=True)
+            send_text(chat_id, t("msg.archive_not_found", ref=ctx), reply_markup=back_to_menu_keyboard())
+            answer_callback_query(cb_id, t("callback.ws_not_found"), show_alert=True)
         return
 
     answer_callback_query(cb_id, t("callback.unknown_button"))
@@ -2231,7 +2214,7 @@ def _handle_task_status_menu(cb_id: str, action: str, chat_id: int, user_id: int
     }
     status_key = status_map.get(action, "")
     if not status_key:
-        answer_callback_query(cb_id, "\u672a\u77e5\u64cd\u4f5c")
+        answer_callback_query(cb_id, t("callback.unknown_button"))
         return
 
     if status_key == "overview":
@@ -2246,7 +2229,7 @@ def _handle_task_status_menu(cb_id: str, action: str, chat_id: int, user_id: int
             "\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u67e5\u770b\u5bf9\u5e94\u7c7b\u522b:".format(total_active),
             reply_markup=tasks_overview_keyboard(counts),
         )
-        answer_callback_query(cb_id, "\u4efb\u52a1\u6982\u89c8")
+        answer_callback_query(cb_id, t("msg.task_overview_label"))
         return
 
     tasks = _collect_tasks_by_status(chat_id, status_key)
@@ -2259,7 +2242,7 @@ def _handle_task_status_menu(cb_id: str, action: str, chat_id: int, user_id: int
             "\u5f53\u524d\u65e0{}\u4efb\u52a1\u3002".format(empty_label),
             reply_markup=task_status_list_keyboard([], status_key),
         )
-        answer_callback_query(cb_id, "\u65e0\u4efb\u52a1")
+        answer_callback_query(cb_id, t("msg.no_tasks_label"))
         return
 
     header = "{}\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u5171 {} \u4e2a\u4efb\u52a1\uff0c\u70b9\u51fb\u67e5\u770b\u8be6\u60c5:".format(label, len(tasks))
@@ -2275,13 +2258,13 @@ def _handle_tasks_page_callback(cb_id: str, data: str, chat_id: int, user_id: in
     """Handle tasks_page:{status}:{page} pagination callbacks."""
     parts = data.split(":", 2)
     if len(parts) < 3:
-        answer_callback_query(cb_id, "\u65e0\u6548\u5206\u9875")
+        answer_callback_query(cb_id, t("msg.invalid_page"))
         return
     status_key = parts[1]
     try:
         page = int(parts[2])
     except ValueError:
-        answer_callback_query(cb_id, "\u65e0\u6548\u9875\u7801")
+        answer_callback_query(cb_id, t("msg.invalid_page_num"))
         return
 
     tasks = _collect_tasks_by_status(chat_id, status_key)
@@ -2293,7 +2276,7 @@ def _handle_tasks_page_callback(cb_id: str, data: str, chat_id: int, user_id: in
             "\u5f53\u524d\u65e0\u4efb\u52a1\u3002",
             reply_markup=task_status_list_keyboard([], status_key),
         )
-        answer_callback_query(cb_id, "\u65e0\u4efb\u52a1")
+        answer_callback_query(cb_id, t("msg.no_tasks_label"))
         return
 
     send_text(
@@ -2301,7 +2284,7 @@ def _handle_tasks_page_callback(cb_id: str, data: str, chat_id: int, user_id: in
         "{}\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\u5171 {} \u4e2a\u4efb\u52a1\uff08\u7b2c {} \u9875\uff09:".format(label, len(tasks), page + 1),
         reply_markup=task_status_list_keyboard(tasks, status_key, page=page),
     )
-    answer_callback_query(cb_id, "\u7b2c {} \u9875".format(page + 1))
+    answer_callback_query(cb_id, t("msg.page_num", num=page + 1))
 
 
 def _detail_status_emoji(status: str) -> str:
@@ -2330,7 +2313,7 @@ def _handle_task_detail_callback(cb_id: str, data: str, chat_id: int, user_id: i
         if st:
             status = str(st.get("status") or "unknown").strip().lower()
             emoji = _detail_status_emoji(status)
-            text_preview = str(st.get("text") or "").strip()[:500] or "(\u65e0\u63cf\u8ff0)"
+            text_preview = str(st.get("text") or "").strip()[:500] or t("msg.no_description")
             iteration = int(st.get("attempt") or 0)
             detail = (
                 "{emoji} \u4efb\u52a1\u8be6\u60c5\n"
@@ -2349,20 +2332,20 @@ def _handle_task_detail_callback(cb_id: str, data: str, chat_id: int, user_id: i
                 created=st.get("created_at", ""),
                 iteration=iteration,
                 text=text_preview,
-                summary=str(st.get("summary") or "").strip()[:500] or "(\u65e0)",
+                summary=str(st.get("summary") or "").strip()[:500] or t("msg.none_short"),
             )
             send_text(chat_id, detail, reply_markup=task_detail_keyboard(task_code, status))
-            answer_callback_query(cb_id, "\u4efb\u52a1\u8be6\u60c5")
+            answer_callback_query(cb_id, t("msg.task_detail_label"))
             return
-        send_text(chat_id, "\u4efb\u52a1\u4e0d\u5b58\u5728: {}".format(task_code), reply_markup=task_mgmt_menu_keyboard())
-        answer_callback_query(cb_id, "\u4efb\u52a1\u4e0d\u5b58\u5728")
+        send_text(chat_id, t("msg.task_not_found", ref=task_code), reply_markup=task_mgmt_menu_keyboard())
+        answer_callback_query(cb_id, t("msg.task_not_found_short"))
         return
 
     found = merge_task_with_status(found)
     status = str(found.get("status") or "unknown").strip().lower()
     emoji = _detail_status_emoji(status)
     st = found.get("_status_snapshot") if isinstance(found.get("_status_snapshot"), dict) else {}
-    text_preview = str(found.get("text") or "").strip()[:500] or "(\u65e0\u63cf\u8ff0)"
+    text_preview = str(found.get("text") or "").strip()[:500] or t("msg.no_description")
     summary = str(build_status_summary(found)).strip()[:500]
     iteration = int(st.get("attempt") or found.get("attempt") or 0)
     acceptance = found.get("acceptance") if isinstance(found.get("acceptance"), dict) else {}
@@ -2395,7 +2378,7 @@ def _handle_task_detail_callback(cb_id: str, data: str, chat_id: int, user_id: i
         created=found.get("created_at") or st.get("created_at", ""),
         iteration=iteration,
         text=text_preview,
-        summary=summary or "(\u65e0)",
+        summary=summary or t("msg.none_short"),
     )
     if acceptance.get("reason"):
         detail += "\n\u62d2\u7edd\u539f\u56e0: {}".format(str(acceptance["reason"])[:500])
@@ -2413,7 +2396,7 @@ def _handle_task_detail_callback(cb_id: str, data: str, chat_id: int, user_id: i
     # Determine if this is a pipeline task for keyboard
     is_pipeline = bool((found.get("executor") or {}).get("action") == "pipeline")
     send_text(chat_id, detail, reply_markup=task_detail_keyboard(found.get("task_code", task_code), status, is_pipeline=is_pipeline))
-    answer_callback_query(cb_id, "\u4efb\u52a1\u8be6\u60c5")
+    answer_callback_query(cb_id, t("msg.task_detail_label"))
 
 
 def _handle_stage_detail_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:
@@ -2424,21 +2407,21 @@ def _handle_stage_detail_callback(cb_id: str, data: str, chat_id: int, user_id: 
     # Read run log from logs/{task_id}.run.json
     run_log_path = tasks_root() / "logs" / (task_id + ".run.json")
     if not run_log_path.exists():
-        send_text(chat_id, "\u65e0\u9636\u6bb5\u6267\u884c\u8bb0\u5f55\uff08\u65e5\u5fd7\u6587\u4ef6\u4e0d\u5b58\u5728\uff09", reply_markup=back_to_menu_keyboard())
-        answer_callback_query(cb_id, "\u65e0\u8bb0\u5f55")
+        send_text(chat_id, t("msg.no_stage_records"), reply_markup=back_to_menu_keyboard())
+        answer_callback_query(cb_id, t("msg.no_records"))
         return
 
     try:
         run_data = load_json(run_log_path)
     except Exception:
-        send_text(chat_id, "\u65e0\u6cd5\u8bfb\u53d6\u9636\u6bb5\u6267\u884c\u8bb0\u5f55", reply_markup=back_to_menu_keyboard())
-        answer_callback_query(cb_id, "\u8bfb\u53d6\u5931\u8d25")
+        send_text(chat_id, t("msg.cannot_read_stage"), reply_markup=back_to_menu_keyboard())
+        answer_callback_query(cb_id, t("msg.read_failed"))
         return
 
     stage_details = run_data.get("stage_details")
     if not stage_details:
-        send_text(chat_id, "\u65e0\u9636\u6bb5\u6267\u884c\u8bb0\u5f55", reply_markup=back_to_menu_keyboard())
-        answer_callback_query(cb_id, "\u65e0\u8bb0\u5f55")
+        send_text(chat_id, t("msg.no_stage_records_short"), reply_markup=back_to_menu_keyboard())
+        answer_callback_query(cb_id, t("msg.no_records"))
         return
 
     lines = ["\U0001f50d \u9636\u6bb5\u8be6\u60c5 [{}]".format(task_code), "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"]
@@ -2461,7 +2444,7 @@ def _handle_stage_detail_callback(cb_id: str, data: str, chat_id: int, user_id: 
             tag = _provider_tag(provider)
             model_display = "{} {}".format(model, tag).rstrip()
         else:
-            model_display = sd.get("backend", "\u672a\u77e5")
+            model_display = sd.get("backend", t("msg.unknown"))
 
         status_icon = "\u274c" if noop or (rc and rc != 0) else "\u2705"
         lines.append("\n{} {}. {} {} \u2192 {}{}".format(emoji, idx, label, status_icon, model_display, time_str))
@@ -2482,7 +2465,7 @@ def _handle_stage_detail_callback(cb_id: str, data: str, chat_id: int, user_id: 
     if len(text) > 4000:
         text = text[:4000] + "\n... (\u5df2\u622a\u65ad)"
     send_text(chat_id, text, reply_markup=back_to_menu_keyboard())
-    answer_callback_query(cb_id, "\u9636\u6bb5\u8be6\u60c5")
+    answer_callback_query(cb_id, t("msg.stage_detail_label"))
 
 
 def _handle_task_doc_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:
@@ -2503,13 +2486,13 @@ def _handle_task_doc_callback(cb_id: str, data: str, chat_id: int, user_id: int)
                 except Exception:
                     pass
         if not doc_text:
-            doc_text = "(\u65e0\u6587\u6863\u5185\u5bb9)"
+            doc_text = t("msg.no_doc_content")
         send_text(
             chat_id,
             "\U0001f4c4 \u4efb\u52a1\u6587\u6863 [{}]\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{}".format(ref, doc_text[:3500]),
             reply_markup=back_to_menu_keyboard(),
         )
-        answer_callback_query(cb_id, "\u67e5\u770b\u6587\u6863")
+        answer_callback_query(cb_id, t("msg.view_doc_label"))
         return
 
     # Try as active task
@@ -2520,16 +2503,16 @@ def _handle_task_doc_callback(cb_id: str, data: str, chat_id: int, user_id: int)
         if st:
             doc_text = str(st.get("summary") or st.get("text") or st.get("error") or "").strip()[:3000]
             if not doc_text:
-                doc_text = "(\u65e0\u6587\u6863\u5185\u5bb9)"
+                doc_text = t("msg.no_doc_content")
             send_text(
                 chat_id,
                 "\U0001f4c4 \u4efb\u52a1\u6587\u6863 [{}]\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{}".format(ref, doc_text[:3500]),
                 reply_markup=back_to_menu_keyboard(),
             )
-            answer_callback_query(cb_id, "\u67e5\u770b\u6587\u6863")
+            answer_callback_query(cb_id, t("msg.view_doc_label"))
             return
-        send_text(chat_id, "\u4efb\u52a1\u4e0d\u5b58\u5728: {}".format(ref), reply_markup=back_to_menu_keyboard())
-        answer_callback_query(cb_id, "\u4efb\u52a1\u4e0d\u5b58\u5728")
+        send_text(chat_id, t("msg.task_not_found", ref=ref), reply_markup=back_to_menu_keyboard())
+        answer_callback_query(cb_id, t("msg.task_not_found_short"))
         return
 
     found = merge_task_with_status(found)
@@ -2568,7 +2551,7 @@ def _handle_task_doc_callback(cb_id: str, data: str, chat_id: int, user_id: int)
             doc_text += "\n\n\u9519\u8bef\u4fe1\u606f: {}".format(error[:500])
 
     if not doc_text:
-        doc_text = "(\u65e0\u6587\u6863\u5185\u5bb9)"
+        doc_text = t("msg.no_doc_content")
 
     send_text(
         chat_id,
@@ -2577,7 +2560,7 @@ def _handle_task_doc_callback(cb_id: str, data: str, chat_id: int, user_id: int)
         ),
         reply_markup=back_to_menu_keyboard(),
     )
-    answer_callback_query(cb_id, "\u67e5\u770b\u6587\u6863")
+    answer_callback_query(cb_id, t("msg.view_doc_label"))
 
 
 def _handle_task_summary_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:
@@ -2605,14 +2588,14 @@ def _handle_task_summary_callback(cb_id: str, data: str, chat_id: int, user_id: 
                 pass
 
     if not summary_text:
-        summary_text = "(\u65e0\u6982\u8981\u4fe1\u606f)"
+        summary_text = t("msg.no_summary_info")
 
     send_text(
         chat_id,
         "\U0001f4d1 \u4efb\u52a1\u6982\u8981 [{}]\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{}".format(ref, summary_text[:3500]),
         reply_markup=back_to_menu_keyboard(),
     )
-    answer_callback_query(cb_id, "\u67e5\u770b\u6982\u8981")
+    answer_callback_query(cb_id, t("msg.view_summary_label"))
 
 
 def _handle_task_log_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> None:
@@ -2622,15 +2605,15 @@ def _handle_task_log_callback(cb_id: str, data: str, chat_id: int, user_id: int)
 
     run_log_path = tasks_root() / "logs" / (task_id + ".run.json")
     if not run_log_path.exists():
-        send_text(chat_id, "\u65e0\u6267\u884c\u65e5\u5fd7\u6587\u4ef6", reply_markup=back_to_menu_keyboard())
-        answer_callback_query(cb_id, "\u65e0\u65e5\u5fd7")
+        send_text(chat_id, t("msg.no_log_file"), reply_markup=back_to_menu_keyboard())
+        answer_callback_query(cb_id, t("msg.no_log"))
         return
 
     try:
         log_text = run_log_path.read_text(encoding="utf-8")
     except Exception:
-        send_text(chat_id, "\u65e0\u6cd5\u8bfb\u53d6\u65e5\u5fd7\u6587\u4ef6", reply_markup=back_to_menu_keyboard())
-        answer_callback_query(cb_id, "\u8bfb\u53d6\u5931\u8d25")
+        send_text(chat_id, t("msg.cannot_read_log"), reply_markup=back_to_menu_keyboard())
+        answer_callback_query(cb_id, t("msg.read_failed"))
         return
 
     # Try sending as document if too large
@@ -2646,7 +2629,7 @@ def _handle_task_log_callback(cb_id: str, data: str, chat_id: int, user_id: int)
             "\U0001f4dc \u6267\u884c\u65e5\u5fd7 [{}]\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{}".format(ref, log_text[:3500]),
             reply_markup=back_to_menu_keyboard(),
         )
-    answer_callback_query(cb_id, "\u67e5\u770b\u65e5\u5fd7")
+    answer_callback_query(cb_id, t("msg.view_log_label"))
 
 
 def _format_iso_time(iso_str: str) -> str:
@@ -2673,8 +2656,8 @@ def _handle_archive_detail_callback(cb_id: str, data: str, chat_id: int, user_id
     entry = find_archive_entry(archive_ref)
     if not entry:
         print("[archive_detail] not found: {}".format(archive_ref))
-        send_text(chat_id, "\u5f52\u6863\u8bb0\u5f55\u672a\u627e\u5230: {}".format(archive_ref), reply_markup=task_mgmt_menu_keyboard())
-        answer_callback_query(cb_id, "\u672a\u627e\u5230")
+        send_text(chat_id, t("msg.archive_not_found", ref=archive_ref), reply_markup=task_mgmt_menu_keyboard())
+        answer_callback_query(cb_id, t("callback.ws_not_found"))
         return
 
     # Read summary from file if available
@@ -2709,8 +2692,8 @@ def _handle_archive_detail_callback(cb_id: str, data: str, chat_id: int, user_id
         status=status_tag(entry.get("status", "unknown")),
         action=entry.get("action", "unknown"),
         completed=completed_time,
-        text=str(entry.get("text") or "").strip()[:500] or "(\u65e0\u63cf\u8ff0)",
-        summary=summary[:500] or "(\u65e0)",
+        text=str(entry.get("text") or "").strip()[:500] or t("msg.no_description"),
+        summary=summary[:500] or t("msg.none_short"),
     )
 
     # Build enhanced keyboard with conditional buttons
@@ -2742,7 +2725,7 @@ def _handle_archive_detail_callback(cb_id: str, data: str, chat_id: int, user_id
     ])
 
     send_text(chat_id, detail, reply_markup={"inline_keyboard": kbd_rows})
-    answer_callback_query(cb_id, "\u5f52\u6863\u8be6\u60c5")
+    answer_callback_query(cb_id, t("msg.archive_detail_label"))
 
 
 def _remove_archive_entry(archive_id: str) -> bool:
@@ -3154,7 +3137,7 @@ def _do_summary_command(chat_id: int, user_id: int) -> None:
     if not workspaces:
         send_text(
             chat_id,
-            "\u8bf7\u5148\u6dfb\u52a0\u5de5\u4f5c\u533a\uff08/menu \u2192 \u5de5\u4f5c\u533a\u7ba1\u7406 \u2192 \u6dfb\u52a0\uff09",
+            t("msg.add_workspace_first"),
             reply_markup=back_to_menu_keyboard(),
         )
         return
@@ -3178,12 +3161,12 @@ def _generate_and_send_summary(chat_id: int, workspace_path: Path) -> None:
     if not workspace_path.exists():
         send_text(
             chat_id,
-            "\u5de5\u4f5c\u533a\u8def\u5f84\u4e0d\u5b58\u5728: {}".format(workspace_path),
+            t("msg.path_not_exist", path=workspace_path),
             reply_markup=back_to_menu_keyboard(),
         )
         return
 
-    send_text(chat_id, "\u23f3 \u6b63\u5728\u4f7f\u7528 AI \u5206\u6790\u9879\u76ee\uff0c\u8bf7\u7a0d\u5019...")
+    send_text(chat_id, t("msg.analyzing_project"))
 
     report = generate_ai_summary(workspace_path, commit_count=3)
 
@@ -3887,7 +3870,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             send_text(chat_id, _accept_msg)
         archive_path = Path(str(archive_meta.get("archive_file") or ""))
         if archive_path.exists():
-            send_text(chat_id, "\u5f52\u6863\u6587\u4ef6\u5df2\u751f\u6210: {}".format(str(archive_path)))
+            send_text(chat_id, t("msg.archive_file_generated", path=str(archive_path)))
 
         # ── Auto-launch queued tasks for this workspace ──
         _auto_launch_queued_task(found, chat_id)
@@ -4162,7 +4145,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             # Direct cancel by ref
             found = find_task(cancel_arg)
             if not found:
-                send_text(chat_id, "\u4efb\u52a1\u4e0d\u5b58\u5728: {}".format(cancel_arg), reply_markup=back_to_menu_keyboard())
+                send_text(chat_id, t("msg.task_not_found", ref=cancel_arg), reply_markup=back_to_menu_keyboard())
                 return True
             task_id = str(found.get("task_id") or "")
             st = task_status_snapshot(task_id)
@@ -4170,7 +4153,7 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if current_status not in ("pending", "processing", "queued"):
                 send_text(
                     chat_id,
-                    "\u4ec5\u53ef\u53d6\u6d88\u5f85\u5904\u7406/\u6267\u884c\u4e2d/\u6392\u961f\u4e2d\u7684\u4efb\u52a1\uff0c\u5f53\u524d\u72b6\u6001: {}".format(current_status),
+                    t("msg.only_cancel_active", status=current_status),
                     reply_markup=back_to_menu_keyboard(),
                 )
                 return True
@@ -4187,10 +4170,10 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             if processing_path.exists():
                 processing_path.unlink()
             update_task_runtime(found, status="cancelled", stage="results")
-            mark_task_finished(found, status="cancelled", stage="results", error="\u7528\u6237\u53d6\u6d88")
+            mark_task_finished(found, status="cancelled", stage="results", error=t("msg.user_cancelled"))
             send_text(
                 chat_id,
-                "\u2705 \u4efb\u52a1 [{}] \u5df2\u53d6\u6d88\u3002".format(cancel_arg),
+                t("msg.task_cancelled", ref=cancel_arg),
                 reply_markup=back_to_menu_keyboard(),
             )
             return True
