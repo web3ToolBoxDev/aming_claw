@@ -8,6 +8,7 @@ Provides:
 - generate_ai_summary: AI-driven project summary based on recent commits
 """
 import os
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -18,6 +19,8 @@ from typing import Dict, List, Optional, Tuple
 agent_dir = os.path.dirname(os.path.abspath(__file__))
 if agent_dir not in sys.path:
     sys.path.insert(0, agent_dir)
+
+from config import get_claude_model, get_model_provider
 
 # Directories to skip during file scanning
 SKIP_DIRS = {
@@ -346,55 +349,59 @@ def _build_summary_prompt(workspace: Path, commit_diffs: List[Dict]) -> str:
     return "\n".join(parts)
 
 
-def _call_ai_api(prompt: str, timeout: int = 30) -> Optional[str]:
-    """Call the configured AI backend and return the response text.
+def _call_ai_api(prompt: str, timeout: int = 60) -> Optional[str]:
+    """Call the configured AI backend via CLI subprocess and return the response text.
 
-    Returns None on any failure (timeout, missing key, API error).
+    Uses Claude CLI (default) or Codex CLI (when provider is openai).
+    Returns None on any failure (timeout, CLI not found, process error).
     """
-    import requests as _req
-    from config import get_claude_model, get_model_provider
-
+    timeout = int(os.getenv("SUMMARY_AI_TIMEOUT", str(timeout)))
     model = get_claude_model().strip()
     provider = get_model_provider().strip().lower()
 
     try:
         if provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY", "").strip()
-            if not api_key:
-                return None
-            resp = _req.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": "Bearer " + api_key,
-                         "Content-Type": "application/json"},
-                json={"model": model or "gpt-4o",
-                      "messages": [{"role": "user", "content": prompt}],
-                      "max_tokens": 4096},
-                timeout=timeout,
+            # Codex CLI path
+            codex_bin = os.getenv("CODEX_BIN", "").strip()
+            if not codex_bin:
+                codex_bin = (
+                    shutil.which("codex.cmd") or shutil.which("codex")
+                    or ("codex.cmd" if os.name == "nt" else "codex")
+                )
+            cmd = [codex_bin, "exec"]
+            if model:
+                cmd += ["--model", model]
+            cmd.append(prompt)
+            proc = subprocess.run(
+                cmd, text=True, capture_output=True,
+                timeout=timeout, check=False,
             )
-            if resp.status_code >= 400:
-                return None
-            return resp.json()["choices"][0]["message"]["content"]
         else:
-            # Default: Anthropic Messages API
-            api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-            if not api_key:
-                return None
-            payload = {
-                "model": model or "claude-sonnet-4-6",
-                "max_tokens": 4096,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-            resp = _req.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": api_key,
-                         "anthropic-version": "2023-06-01",
-                         "Content-Type": "application/json"},
-                json=payload,
-                timeout=timeout,
+            # Claude CLI path (default)
+            claude_bin = os.getenv("CLAUDE_BIN", "").strip()
+            if not claude_bin:
+                claude_bin = (
+                    shutil.which("claude.cmd") or shutil.which("claude")
+                    or ("claude.cmd" if os.name == "nt" else "claude")
+                )
+            cmd = [claude_bin, "-p", "--output-format", "text"]
+            if model:
+                cmd += ["--model", model]
+
+            # Strip env vars that interfere with Claude CLI nested sessions
+            cli_env = {k: v for k, v in os.environ.items()
+                       if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+                                    "CLAUDE_CODE_SSE_PORT", "ANTHROPIC_API_KEY")}
+
+            proc = subprocess.run(
+                cmd, input=prompt, text=True, capture_output=True,
+                timeout=timeout, check=False, env=cli_env,
             )
-            if resp.status_code >= 400:
-                return None
-            return resp.json()["content"][0]["text"]
+
+        stdout = (proc.stdout or "").strip()
+        if proc.returncode != 0 or not stdout:
+            return None
+        return stdout
     except Exception:
         return None
 

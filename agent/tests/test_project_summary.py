@@ -572,5 +572,106 @@ class TestGenerateAiSummary(unittest.TestCase):
         mock_ai.assert_called_once()
 
 
+class TestCallAiApiCli(unittest.TestCase):
+    """Test _call_ai_api CLI subprocess integration."""
+
+    def setUp(self):
+        # Import the function under test
+        from project_summary import _call_ai_api
+        self._call_ai_api = _call_ai_api
+
+    @patch("project_summary.get_model_provider", return_value="anthropic")
+    @patch("project_summary.get_claude_model", return_value="test-model")
+    @patch("subprocess.run")
+    def test_ai_success_claude_cli(self, mock_run, mock_model, mock_provider):
+        """Verify Claude CLI is called and stdout returned on success."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="AI分析结果", stderr="")
+        result = self._call_ai_api("test prompt")
+        self.assertEqual(result, "AI分析结果")
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("-p", cmd)
+        self.assertIn("--output-format", cmd)
+        self.assertIn("text", cmd)
+        self.assertIn("--model", cmd)
+        self.assertIn("test-model", cmd)
+        # Verify prompt passed via stdin (input kwarg)
+        self.assertEqual(mock_run.call_args[1]["input"], "test prompt")
+
+    @patch("project_summary.get_model_provider", return_value="anthropic")
+    @patch("project_summary.get_claude_model", return_value="test-model")
+    @patch("subprocess.run")
+    def test_ai_failure_returns_none(self, mock_run, mock_model, mock_provider):
+        """Verify CLI failure returns None."""
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
+        result = self._call_ai_api("test prompt")
+        self.assertIsNone(result)
+
+    @patch("project_summary.get_model_provider", return_value="anthropic")
+    @patch("project_summary.get_claude_model", return_value="test-model")
+    @patch("subprocess.run")
+    def test_ai_timeout_returns_none(self, mock_run, mock_model, mock_provider):
+        """Verify TimeoutExpired returns None."""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["claude"], timeout=60)
+        result = self._call_ai_api("test prompt")
+        self.assertIsNone(result)
+
+    @patch("project_summary.get_model_provider", return_value="openai")
+    @patch("project_summary.get_claude_model", return_value="gpt-model")
+    @patch("subprocess.run")
+    def test_openai_provider_uses_codex_cli(self, mock_run, mock_model, mock_provider):
+        """Verify OpenAI provider routes to Codex CLI."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="Codex结果", stderr="")
+        result = self._call_ai_api("test prompt")
+        self.assertEqual(result, "Codex结果")
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("exec", cmd)
+        self.assertIn("--model", cmd)
+        self.assertIn("gpt-model", cmd)
+
+    @patch("project_summary.get_model_provider", return_value="anthropic")
+    @patch("project_summary.get_claude_model", return_value="")
+    @patch("subprocess.run")
+    def test_empty_model_no_model_flag(self, mock_run, mock_model, mock_provider):
+        """When model is empty, --model flag should not appear in command."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="结果", stderr="")
+        result = self._call_ai_api("test prompt")
+        self.assertEqual(result, "结果")
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--model", cmd)
+
+    @patch("project_summary.get_model_provider", return_value="anthropic")
+    @patch("project_summary.get_claude_model", return_value="m")
+    @patch("subprocess.run")
+    def test_env_vars_stripped_for_claude(self, mock_run, mock_model, mock_provider):
+        """Verify sensitive env vars are stripped from Claude CLI subprocess."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        with patch.dict(os.environ, {
+            "CLAUDECODE": "1",
+            "CLAUDE_CODE_ENTRYPOINT": "x",
+            "CLAUDE_CODE_SSE_PORT": "9999",
+            "ANTHROPIC_API_KEY": "sk-secret",
+            "HOME": "/home/test",
+        }):
+            self._call_ai_api("p")
+        call_kwargs = mock_run.call_args[1]
+        env = call_kwargs.get("env", {})
+        self.assertNotIn("CLAUDECODE", env)
+        self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", env)
+        self.assertNotIn("CLAUDE_CODE_SSE_PORT", env)
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+
+    @patch.dict(os.environ, {"SUMMARY_AI_TIMEOUT": "120"})
+    @patch("project_summary.get_model_provider", return_value="anthropic")
+    @patch("project_summary.get_claude_model", return_value="m")
+    @patch("subprocess.run")
+    def test_custom_timeout_from_env(self, mock_run, mock_model, mock_provider):
+        """Verify SUMMARY_AI_TIMEOUT env var is respected."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        self._call_ai_api("p")
+        call_kwargs = mock_run.call_args[1]
+        self.assertEqual(call_kwargs["timeout"], 120)
+
+
 if __name__ == "__main__":
     unittest.main()
