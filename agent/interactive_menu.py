@@ -122,6 +122,9 @@ def main_menu_keyboard() -> Dict:
                 {"text": "\U0001f512 \u5b89\u5168\u8ba4\u8bc1", "callback_data": "menu:sub_security"},
                 {"text": "\U0001f4c1 \u5de5\u4f5c\u533a\u7ba1\u7406", "callback_data": "menu:sub_workspace"},
             ],
+            [
+                {"text": "\U0001f4ca \u9879\u76ee\u603b\u7ed3", "callback_data": "menu:summary"},
+            ],
         ]
     }
 

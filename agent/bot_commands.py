@@ -1253,6 +1253,18 @@ def handle_callback_query(cb: Dict) -> None:
             answer_callback_query(cb_id, "\u5df2\u9009: {}".format(ws.get("label", ws_id)))
             return
 
+        # ---- Project summary workspace selection callback ----
+        if data.startswith("summary_ws:"):
+            ws_id = data.split(":", 1)[1].strip()
+            from workspace_registry import get_workspace as _get_ws_sum
+            ws = _get_ws_sum(ws_id)
+            if not ws:
+                answer_callback_query(cb_id, "\u5de5\u4f5c\u533a\u4e0d\u5b58\u5728", show_alert=True)
+                return
+            answer_callback_query(cb_id, "\u751f\u6210\u603b\u7ed3...")
+            _generate_and_send_summary(chat_id, Path(ws["path"]))
+            return
+
         if data.startswith("ws_remove:"):
             ws_id = data.split(":", 1)[1].strip()
             from workspace_registry import remove_workspace as _rm_ws
@@ -1596,6 +1608,12 @@ def _handle_menu_callback(cb_id: str, data: str, chat_id: int, user_id: int) -> 
         handle_command(chat_id, user_id, "/info")
         send_text(chat_id, "", reply_markup=back_to_menu_keyboard()) if False else None
         answer_callback_query(cb_id, "系统信息")
+        return
+
+    # -- Project Summary --
+    if action == "summary":
+        _do_summary_command(chat_id, user_id)
+        answer_callback_query(cb_id, "项目总结")
         return
 
     # -- Switch Backend: show selection keyboard --
@@ -3129,6 +3147,89 @@ def _requires_acceptance_2fa() -> bool:
     return bool(get_auth_state())
 
 
+def _do_summary_command(chat_id: int, user_id: int) -> None:
+    """Handle /summary: show workspace selector or generate summary directly."""
+    from workspace_registry import ensure_current_workspace_registered, list_workspaces as _list_ws_sum
+    ensure_current_workspace_registered()
+    workspaces = _list_ws_sum()
+    if not workspaces:
+        send_text(
+            chat_id,
+            "\u8bf7\u5148\u6dfb\u52a0\u5de5\u4f5c\u533a\uff08/menu \u2192 \u5de5\u4f5c\u533a\u7ba1\u7406 \u2192 \u6dfb\u52a0\uff09",
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return
+    if len(workspaces) > 1:
+        send_text(
+            chat_id,
+            "\U0001f4ca \u9879\u76ee\u603b\u7ed3\n"
+            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+            "\u8bf7\u9009\u62e9\u5de5\u4f5c\u533a:",
+            reply_markup=workspace_select_keyboard(workspaces, "summary_ws"),
+        )
+    else:
+        ws = workspaces[0]
+        _generate_and_send_summary(chat_id, Path(ws["path"]))
+
+
+def _generate_and_send_summary(chat_id: int, workspace_path: Path) -> None:
+    """Generate project summary and send to user (text or file)."""
+    import tempfile
+    from project_summary import collect_project_info, collect_recent_commits, format_summary_text
+
+    if not workspace_path.exists():
+        send_text(
+            chat_id,
+            "\u5de5\u4f5c\u533a\u8def\u5f84\u4e0d\u5b58\u5728: {}".format(workspace_path),
+            reply_markup=back_to_menu_keyboard(),
+        )
+        return
+
+    send_text(chat_id, "\u6b63\u5728\u751f\u6210\u9879\u76ee\u603b\u7ed3...")
+
+    info = collect_project_info(workspace_path)
+    commits = collect_recent_commits(workspace_path)
+    report = format_summary_text(info, commits)
+
+    if len(report) <= 3800:
+        send_text(chat_id, report, reply_markup=back_to_menu_keyboard())
+    else:
+        from datetime import datetime as _dt
+        date_str = _dt.now().strftime("%Y%m%d")
+        fname = "summary_{}_{}.txt".format(info.get("name", "project"), date_str)
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix=fname.replace(".txt", "_"),
+            delete=False, encoding="utf-8",
+        )
+        try:
+            tmp.write(report)
+            tmp.close()
+            tmp_path = Path(tmp.name)
+            # Rename to desired filename
+            target = tmp_path.parent / fname
+            try:
+                tmp_path.rename(target)
+            except OSError:
+                target = tmp_path
+            send_document(
+                chat_id,
+                target,
+                caption="\U0001f4ca \u9879\u76ee\u603b\u7ed3: {} (\u5185\u5bb9\u8f83\u957f\uff0c\u5df2\u751f\u6210\u6587\u4ef6)".format(info.get("name", "")),
+            )
+            send_text(chat_id, "", reply_markup=back_to_menu_keyboard()) if False else None
+            send_text(chat_id, "\U0001f4ca \u62a5\u544a\u5df2\u53d1\u9001\u3002", reply_markup=back_to_menu_keyboard())
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+            try:
+                if target != tmp_path:
+                    os.unlink(str(target))
+            except (OSError, NameError):
+                pass
+
+
 def handle_command(chat_id: int, user_id: int, text: str) -> bool:
     t = (text or "").strip()
     if t.startswith("/menu") or t.startswith("/start"):
@@ -3217,6 +3318,10 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             stages = get_pipeline_stages()
             lines.append("流水线: {}".format(format_pipeline_stages(stages)))
         send_text(chat_id, "\n".join(lines), reply_markup=back_to_menu_keyboard())
+        return True
+
+    if t.startswith("/summary"):
+        _do_summary_command(chat_id, user_id)
         return True
 
     # -- /task (no args): interactive workspace selection + task input --
