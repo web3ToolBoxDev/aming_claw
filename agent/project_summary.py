@@ -5,6 +5,7 @@ Provides:
 - collect_project_info: Scan workspace directory for project overview
 - collect_recent_commits: Get recent git commits
 - format_summary_text: Format collected data into human-readable text
+- generate_ai_summary: AI-driven project summary based on recent commits
 """
 import os
 import subprocess
@@ -12,7 +13,7 @@ import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 agent_dir = os.path.dirname(os.path.abspath(__file__))
 if agent_dir not in sys.path:
@@ -227,6 +228,234 @@ def collect_recent_commits(workspace: Path, count: int = 20) -> List[Dict]:
             "message": parts[3].strip(),
         })
     return commits
+
+
+# ---------------------------------------------------------------------------
+# AI-driven summary generation
+# ---------------------------------------------------------------------------
+
+# Empty tree SHA used to diff the very first commit
+_EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf899d69f82ced515"
+
+# Max diff chars per commit to avoid prompt overflow
+_MAX_DIFF_CHARS = 3000
+
+
+def _collect_commit_diffs(workspace: Path, commit_count: int = 3) -> List[Dict]:
+    """Collect recent commits with diff stat and diff content.
+
+    Returns list of dicts:
+        [{hash, message, author, date, diff_stat, diff_content}, ...]
+    """
+    workspace = Path(workspace).resolve()
+    if not _is_git_repo(workspace):
+        return []
+
+    commit_count = max(1, min(commit_count, 10))
+
+    # Get commit metadata
+    fmt = "%H|%s|%an|%ai"
+    code, out, _ = _run_git(
+        workspace, "log",
+        "--format={}".format(fmt),
+        "-n", str(commit_count),
+    )
+    if code != 0 or not out:
+        return []
+
+    results = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|", 3)
+        if len(parts) < 4:
+            continue
+        full_hash = parts[0].strip()
+        message = parts[1].strip()
+        author = parts[2].strip()
+        date_str = parts[3].strip()[:10]
+
+        # Try diff against parent; for first commit use empty tree
+        parent_ref = "{}~1".format(full_hash)
+        code_stat, diff_stat, _ = _run_git(
+            workspace, "diff", "{}..{}".format(parent_ref, full_hash), "--stat",
+        )
+        if code_stat != 0:
+            # Likely first commit with no parent
+            _, diff_stat, _ = _run_git(
+                workspace, "diff", "--stat", "{}..{}".format(_EMPTY_TREE_SHA, full_hash),
+            )
+
+        code_diff, diff_content, _ = _run_git(
+            workspace, "diff", "{}..{}".format(parent_ref, full_hash),
+        )
+        if code_diff != 0:
+            _, diff_content, _ = _run_git(
+                workspace, "diff", "{}..{}".format(_EMPTY_TREE_SHA, full_hash),
+            )
+
+        # Truncate diff content
+        if len(diff_content) > _MAX_DIFF_CHARS:
+            diff_content = diff_content[:_MAX_DIFF_CHARS] + "\n... (diff truncated)"
+
+        results.append({
+            "hash": full_hash[:8],
+            "full_hash": full_hash,
+            "message": message,
+            "author": author,
+            "date": date_str,
+            "diff_stat": diff_stat,
+            "diff_content": diff_content,
+        })
+    return results
+
+
+def _build_summary_prompt(workspace: Path, commit_diffs: List[Dict]) -> str:
+    """Build prompt for AI summary generation."""
+    # Collect top-level directory structure for context
+    top_dirs = _collect_top_dirs(workspace, max_depth=1)
+    tech_stack = _detect_tech_stack(workspace)
+
+    parts = []
+    parts.append("你是一位资深开发者，请根据以下项目信息和最近的 Git 提交变动，生成一份简洁的中文项目总结。")
+    parts.append("")
+    parts.append("要求：")
+    parts.append("1. 先用一小段话概括这个项目是做什么的（基于目录结构、技术栈和代码变动推断）")
+    parts.append("2. 然后按 commit 逐条说明每次提交实现或修改了什么功能")
+    parts.append("3. 用中文，简洁明了，以文字段落为主，不要用表格或代码块")
+    parts.append("4. 不要输出任何前缀标题如\"项目总结\"，直接输出内容")
+    parts.append("")
+
+    if tech_stack:
+        parts.append("【技术栈】{}".format(", ".join(tech_stack)))
+    if top_dirs:
+        parts.append("【目录结构】{}".format(", ".join(d.strip() for d in top_dirs[:15])))
+    parts.append("")
+
+    for i, cd in enumerate(commit_diffs, 1):
+        parts.append("===== 提交 {} =====".format(i))
+        parts.append("Hash: {}  日期: {}  作者: {}".format(cd["hash"], cd["date"], cd["author"]))
+        parts.append("Message: {}".format(cd["message"]))
+        if cd["diff_stat"]:
+            parts.append("变更文件统计:\n{}".format(cd["diff_stat"]))
+        if cd["diff_content"]:
+            parts.append("代码变动:\n{}".format(cd["diff_content"]))
+        parts.append("")
+
+    return "\n".join(parts)
+
+
+def _call_ai_api(prompt: str, timeout: int = 30) -> Optional[str]:
+    """Call the configured AI backend and return the response text.
+
+    Returns None on any failure (timeout, missing key, API error).
+    """
+    import requests as _req
+    from config import get_claude_model, get_model_provider
+
+    model = get_claude_model().strip()
+    provider = get_model_provider().strip().lower()
+
+    try:
+        if provider == "openai":
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            if not api_key:
+                return None
+            resp = _req.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": "Bearer " + api_key,
+                         "Content-Type": "application/json"},
+                json={"model": model or "gpt-4o",
+                      "messages": [{"role": "user", "content": prompt}],
+                      "max_tokens": 4096},
+                timeout=timeout,
+            )
+            if resp.status_code >= 400:
+                return None
+            return resp.json()["choices"][0]["message"]["content"]
+        else:
+            # Default: Anthropic Messages API
+            api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+            if not api_key:
+                return None
+            payload = {
+                "model": model or "claude-sonnet-4-6",
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            resp = _req.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": api_key,
+                         "anthropic-version": "2023-06-01",
+                         "Content-Type": "application/json"},
+                json=payload,
+                timeout=timeout,
+            )
+            if resp.status_code >= 400:
+                return None
+            return resp.json()["content"][0]["text"]
+    except Exception:
+        return None
+
+
+def _build_fallback_summary(workspace: Path, commit_diffs: List[Dict]) -> str:
+    """Build a plain-text fallback summary when AI is unavailable."""
+    lines = []
+    name = workspace.name
+    tech = _detect_tech_stack(workspace)
+    lines.append("\U0001f4ca 项目总结: {}".format(name))
+    lines.append("\u2501" * 24)
+    if tech:
+        lines.append("\U0001f527 技术栈: {}".format(", ".join(tech)))
+    lines.append("")
+    lines.append("\U0001f4dd 最近 {} 条提交:".format(len(commit_diffs)))
+    for cd in commit_diffs:
+        lines.append("")
+        lines.append("[{}] {} - {}".format(cd["hash"], cd["date"], cd["message"]))
+        if cd["diff_stat"]:
+            for sl in cd["diff_stat"].splitlines()[-3:]:
+                lines.append("  {}".format(sl.strip()))
+    lines.append("")
+    lines.append("(AI 分析不可用，仅展示提交记录)")
+    return "\n".join(lines)
+
+
+def generate_ai_summary(workspace_path, commit_count: int = 3) -> str:
+    """Generate an AI-driven project summary based on recent commits.
+
+    Args:
+        workspace_path: Path to the workspace/git repo.
+        commit_count: Number of recent commits to analyse (1-10).
+
+    Returns:
+        A Chinese text summary string.
+    """
+    workspace = Path(workspace_path).resolve()
+    commit_count = max(1, min(commit_count, 10))
+
+    if not _is_git_repo(workspace):
+        return "当前工作区非 Git 仓库，无法生成提交分析。"
+
+    commit_diffs = _collect_commit_diffs(workspace, commit_count)
+    if not commit_diffs:
+        return "当前仓库无提交记录。"
+
+    # Build prompt and call AI
+    prompt = _build_summary_prompt(workspace, commit_diffs)
+    ai_response = _call_ai_api(prompt)
+
+    if ai_response:
+        # Format with header
+        lines = []
+        lines.append("\U0001f4ca 项目总结")
+        lines.append("\u2501" * 24)
+        lines.append("")
+        lines.append(ai_response.strip())
+        return "\n".join(lines)
+
+    # Fallback: plain commit list
+    return _build_fallback_summary(workspace, commit_diffs)
 
 
 def format_summary_text(info: Dict, commits: List[Dict]) -> str:

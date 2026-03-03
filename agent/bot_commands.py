@@ -3173,9 +3173,8 @@ def _do_summary_command(chat_id: int, user_id: int) -> None:
 
 
 def _generate_and_send_summary(chat_id: int, workspace_path: Path) -> None:
-    """Generate project summary and send to user (text or file)."""
-    import tempfile
-    from project_summary import collect_project_info, collect_recent_commits, format_summary_text
+    """Generate AI-driven project summary and send to user."""
+    from project_summary import generate_ai_summary
 
     if not workspace_path.exists():
         send_text(
@@ -3185,49 +3184,15 @@ def _generate_and_send_summary(chat_id: int, workspace_path: Path) -> None:
         )
         return
 
-    send_text(chat_id, "\u6b63\u5728\u751f\u6210\u9879\u76ee\u603b\u7ed3...")
+    send_text(chat_id, "\u23f3 \u6b63\u5728\u4f7f\u7528 AI \u5206\u6790\u9879\u76ee\uff0c\u8bf7\u7a0d\u5019...")
 
-    info = collect_project_info(workspace_path)
-    commits = collect_recent_commits(workspace_path)
-    report = format_summary_text(info, commits)
+    report = generate_ai_summary(workspace_path, commit_count=3)
 
-    if len(report) <= 3800:
-        send_text(chat_id, report, reply_markup=back_to_menu_keyboard())
-    else:
-        from datetime import datetime as _dt
-        date_str = _dt.now().strftime("%Y%m%d")
-        fname = "summary_{}_{}.txt".format(info.get("name", "project"), date_str)
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", prefix=fname.replace(".txt", "_"),
-            delete=False, encoding="utf-8",
-        )
-        try:
-            tmp.write(report)
-            tmp.close()
-            tmp_path = Path(tmp.name)
-            # Rename to desired filename
-            target = tmp_path.parent / fname
-            try:
-                tmp_path.rename(target)
-            except OSError:
-                target = tmp_path
-            send_document(
-                chat_id,
-                target,
-                caption="\U0001f4ca \u9879\u76ee\u603b\u7ed3: {} (\u5185\u5bb9\u8f83\u957f\uff0c\u5df2\u751f\u6210\u6587\u4ef6)".format(info.get("name", "")),
-            )
-            send_text(chat_id, "", reply_markup=back_to_menu_keyboard()) if False else None
-            send_text(chat_id, "\U0001f4ca \u62a5\u544a\u5df2\u53d1\u9001\u3002", reply_markup=back_to_menu_keyboard())
-        finally:
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
-            try:
-                if target != tmp_path:
-                    os.unlink(str(target))
-            except (OSError, NameError):
-                pass
+    # Telegram message limit: 4096 chars
+    if len(report) > 4096:
+        report = report[:4090] + "\n... (\u5185\u5bb9\u5df2\u622a\u65ad)"
+
+    send_text(chat_id, report, reply_markup=back_to_menu_keyboard())
 
 
 def handle_command(chat_id: int, user_id: int, text: str) -> bool:

@@ -122,9 +122,6 @@ def main_menu_keyboard() -> Dict:
                 {"text": "\U0001f512 \u5b89\u5168\u8ba4\u8bc1", "callback_data": "menu:sub_security"},
                 {"text": "\U0001f4c1 \u5de5\u4f5c\u533a\u7ba1\u7406", "callback_data": "menu:sub_workspace"},
             ],
-            [
-                {"text": "\U0001f4ca \u9879\u76ee\u603b\u7ed3", "callback_data": "menu:summary"},
-            ],
         ]
     }
 
@@ -216,6 +213,7 @@ def skills_menu_keyboard() -> Dict:
         "inline_keyboard": [
             [
                 {"text": "\U0001f4f7 截图", "callback_data": "menu:screenshot"},
+                {"text": "\U0001f4ca 项目总结", "callback_data": "menu:summary"},
             ],
             [
                 {"text": "\u00ab 返回主菜单", "callback_data": "menu:main"},
@@ -928,6 +926,8 @@ SUBMENU_TEXTS = {
         "\U0001f9e9 技能管理\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "可用技能列表：\n"
+        "\U0001f4f7 截图 - 对当前工作区进行截图\n"
+        "\U0001f4ca 项目总结 - AI 分析最近提交，生成项目概况\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "选择要执行的操作:"
     ),

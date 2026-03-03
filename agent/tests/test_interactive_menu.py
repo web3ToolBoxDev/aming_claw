@@ -217,6 +217,20 @@ class TestSkillsMenu(unittest.TestCase):
         all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
         self.assertNotIn("menu:screenshot", all_data)
 
+    def test_main_menu_no_summary_button(self):
+        """Project summary should be in skills sub-menu, not main menu."""
+        kb = main_menu_keyboard()
+        all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertNotIn("menu:summary", all_data)
+
+    def test_skills_menu_has_summary(self):
+        """Skills sub-menu should contain the project summary button."""
+        kb = skills_menu_keyboard()
+        all_data = [btn["callback_data"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertIn("menu:summary", all_data)
+        all_text = [btn["text"] for row in kb["inline_keyboard"] for btn in row]
+        self.assertTrue(any("\U0001f4ca" in t and "项目总结" in t for t in all_text))
+
     def test_main_menu_first_row_layout(self):
         kb = main_menu_keyboard()
         first_row = kb["inline_keyboard"][0]

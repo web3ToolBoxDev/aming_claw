@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_DIR = REPO_ROOT / "agent"
@@ -15,6 +16,10 @@ from project_summary import (  # noqa: E402
     collect_project_info,
     collect_recent_commits,
     format_summary_text,
+    generate_ai_summary,
+    _collect_commit_diffs,
+    _build_summary_prompt,
+    _build_fallback_summary,
     _detect_tech_stack,
     _collect_file_stats,
     _collect_top_dirs,
@@ -378,6 +383,193 @@ class TestFormatSummaryLong(unittest.TestCase):
         self.assertIn("msg 0", text)
         self.assertIn("msg 49", text)
         self.assertIn("50", text)  # count in header
+
+
+class TestCollectCommitDiffs(unittest.TestCase):
+    """Test _collect_commit_diffs with real git repositories."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.ws = Path(self.tmpdir.name)
+        _git(self.ws, "init")
+        _git(self.ws, "config", "user.email", "test@test.com")
+        _git(self.ws, "config", "user.name", "TestDev")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_returns_diffs_for_commits(self):
+        (self.ws / "a.py").write_text("def a(): pass\n")
+        _git(self.ws, "add", ".")
+        _git(self.ws, "commit", "-m", "add function a")
+        (self.ws / "b.py").write_text("def b(): pass\n")
+        _git(self.ws, "add", ".")
+        _git(self.ws, "commit", "-m", "add function b")
+
+        diffs = _collect_commit_diffs(self.ws, 2)
+        self.assertEqual(len(diffs), 2)
+        # Most recent first
+        self.assertEqual(diffs[0]["message"], "add function b")
+        self.assertEqual(diffs[1]["message"], "add function a")
+        # Each should have diff content
+        for d in diffs:
+            self.assertIn("hash", d)
+            self.assertIn("diff_stat", d)
+            self.assertIn("diff_content", d)
+            self.assertIn("author", d)
+            self.assertEqual(d["author"], "TestDev")
+
+    def test_respects_count_limit(self):
+        for i in range(5):
+            (self.ws / "f{}.txt".format(i)).write_text(str(i))
+            _git(self.ws, "add", ".")
+            _git(self.ws, "commit", "-m", "commit {}".format(i))
+        diffs = _collect_commit_diffs(self.ws, 2)
+        self.assertEqual(len(diffs), 2)
+
+    def test_non_git_returns_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            diffs = _collect_commit_diffs(Path(d))
+            self.assertEqual(diffs, [])
+
+    def test_no_commits_returns_empty(self):
+        diffs = _collect_commit_diffs(self.ws)
+        self.assertEqual(diffs, [])
+
+    def test_count_clamped(self):
+        """commit_count is clamped to 1-10."""
+        (self.ws / "a.txt").write_text("a")
+        _git(self.ws, "add", ".")
+        _git(self.ws, "commit", "-m", "one")
+        diffs = _collect_commit_diffs(self.ws, 0)  # clamped to 1
+        self.assertEqual(len(diffs), 1)
+
+
+class TestBuildSummaryPrompt(unittest.TestCase):
+    """Test prompt construction."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.ws = Path(self.tmpdir.name)
+        (self.ws / "requirements.txt").write_text("flask\n")
+        sub = self.ws / "src"
+        sub.mkdir()
+        (sub / "app.py").write_text("# app\n")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_prompt_contains_commit_info(self):
+        commit_diffs = [
+            {"hash": "abc1234", "full_hash": "abc1234" * 5, "message": "add feature",
+             "author": "dev", "date": "2026-03-01",
+             "diff_stat": "1 file changed", "diff_content": "+def feature(): pass"},
+        ]
+        prompt = _build_summary_prompt(self.ws, commit_diffs)
+        self.assertIn("abc1234", prompt)
+        self.assertIn("add feature", prompt)
+        self.assertIn("Python", prompt)  # tech stack detected
+        self.assertIn("中文", prompt)
+
+    def test_prompt_multiple_commits(self):
+        commit_diffs = [
+            {"hash": "aaa", "full_hash": "aaa" * 10, "message": "first",
+             "author": "a", "date": "2026-03-01",
+             "diff_stat": "", "diff_content": ""},
+            {"hash": "bbb", "full_hash": "bbb" * 10, "message": "second",
+             "author": "b", "date": "2026-03-02",
+             "diff_stat": "", "diff_content": ""},
+        ]
+        prompt = _build_summary_prompt(self.ws, commit_diffs)
+        self.assertIn("提交 1", prompt)
+        self.assertIn("提交 2", prompt)
+
+
+class TestBuildFallbackSummary(unittest.TestCase):
+    """Test fallback summary generation."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.ws = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_contains_commit_info(self):
+        diffs = [
+            {"hash": "abc1234", "message": "add feature", "author": "dev",
+             "date": "2026-03-01", "diff_stat": "1 file changed, 10 insertions",
+             "diff_content": ""},
+        ]
+        text = _build_fallback_summary(self.ws, diffs)
+        self.assertIn("abc1234", text)
+        self.assertIn("add feature", text)
+        self.assertIn("AI 分析不可用", text)
+
+
+class TestGenerateAiSummary(unittest.TestCase):
+    """Test generate_ai_summary with mocked AI calls."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.ws = Path(self.tmpdir.name)
+        _git(self.ws, "init")
+        _git(self.ws, "config", "user.email", "test@test.com")
+        _git(self.ws, "config", "user.name", "TestDev")
+        (self.ws / "main.py").write_text("print('hello')\n")
+        _git(self.ws, "add", ".")
+        _git(self.ws, "commit", "-m", "initial commit")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    @patch("project_summary._call_ai_api")
+    def test_ai_success(self, mock_ai):
+        mock_ai.return_value = "这是一个测试项目，实现了基本功能。"
+        result = generate_ai_summary(self.ws)
+        self.assertIn("项目总结", result)
+        self.assertIn("测试项目", result)
+        mock_ai.assert_called_once()
+
+    @patch("project_summary._call_ai_api")
+    def test_ai_failure_fallback(self, mock_ai):
+        mock_ai.return_value = None
+        result = generate_ai_summary(self.ws)
+        self.assertIn("AI 分析不可用", result)
+        self.assertIn("initial commit", result)
+
+    def test_non_git_repo(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = generate_ai_summary(d)
+            self.assertIn("非 Git 仓库", result)
+
+    def test_no_commits(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = Path(d)
+            _git(ws, "init")
+            result = generate_ai_summary(ws)
+            self.assertIn("无提交记录", result)
+
+    @patch("project_summary._call_ai_api")
+    def test_multiple_commits(self, mock_ai):
+        (self.ws / "extra.py").write_text("# extra\n")
+        _git(self.ws, "add", ".")
+        _git(self.ws, "commit", "-m", "add extra module")
+        mock_ai.return_value = "项目新增了额外模块。"
+        result = generate_ai_summary(self.ws, commit_count=2)
+        self.assertIn("项目总结", result)
+        mock_ai.assert_called_once()
+        # Check prompt was built with 2 commits
+        prompt_arg = mock_ai.call_args[0][0]
+        self.assertIn("initial commit", prompt_arg)
+        self.assertIn("add extra module", prompt_arg)
+
+    @patch("project_summary._call_ai_api")
+    def test_commit_count_clamped(self, mock_ai):
+        mock_ai.return_value = "OK"
+        generate_ai_summary(self.ws, commit_count=100)
+        # Should have been clamped to 10
+        mock_ai.assert_called_once()
 
 
 if __name__ == "__main__":
