@@ -188,11 +188,40 @@ def poll_updates(offset: int) -> Dict:
     return resp.json()
 
 
+def register_bot_commands() -> None:
+    """Register aming-claw commands with Telegram via setMyCommands."""
+    from utils import tg_post
+    commands = [
+        {"command": "menu", "description": "打开主菜单"},
+        {"command": "help", "description": "显示命令列表"},
+        {"command": "task", "description": "创建新任务"},
+        {"command": "status", "description": "查看任务列表或单个任务"},
+        {"command": "accept", "description": "验收任务"},
+        {"command": "reject", "description": "拒绝任务"},
+        {"command": "retry", "description": "重新开发任务"},
+        {"command": "info", "description": "查看系统信息"},
+        {"command": "switch_backend", "description": "切换后端"},
+        {"command": "switch_model", "description": "切换AI模型"},
+        {"command": "show_pipeline", "description": "查看流水线配置"},
+        {"command": "archive", "description": "归档概览/搜索"},
+        {"command": "screenshot", "description": "截图"},
+        {"command": "clear_tasks", "description": "清空任务列表"},
+        {"command": "auth_init", "description": "初始化2FA"},
+        {"command": "workspace_list", "description": "查看工作目录列表"},
+    ]
+    try:
+        tg_post("setMyCommands", {"commands": commands})
+        print("[coordinator] bot commands registered ({} commands)".format(len(commands)))
+    except Exception as exc:
+        print("[coordinator] failed to register bot commands: {}".format(exc))
+
+
 def run() -> None:
     lock = acquire_single_instance_lock()
     if lock is None:
         print("[coordinator] another coordinator instance is already running; exit")
         return
+    register_bot_commands()
     interval_sec = float(os.getenv("COORDINATOR_POLL_INTERVAL_SEC", "1"))
     reconcile_interval_sec = float(os.getenv("COORDINATOR_RECONCILE_SEC", "5"))
     last_reconcile_ts = 0.0
