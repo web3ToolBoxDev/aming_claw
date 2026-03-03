@@ -338,6 +338,25 @@ def _extract_text_from_claude_json(raw: str) -> str:
     return "\n".join(texts)
 
 
+def _base_claude_cmd(extra_flags: Optional[List[str]] = None) -> List[str]:
+    """Return base Claude CLI command list: [claude_bin, "-p", --model X ...]."""
+    from config import get_claude_model
+    model = get_claude_model() or os.getenv("CLAUDE_MODEL", "").strip()
+    claude_bin = os.getenv("CLAUDE_BIN", "").strip()
+    if not claude_bin:
+        import shutil
+        claude_bin = (
+            shutil.which("claude.cmd") or shutil.which("claude")
+            or ("claude.cmd" if os.name == "nt" else "claude")
+        )
+    cmd = [claude_bin, "-p"]
+    if model:
+        cmd += ["--model", model]
+    if extra_flags:
+        cmd += extra_flags
+    return cmd
+
+
 def run_claude(task: Dict, extra_guard: str = "", attempt_tag: str = "",
                prompt_override: Optional[str] = None,
                output_format: str = "text") -> Dict:
@@ -350,15 +369,6 @@ def run_claude(task: Dict, extra_guard: str = "", attempt_tag: str = "",
         raise RuntimeError("task rejected: request touches sensitive paths (e.g. .ssh)")
     timeout_sec = int(os.getenv("CLAUDE_TIMEOUT_SEC", "1200"))
     max_retries = int(os.getenv("CLAUDE_TIMEOUT_RETRIES", "1"))
-    from config import get_claude_model
-    model = get_claude_model() or os.getenv("CLAUDE_MODEL", "").strip()
-    claude_bin = os.getenv("CLAUDE_BIN", "").strip()
-    if not claude_bin:
-        import shutil
-        claude_bin = (
-            shutil.which("claude.cmd") or shutil.which("claude")
-            or ("claude.cmd" if os.name == "nt" else "claude")
-        )
     dangerous = os.getenv("CLAUDE_DANGEROUS", "1").strip().lower() not in {"0", "false", "no"}
 
     prompt = prompt_override if prompt_override is not None else build_claude_prompt(task)
@@ -366,11 +376,10 @@ def run_claude(task: Dict, extra_guard: str = "", attempt_tag: str = "",
         prompt = prompt + "\n\n" + extra_guard.strip() + "\n"
     # Pass prompt via stdin to avoid Windows cmd.exe truncating multi-line arguments.
     fmt = output_format if output_format in ("text", "json") else "text"
-    cmd = [claude_bin, "-p", "--output-format", fmt]
-    if model:
-        cmd += ["--model", model]
+    extra = ["--output-format", fmt]
     if dangerous:
-        cmd += ["--dangerously-skip-permissions"]
+        extra += ["--dangerously-skip-permissions"]
+    cmd = _base_claude_cmd(extra_flags=extra)
 
     # Strip env vars that interfere with Claude CLI:
     # - CLAUDECODE/CLAUDE_CODE_*: prevents "nested session" rejection

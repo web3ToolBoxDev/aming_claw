@@ -4888,6 +4888,9 @@ def _evaluate_english_text(user_text: str) -> Optional[Dict]:
     Returns None on failure.
     """
     import json as _json
+    import logging as _logging
+    from backends import _base_claude_cmd
+    _logger = _logging.getLogger(__name__)
     prompt = (
         'You are an English writing tutor. Evaluate the following requirement description '
         'written by a non-native speaker.\n\n'
@@ -4902,8 +4905,10 @@ def _evaluate_english_text(user_text: str) -> Optional[Dict]:
         '}}'
     ).format(user_text.replace('"', '\\"'))
     try:
+        cmd = _base_claude_cmd()
+        cmd.append(prompt)
         result = subprocess.run(
-            ["claude", "-p", prompt],
+            cmd,
             capture_output=True, text=True, timeout=60,
         )
         output = (result.stdout or "").strip()
@@ -4923,8 +4928,9 @@ def _evaluate_english_text(user_text: str) -> Optional[Dict]:
         data = _json.loads(output)
         if isinstance(data, dict) and "corrected" in data:
             return data
-    except Exception:
-        pass
+    except Exception as exc:
+        _logger.warning("[eng_eval] failed: %s | stdout: %.200s",
+                        exc, (result.stdout or "")[:200] if "result" in dir() else "N/A")
     return None
 
 
