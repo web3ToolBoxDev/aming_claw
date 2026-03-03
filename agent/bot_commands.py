@@ -4908,10 +4908,13 @@ def _evaluate_english_text(user_text: str) -> Optional[Dict]:
     ).format(user_text.replace('"', '\\"'))
     try:
         cmd = _base_claude_cmd()
-        cmd.append(prompt)
+        _claude_env = {k: v for k, v in os.environ.items()
+                       if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+                                     "CLAUDE_CODE_SSE_PORT", "ANTHROPIC_API_KEY")}
         result = subprocess.run(
-            cmd,
+            cmd, input=prompt,
             capture_output=True, text=True, timeout=60,
+            env=_claude_env,
         )
         output = (result.stdout or "").strip()
         # Try to extract JSON from output (may be wrapped in markdown code block)
@@ -4931,8 +4934,17 @@ def _evaluate_english_text(user_text: str) -> Optional[Dict]:
         if isinstance(data, dict) and "corrected" in data:
             return data
     except Exception as exc:
-        _logger.warning("[eng_eval] failed: %s | stdout: %.200s",
-                        exc, (result.stdout or "")[:200] if "result" in dir() else "N/A")
+        stdout_snip = ""
+        stderr_snip = ""
+        rc = "N/A"
+        try:
+            stdout_snip = (result.stdout or "")[:200]
+            stderr_snip = (result.stderr or "")[:200]
+            rc = result.returncode
+        except Exception:
+            pass
+        _logger.warning("[eng_eval] failed: %s | rc=%s | stdout: %.200s | stderr: %.200s",
+                        exc, rc, stdout_snip, stderr_snip)
     return None
 
 
