@@ -602,12 +602,16 @@ class TestRetryBotCommand(unittest.TestCase):
 
     @patch("bot_commands.send_text")
     def test_retry_command_no_args(self, mock_send):
-        """Retry with no arguments shows usage."""
+        """Retry with no arguments shows interactive task list or empty message."""
         import bot_commands
         bot_commands.handle_command(123, 456, "/retry")
         calls = mock_send.call_args_list
-        found_usage = any("用法" in str(c) for c in calls)
-        self.assertTrue(found_usage)
+        # Now shows interactive list or "no retryable tasks" message
+        found_interactive = any(
+            "\u53ef\u91cd\u8bd5" in str(c) or "\u6ca1\u6709\u53ef\u91cd\u8bd5" in str(c)
+            for c in calls
+        )
+        self.assertTrue(found_interactive)
 
     @patch("bot_commands.send_text")
     def test_retry_command_success(self, mock_send):
@@ -953,16 +957,18 @@ class TestRejectReasonRequired(unittest.TestCase):
         self.assertIn("<OTP> <原因>", text)
 
     @patch("bot_commands.send_text")
-    def test_reject_no_args_shows_usage(self, mock_send):
-        """TC: /reject without any args shows usage with <原因>."""
+    def test_reject_no_args_shows_interactive(self, mock_send):
+        """TC: /reject without any args shows interactive task list or empty message."""
         import bot_commands
 
         with patch("bot_commands._requires_acceptance_2fa", return_value=False):
             bot_commands.handle_command(123, 456, "/reject")
 
         text = mock_send.call_args_list[-1][0][1]
-        self.assertIn("<原因>", text)
-        self.assertNotIn("[原因]", text)
+        # Now shows interactive list or "no rejectable tasks" message
+        self.assertTrue(
+            "\u53ef\u62d2\u7edd" in text or "\u6ca1\u6709\u53ef\u62d2\u7edd" in text
+        )
 
     @patch("bot_commands.send_text")
     @patch("bot_commands.rollback_to_checkpoint")
