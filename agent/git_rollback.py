@@ -6,11 +6,14 @@ Provides:
 - rollback_to_checkpoint: Revert workspace to the checkpoint commit on rejection
 - commit_after_acceptance: Commit task changes when accepted
 - get_workspace_git_status: Check if workspace has uncommitted changes
+- needs_service_restart: Determine if changed files require a service restart
+- summarize_changes_english: Generate concise English summary of file changes
 """
 import os
+import re
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from workspace import resolve_active_workspace
 
@@ -80,6 +83,90 @@ def get_workspace_git_status(workspace: Optional[Path] = None) -> Dict:
         "current_commit": commit_sha,
         "current_branch": branch,
     }
+
+
+def needs_service_restart(changed_files: List[str]) -> bool:
+    """Determine if changed files require a service restart.
+
+    Returns True if any changed file matches restart-sensitive patterns:
+    - agent/*.py (excluding agent/tests/)
+    - config related files
+    - scripts/ directory
+    - docker-compose* / Dockerfile*
+    - requirements*.txt / pyproject.toml
+    """
+    if not changed_files:
+        return False
+    for f in changed_files:
+        fp = f.replace("\\", "/")
+        # agent/*.py but NOT agent/tests/
+        if fp.startswith("agent/") and fp.endswith(".py") and not fp.startswith("agent/tests/"):
+            return True
+        # config files
+        if fp.startswith("config") or "/config" in fp:
+            return True
+        # scripts directory
+        if fp.startswith("scripts/"):
+            return True
+        # docker-compose / Dockerfile
+        basename = fp.rsplit("/", 1)[-1] if "/" in fp else fp
+        if basename.startswith("docker-compose") or basename.startswith("Dockerfile"):
+            return True
+        # requirements*.txt / pyproject.toml
+        if basename.startswith("requirements") and basename.endswith(".txt"):
+            return True
+        if basename == "pyproject.toml":
+            return True
+    return False
+
+
+def summarize_changes_english(changed_files: List[str], task_text: str = "") -> str:
+    """Generate a concise English summary of file changes.
+
+    Uses rule-based categorization (no AI calls).
+    Returns a string no longer than 72 characters.
+    """
+    if not changed_files:
+        return "No file changes"
+
+    categories: Dict[str, List[str]] = {}
+    for f in changed_files:
+        fp = f.replace("\\", "/")
+        basename = fp.rsplit("/", 1)[-1] if "/" in fp else fp
+        name_no_ext = basename.rsplit(".", 1)[0] if "." in basename else basename
+
+        if fp.startswith("agent/tests/"):
+            categories.setdefault("tests", []).append(name_no_ext)
+        elif fp.startswith("agent/"):
+            categories.setdefault("core agent", []).append(name_no_ext)
+        elif fp.startswith("scripts/"):
+            categories.setdefault("scripts", []).append(name_no_ext)
+        elif fp.startswith("config") or "/config" in fp:
+            categories.setdefault("configuration", []).append(name_no_ext)
+        elif fp.endswith(".md"):
+            categories.setdefault("docs", []).append(name_no_ext)
+        else:
+            categories.setdefault("misc", []).append(name_no_ext)
+
+    # Build summary: "Update <modules>: <category info>"
+    parts = []
+    for cat in ("core agent", "tests", "configuration", "scripts", "docs", "misc"):
+        if cat not in categories:
+            continue
+        modules = categories[cat]
+        # Deduplicate and limit module names
+        unique = list(dict.fromkeys(modules))
+        if cat == "core agent":
+            parts.append(", ".join(unique[:4]))
+        elif cat == "tests":
+            parts.append("tests")
+        else:
+            parts.append(cat)
+
+    summary = "Update " + ", ".join(parts)
+    if len(summary) > 72:
+        summary = summary[:69] + "..."
+    return summary
 
 
 def pre_task_checkpoint(workspace: Optional[Path] = None, task_id: str = "") -> Dict:
@@ -178,15 +265,21 @@ def rollback_to_checkpoint(checkpoint_commit: str, workspace: Optional[Path] = N
     return result
 
 
+def _sanitize_commit_msg(text: str) -> str:
+    """Remove shell-dangerous characters from commit message text."""
+    return re.sub(r'["`\\$]', "", text)
+
+
 def commit_after_acceptance(task_id: str, task_code: str = "", task_text: str = "",
                             workspace: Optional[Path] = None) -> Dict:
     """Commit task changes after acceptance.
 
-    Stages all changes and commits with a descriptive message.
+    Stages all changes and commits with a structured English message.
     Returns:
     - success: bool
     - commit_sha: str
     - committed_files: list
+    - needs_restart: bool
     - error: str
     """
     ws = workspace or resolve_active_workspace()
@@ -194,6 +287,7 @@ def commit_after_acceptance(task_id: str, task_code: str = "", task_text: str = 
         "success": False,
         "commit_sha": "",
         "committed_files": [],
+        "needs_restart": False,
         "error": "",
     }
 
@@ -209,16 +303,26 @@ def commit_after_acceptance(task_id: str, task_code: str = "", task_text: str = 
         result["commit_sha"] = sha
         return result
 
+    changed_files = status["uncommitted_files"]
+
     # Stage all changes
     code, _, err = _run_git(ws, "add", "-A")
     if code != 0:
         result["error"] = "git add failed: {}".format(err)
         return result
 
-    # Build commit message
-    desc = task_text[:80] if task_text else "task execution"
-    code_label = " [{}]".format(task_code) if task_code else ""
-    msg = "[accepted]{} {}: {}".format(code_label, task_id, desc)
+    # Build structured English commit message
+    english_summary = _sanitize_commit_msg(
+        summarize_changes_english(changed_files, task_text)
+    )
+    code_label = "[{}] ".format(task_code) if task_code else ""
+    first_line = "[accepted][{}]{}".format(code_label.strip("[] ") or "-", " " + english_summary)
+    # Ensure first line fits 72 chars
+    if len(first_line) > 72:
+        first_line = first_line[:69] + "..."
+    msg = "{}\n\nTask-Id: {}\nChanged-Files: {}".format(
+        first_line, task_id, len(changed_files)
+    )
 
     code, _, err = _run_git(ws, "commit", "-m", msg)
     if code != 0:
@@ -233,7 +337,8 @@ def commit_after_acceptance(task_id: str, task_code: str = "", task_text: str = 
     _, sha, _ = _run_git(ws, "rev-parse", "--short", "HEAD")
     result["success"] = True
     result["commit_sha"] = sha
-    result["committed_files"] = status["uncommitted_files"]
+    result["committed_files"] = changed_files
+    result["needs_restart"] = needs_service_restart(changed_files)
     return result
 
 

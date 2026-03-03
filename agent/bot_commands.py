@@ -59,6 +59,7 @@ from task_state import (
 )
 from git_rollback import (
     commit_after_acceptance,
+    needs_service_restart,
     rollback_to_checkpoint,
 )
 from task_accept import run_post_acceptance_tests
@@ -929,6 +930,27 @@ def handle_callback_query(cb: Dict) -> None:
             else:
                 handle_command(chat_id, user_id, "/retry {}".format(ref))
                 answer_callback_query(cb_id, "重新开发已提交")
+            return
+        if data.startswith("restart:"):
+            ref = data.split(":", 1)[1].strip()
+            if not is_ops_allowed(chat_id, user_id):
+                answer_callback_query(cb_id, "无权限", show_alert=True)
+                return
+            answer_callback_query(cb_id, "正在重启服务...")
+            try:
+                from service_manager import run_restart
+                ok = run_restart()
+                if ok:
+                    send_text(chat_id, "🔄 服务重启已执行 (任务 [{}])。".format(ref))
+                else:
+                    send_text(chat_id, "❌ 重启失败: 重启脚本未找到或执行出错 (任务 [{}])。".format(ref))
+            except Exception as exc:
+                send_text(chat_id, "❌ 重启失败: {} (任务 [{}])".format(str(exc)[:200], ref))
+            return
+        if data.startswith("skip_restart:"):
+            ref = data.split(":", 1)[1].strip()
+            answer_callback_query(cb_id, "已跳过重启")
+            send_text(chat_id, "⏭ 已跳过重启 (任务 [{}])。".format(ref))
             return
         if data.startswith("cmd_cancel:"):
             ref = data.split(":", 1)[1].strip()
@@ -3889,15 +3911,30 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
         except Exception as exc:
             git_commit_msg = "\nGit: 提交异常 - {}".format(str(exc)[:200])
 
-        send_text(
-            chat_id,
-            "\u4efb\u52a1 [{code}] {task_id} \u9a8c\u6536\u901a\u8fc7\u5e76\u5f52\u6863\u3002\n\u72b6\u6001: \u9a8c\u6536\u901a\u8fc7\narchive_id={archive_id}{git_msg}\n\u53ef\u7528 /archive_show {archive_id} \u67e5\u770b\u5f52\u6863\u8be6\u60c5\u3002".format(
-                code=found.get("task_code", "-"),
-                task_id=found.get("task_id", ""),
-                archive_id=archive_meta.get("archive_id", ""),
-                git_msg=git_commit_msg,
-            ),
+        # Build confirmation message and optional restart button
+        _accept_msg = "任务 [{code}] {task_id} 验收通过并归档。\n状态: 验收通过\narchive_id={archive_id}{git_msg}\n可用 /archive_show {archive_id} 查看归档详情。".format(
+            code=found.get("task_code", "-"),
+            task_id=found.get("task_id", ""),
+            archive_id=archive_meta.get("archive_id", ""),
+            git_msg=git_commit_msg,
         )
+        _restart_needed = False
+        try:
+            _restart_needed = commit_result.get("needs_restart", False) if commit_result else False
+        except Exception:
+            pass
+        if _restart_needed:
+            _task_ref = found.get("task_code") or found.get("task_id", "")
+            _accept_msg += "\n\n⚙️ 检测到核心模块变更，建议重启服务以生效。"
+            _restart_kb = {
+                "inline_keyboard": [[
+                    {"text": "🔄 重启服务", "callback_data": safe_callback_data("restart:{}".format(_task_ref))},
+                    {"text": "⏭ 跳过重启", "callback_data": safe_callback_data("skip_restart:{}".format(_task_ref))},
+                ]]
+            }
+            send_text(chat_id, _accept_msg, reply_markup=_restart_kb)
+        else:
+            send_text(chat_id, _accept_msg)
         archive_path = Path(str(archive_meta.get("archive_file") or ""))
         if archive_path.exists():
             send_text(chat_id, "\u5f52\u6863\u6587\u4ef6\u5df2\u751f\u6210: {}".format(str(archive_path)))
