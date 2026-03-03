@@ -551,6 +551,27 @@ class TestLanguageSwitchRegistersCommands(unittest.TestCase):
         handle_callback_query(cb)
         mock_register.assert_called_once()
 
+
+class TestLocaleLeafValues(unittest.TestCase):
+    """Leaf value and top-level section checks for locale files."""
+
+    def setUp(self):
+        _reset_i18n()
+
+    def tearDown(self):
+        _reset_i18n()
+
+    @staticmethod
+    def _collect_keys(data, prefix=""):
+        keys = set()
+        for k, v in data.items():
+            full_key = "{}.{}".format(prefix, k) if prefix else k
+            if isinstance(v, dict):
+                keys.update(TestLocaleLeafValues._collect_keys(v, full_key))
+            else:
+                keys.add(full_key)
+        return keys
+
     def test_all_leaf_values_are_strings(self):
         """All leaf values in locale files should be strings."""
         locales_dir = AGENT_DIR / "locales"
