@@ -3945,8 +3945,8 @@ def handle_command(chat_id: int, user_id: int, text: str) -> bool:
             _accept_msg += "\n\n" + t("msg.core_module_changed")
             _restart_kb = {
                 "inline_keyboard": [[
-                    {"text": t("msg.restart_service"), "callback_data": safe_callback_data("restart:{}".format(_task_ref))},
-                    {"text": t("msg.skip_restart"), "callback_data": safe_callback_data("skip_restart:{}".format(_task_ref))},
+                    {"text": t("msg.restart_service"), "callback_data": safe_callback_data("restart", _task_ref)},
+                    {"text": t("msg.skip_restart"), "callback_data": safe_callback_data("skip_restart", _task_ref)},
                 ]]
             }
             send_text(chat_id, _accept_msg, reply_markup=_restart_kb)
