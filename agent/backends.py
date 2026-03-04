@@ -611,8 +611,19 @@ _STAGE_ROLE_PROMPT_KEYS = {
 }
 
 
-def build_pipeline_stage_prompt(task: Dict, stage_name: str, context: str) -> str:
-    """Build a stage-specific prompt incorporating accumulated context from prior stages."""
+_CODEX_EXEC_HINT = (
+    "\n\n[IMPORTANT: Execute the task directly by modifying files. "
+    "Do NOT reply with acknowledgement only.]"
+)
+
+
+def build_pipeline_stage_prompt(task: Dict, stage_name: str, context: str,
+                                is_codex_routed: bool = False) -> str:
+    """Build a stage-specific prompt incorporating accumulated context from prior stages.
+
+    When *is_codex_routed* is True and the stage is a code-execution stage,
+    a short Codex-specific execution hint is appended to reduce ack-only responses.
+    """
     key = _STAGE_ROLE_PROMPT_KEYS.get(stage_name.lower())
     role_intro = t(key) if key else t("ai_prompt.stage_default")
     parts = [role_intro.rstrip()]
@@ -623,7 +634,11 @@ def build_pipeline_stage_prompt(task: Dict, stage_name: str, context: str) -> st
             t("ai_prompt.task_id_label"), task["task_id"],
             t("ai_prompt.task_content_label"), _get_task_text(task))
     )
-    return "\n\n".join(parts)
+    prompt = "\n\n".join(parts)
+    # Append Codex execution hint for code-execution stages routed to OpenAI/Codex
+    if is_codex_routed and stage_name.lower() not in _ANALYSIS_STAGES:
+        prompt += _CODEX_EXEC_HINT
+    return prompt
 
 
 def detect_stage_noop(run: Dict, stage: Dict) -> Optional[str]:
@@ -759,6 +774,40 @@ def run_stage_with_retry(task: Dict, stage: Dict, prompt: str, stage_idx: int) -
             run["noop_retry_last_reason"] = last_reason
             return run
         last_reason = noop_reason
+
+    # ── Fallback: if routed to OpenAI/Codex and still noop, try Claude CLI ──
+    uses_codex = actual_provider == "openai" or (
+        backend == "openai") or (
+        backend == "codex") or (
+        backend == "claude" and stage_model and _infer_provider(stage_model, stage_provider) == "openai") or (
+        backend == "claude" and not stage_model and global_provider == "openai")
+
+    if uses_codex and not is_analysis:
+        fallback_model = "claude-sonnet-4-6"
+        logger.warning(
+            "[STAGE_FALLBACK] Stage '%s' Codex/OpenAI noop after %d retries — "
+            "falling back to Claude CLI (model=%s)",
+            stage_name, max_noop_retries, fallback_model)
+        fallback_run = run_claude(task, attempt_tag=base_tag + "_fallback_claude",
+                                  prompt_override=prompt)
+        fallback_noop = detect_stage_noop(fallback_run, stage)
+        if not fallback_noop:
+            fallback_run["noop_reason"] = None
+            fallback_run["attempt_count"] = max_noop_retries + 2
+            fallback_run["noop_retry_last_reason"] = last_reason
+            fallback_run["fallback_used"] = True
+            fallback_run["original_model"] = actual_model
+            fallback_run["fallback_model"] = fallback_model
+            logger.info("[STAGE_FALLBACK] Stage '%s' fallback to Claude succeeded", stage_name)
+            return fallback_run
+        logger.error("[STAGE_FALLBACK] Stage '%s' fallback to Claude also failed: %s",
+                     stage_name, fallback_noop)
+        fallback_run["noop_reason"] = fallback_noop
+        fallback_run["attempt_count"] = max_noop_retries + 2
+        fallback_run["fallback_used"] = True
+        fallback_run["original_model"] = actual_model
+        fallback_run["fallback_model"] = fallback_model
+        return fallback_run
 
     run["noop_reason"] = last_reason
     run["attempt_count"] = max_noop_retries + 1
@@ -1104,14 +1153,32 @@ def process_pipeline(task: Dict, processing: Path) -> Dict:
             "provider": provider_id,
         })
 
+        # Determine if this stage will route to Codex/OpenAI
+        eff_provider = _infer_provider(stage_model, stage_provider) if stage_model else ""
+        from config import get_model_provider as _gmp2
+        global_prov = _gmp2() or ""
+        is_codex_routed = (
+            backend == "openai" or backend == "codex" or
+            (backend == "claude" and stage_model and eff_provider == "openai") or
+            (backend == "claude" and not stage_model and global_prov == "openai")
+        )
+
         # Build context based on pipeline type
         if is_role:
             role_context = _build_role_context(stage_name, stage_outputs)
-            prompt = build_pipeline_stage_prompt(task, stage_name, role_context)
+            prompt = build_pipeline_stage_prompt(task, stage_name, role_context,
+                                                 is_codex_routed=is_codex_routed)
         else:
-            prompt = build_pipeline_stage_prompt(task, stage_name, context)
+            prompt = build_pipeline_stage_prompt(task, stage_name, context,
+                                                 is_codex_routed=is_codex_routed)
 
         run = run_stage_with_retry(task, stage, prompt, stage_idx=i + 1)
+
+        # Record fallback info in stages_model_info if fallback occurred
+        if run.get("fallback_used"):
+            stages_model_info[-1]["fallback_used"] = True
+            stages_model_info[-1]["original_model"] = run.get("original_model", model_id)
+            stages_model_info[-1]["fallback_model"] = run.get("fallback_model", "")
 
         stage_results.append({
             "stage": stage_name,

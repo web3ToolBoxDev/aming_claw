@@ -158,7 +158,13 @@ def _build_pipeline_summary(executor: Dict) -> str:
         time_str = "{:.0f}s".format(elapsed / 1000) if elapsed else "0s"
         model_str = " ({})".format(model) if model else ""
         noop_tag = " - NOOP: {}".format(noop) if noop else ""
-        header = "{} {} {}{}{}".format(status_icon, name.upper(), time_str, model_str, noop_tag)
+        # Show fallback info if stage was degraded
+        fallback_tag = ""
+        if s.get("fallback_used"):
+            orig = s.get("original_model", "")
+            fb = s.get("fallback_model", "")
+            fallback_tag = " (\u26a0\ufe0f \u5df2\u4ece {} \u964d\u7ea7\u81f3 {})".format(orig, fb)
+        header = "{} {} {}{}{}{}".format(status_icon, name.upper(), time_str, model_str, noop_tag, fallback_tag)
         parts.append(header)
 
         # Extract the most useful snippet from the stage output
@@ -579,8 +585,9 @@ def finalize_pipeline_task(
                 seen.add(f)
                 all_changed.append(f)
 
-    stage_summary = [
-        {
+    stage_summary = []
+    for sr in stage_results:
+        ss = {
             "stage": sr["stage"],
             "backend": sr["backend"],
             "model": sr.get("model", ""),
@@ -592,8 +599,12 @@ def finalize_pipeline_task(
             "attempt_count": sr["run"].get("attempt_count", 1),
             "last_message_preview": (sr["run"].get("last_message") or "")[:600],
         }
-        for sr in stage_results
-    ]
+        # Record fallback info from run dict
+        if sr["run"].get("fallback_used"):
+            ss["fallback_used"] = True
+            ss["original_model"] = sr["run"].get("original_model", "")
+            ss["fallback_model"] = sr["run"].get("fallback_model", "")
+        stage_summary.append(ss)
 
     result = {
         **task,
@@ -656,6 +667,10 @@ def finalize_pipeline_task(
             "noop_reason": sr["run"].get("noop_reason"),
             "attempt_count": sr["run"].get("attempt_count", 1),
         }
+        if sr["run"].get("fallback_used"):
+            sd["fallback_used"] = True
+            sd["original_model"] = sr["run"].get("original_model", "")
+            sd["fallback_model"] = sr["run"].get("fallback_model", "")
         stage_sum = generate_stage_summary(sr["run"])
         sd["summary"] = stage_sum
         all_stage_summaries.append("[{}] {}".format(sr["stage"], stage_sum))
@@ -735,7 +750,12 @@ def _format_pipeline_stage_line(s: Dict) -> str:
     time_str = format_elapsed(elapsed) if elapsed else "0s"
     model_str = " ({})".format(model) if model else ""
     noop_tag = " NOOP" if noop else ""
-    return "  {} {}{} {}{}".format(icon, name.upper(), model_str, time_str, noop_tag)
+    fallback_tag = ""
+    if s.get("fallback_used"):
+        orig = s.get("original_model", "")
+        fb = s.get("fallback_model", "")
+        fallback_tag = " (\u26a0\ufe0f \u5df2\u4ece {} \u964d\u7ea7\u81f3 {})".format(orig, fb)
+    return "  {} {}{} {}{}{}".format(icon, name.upper(), model_str, time_str, noop_tag, fallback_tag)
 
 
 def acceptance_notice_text(result: Dict, task_id: str, task_code: str, *, detailed: bool) -> str:

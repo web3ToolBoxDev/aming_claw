@@ -610,5 +610,110 @@ class TestQaNoopRetryCount(unittest.TestCase):
         self.assertEqual(mock_run.call_count, 3)
 
 
+class TestStageFallbackCodexToClaudeSuccess(unittest.TestCase):
+    """T1: dev stage Codex ack-only → fallback Claude → success → pipeline continues."""
+
+    @patch("backends.run_claude")
+    @patch("backends.run_codex")
+    def test_fallback_success(self, mock_codex, mock_claude):
+        noop_run = {
+            "last_message": "收到", "stdout": "收到", "returncode": 0,
+            "stderr": "", "elapsed_ms": 100, "cmd": [], "timeout_retries": 0,
+            "workspace": "/tmp", "git_changed_files": [], "attempt_tag": "",
+        }
+        good_output = "代码已修改完成 " * 20
+        good_run = {
+            "last_message": good_output, "stdout": good_output, "returncode": 0,
+            "stderr": "", "elapsed_ms": 200, "cmd": [], "timeout_retries": 0,
+            "workspace": "/tmp", "git_changed_files": ["file.py"], "attempt_tag": "",
+        }
+        # Codex returns noop on initial + retries; Claude fallback succeeds
+        mock_codex.return_value = noop_run
+        mock_claude.return_value = good_run
+
+        from backends import run_stage_with_retry
+        task = {"task_id": "test-fallback-1", "text": "implement feature"}
+        stage = {"name": "dev", "backend": "openai"}
+        with patch.dict(os.environ, {"TASK_NOOP_RETRIES": "1"}):
+            result = run_stage_with_retry(task, stage, "test prompt", 2)
+
+        self.assertIsNone(result.get("noop_reason"))
+        self.assertTrue(result.get("fallback_used"))
+        self.assertEqual(result.get("fallback_model"), "claude-sonnet-4-6")
+        self.assertEqual(result["last_message"], good_output)
+
+
+class TestStageFallbackCodexToClaudeFail(unittest.TestCase):
+    """T2: dev stage Codex ack-only → fallback Claude → still fails → pipeline aborts."""
+
+    @patch("backends.run_claude")
+    @patch("backends.run_codex")
+    def test_fallback_also_fails(self, mock_codex, mock_claude):
+        noop_run = {
+            "last_message": "收到", "stdout": "收到", "returncode": 0,
+            "stderr": "", "elapsed_ms": 100, "cmd": [], "timeout_retries": 0,
+            "workspace": "/tmp", "git_changed_files": [], "attempt_tag": "",
+        }
+        mock_codex.return_value = noop_run
+        mock_claude.return_value = noop_run  # Claude also returns noop
+
+        from backends import run_stage_with_retry
+        task = {"task_id": "test-fallback-2", "text": "implement feature"}
+        stage = {"name": "dev", "backend": "openai"}
+        with patch.dict(os.environ, {"TASK_NOOP_RETRIES": "1"}):
+            result = run_stage_with_retry(task, stage, "test prompt", 2)
+
+        self.assertIsNotNone(result.get("noop_reason"))
+        self.assertTrue(result.get("fallback_used"))
+
+
+class TestStageFallbackNotTriggeredOnSuccess(unittest.TestCase):
+    """T3: dev stage Codex returns normally → no fallback triggered."""
+
+    @patch("backends.run_codex")
+    def test_no_fallback_on_success(self, mock_codex):
+        good_output = "代码已修改完成 " * 20
+        good_run = {
+            "last_message": good_output, "stdout": good_output, "returncode": 0,
+            "stderr": "", "elapsed_ms": 200, "cmd": [], "timeout_retries": 0,
+            "workspace": "/tmp", "git_changed_files": ["file.py"], "attempt_tag": "",
+        }
+        mock_codex.return_value = good_run
+
+        from backends import run_stage_with_retry
+        task = {"task_id": "test-fallback-3", "text": "implement feature"}
+        stage = {"name": "dev", "backend": "openai"}
+        with patch.dict(os.environ, {"TASK_NOOP_RETRIES": "1"}):
+            result = run_stage_with_retry(task, stage, "test prompt", 2)
+
+        self.assertIsNone(result.get("noop_reason"))
+        self.assertFalse(result.get("fallback_used", False))
+        self.assertEqual(mock_codex.call_count, 1)
+
+
+class TestCodexDevPromptHint(unittest.TestCase):
+    """T4: dev stage Codex prompt includes execution hint."""
+
+    def test_codex_routed_dev_has_hint(self):
+        from backends import build_pipeline_stage_prompt, _CODEX_EXEC_HINT
+        task = {"task_id": "test-hint", "text": "implement feature"}
+        prompt = build_pipeline_stage_prompt(task, "dev", "", is_codex_routed=True)
+        self.assertIn("Do NOT reply with acknowledgement only", prompt)
+        self.assertIn("[IMPORTANT:", prompt)
+
+    def test_claude_routed_dev_no_hint(self):
+        from backends import build_pipeline_stage_prompt
+        task = {"task_id": "test-hint", "text": "implement feature"}
+        prompt = build_pipeline_stage_prompt(task, "dev", "", is_codex_routed=False)
+        self.assertNotIn("Do NOT reply with acknowledgement only", prompt)
+
+    def test_codex_routed_analysis_no_hint(self):
+        """Analysis stages should not get execution hint even if routed to Codex."""
+        from backends import build_pipeline_stage_prompt
+        task = {"task_id": "test-hint", "text": "analyze"}
+        prompt = build_pipeline_stage_prompt(task, "qa", "", is_codex_routed=True)
+        self.assertNotIn("Do NOT reply with acknowledgement only", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
