@@ -373,7 +373,7 @@ class TestRunClaudeChatWithImage(unittest.TestCase):
 
     @patch("bot_commands.subprocess.run")
     @patch("bot_commands.get_claude_model", return_value="claude-sonnet-4-20250514")
-    def test_calls_claude_with_image_flags(self, mock_model, mock_run):
+    def test_calls_claude_with_image_in_prompt(self, mock_model, mock_run):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
         mock_proc.stdout = "This image shows a login page."
@@ -383,10 +383,33 @@ class TestRunClaudeChatWithImage(unittest.TestCase):
         from bot_commands import run_claude_chat_with_image
         result = run_claude_chat_with_image("describe this", ["/tmp/img1.jpg", "/tmp/img2.jpg"])
         self.assertIn("login page", result)
-        # Verify --image flags were passed
+        # Verify image paths are embedded in prompt, not as --image flags
         cmd = mock_run.call_args[0][0]
-        image_indices = [i for i, arg in enumerate(cmd) if arg == "--image"]
-        self.assertEqual(len(image_indices), 2)
+        self.assertNotIn("--image", cmd)
+        # The prompt is passed via -p; find it
+        p_idx = cmd.index("-p")
+        prompt = cmd[p_idx + 1]
+        self.assertIn("img1.jpg", prompt)
+        self.assertIn("img2.jpg", prompt)
+        self.assertIn("Read", prompt)
+        self.assertIn("describe this", prompt)
+
+    @patch("bot_commands.subprocess.run")
+    @patch("bot_commands.get_claude_model", return_value="claude-sonnet-4-20250514")
+    def test_no_images_plain_prompt(self, mock_model, mock_run):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "Hello"
+        mock_proc.stderr = ""
+        mock_run.return_value = mock_proc
+
+        from bot_commands import run_claude_chat_with_image
+        result = run_claude_chat_with_image("hello", [])
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--image", cmd)
+        p_idx = cmd.index("-p")
+        prompt = cmd[p_idx + 1]
+        self.assertEqual(prompt, "hello")
 
     @patch("bot_commands.subprocess.run")
     @patch("bot_commands.get_claude_model", return_value="")
@@ -407,12 +430,30 @@ class TestImageAttachmentHint(unittest.TestCase):
         self.assertEqual(_image_attachment_hint({}), "")
         self.assertEqual(_image_attachment_hint({"images": []}), "")
 
-    def test_with_images(self):
+    def test_with_images_no_local_path(self):
         from backends import _image_attachment_hint
         task = {"images": [{"file_id": "a"}, {"file_id": "b"}]}
         hint = _image_attachment_hint(task)
+        # No local_path → fallback hint
         self.assertIn("图片 2 张", hint)
         self.assertIn("attachments/", hint)
+
+    def test_with_images_local_paths(self):
+        import tempfile, os
+        from backends import _image_attachment_hint
+        with tempfile.TemporaryDirectory() as tmpdir:
+            img1 = os.path.join(tmpdir, "a.png")
+            img2 = os.path.join(tmpdir, "b.jpg")
+            open(img1, "w").close()
+            open(img2, "w").close()
+            task = {"images": [
+                {"file_id": "a", "local_path": img1},
+                {"file_id": "b", "local_path": img2},
+            ]}
+            hint = _image_attachment_hint(task)
+            self.assertIn("a.png", hint)
+            self.assertIn("b.jpg", hint)
+            self.assertIn("Read", hint)
 
 
 if __name__ == "__main__":

@@ -561,7 +561,7 @@ def run_chat(text: str) -> str:
 
 
 def run_claude_chat_with_image(text: str, image_paths: list) -> str:
-    """Chat with Claude including images. Uses Claude CLI --image flag."""
+    """Chat with Claude including images. Embeds image paths in prompt for Read tool."""
     import shutil
     claude_bin = os.getenv("CLAUDE_BIN", "").strip()
     if not claude_bin:
@@ -572,12 +572,18 @@ def run_claude_chat_with_image(text: str, image_paths: list) -> str:
     timeout_sec = int(os.getenv("CHAT_TIMEOUT_SEC", "300"))
     from config import get_claude_model
     model = get_claude_model()
-    cmd = [claude_bin, "-p", text, "--output-format", "text",
+    # Build prompt with embedded image paths
+    if image_paths:
+        img_lines = "\n".join(
+            "{}. {}".format(i + 1, os.path.abspath(p)) for i, p in enumerate(image_paths)
+        )
+        prompt = "[图片附件]\n请使用 Read 工具查看以下图片文件：\n{}\n\n用户消息：{}".format(img_lines, text)
+    else:
+        prompt = text
+    cmd = [claude_bin, "-p", prompt, "--output-format", "text",
            "--dangerously-skip-permissions"]
     if model:
         cmd += ["--model", model]
-    for img_path in image_paths:
-        cmd += ["--image", img_path]
     env = {k: v for k, v in os.environ.items()
            if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT",
                          "ANTHROPIC_API_KEY")}

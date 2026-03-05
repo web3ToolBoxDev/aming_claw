@@ -154,11 +154,19 @@ def _get_task_text(task: Dict) -> str:
 
 
 def _image_attachment_hint(task: Dict) -> str:
-    """Build image attachment hint text for prompts."""
+    """Build image attachment hint text for prompts with image file paths."""
     images = task.get("images") or []
     if not images:
         return ""
-    return "\n\n[附件: 图片 {} 张, 请参考任务目录 attachments/ 下的文件]".format(len(images))
+    paths = []
+    for img in images:
+        p = img.get("local_path", "")
+        if p and Path(p).exists():
+            paths.append(str(Path(p).resolve()))
+    if not paths:
+        return "\n\n[附件: 图片 {} 张, 请参考任务目录 attachments/ 下的文件]".format(len(images))
+    path_list = "\n".join("{}. {}".format(i + 1, p) for i, p in enumerate(paths))
+    return "\n\n[图片附件]\n请使用 Read 工具查看以下图片文件：\n{}\n".format(path_list)
 
 
 def encode_image_base64(path: str) -> str:
@@ -379,12 +387,6 @@ def run_claude(task: Dict, extra_guard: str = "", attempt_tag: str = "",
     if dangerous:
         extra += ["--dangerously-skip-permissions"]
     cmd = _base_claude_cmd(extra_flags=extra)
-
-    # Append --image flags for task images (Claude CLI vision support)
-    for img in (task.get("images") or []):
-        img_path = img.get("local_path", "")
-        if img_path and Path(img_path).exists():
-            cmd += ["--image", img_path]
 
     # Strip env vars that interfere with Claude CLI:
     # - CLAUDECODE/CLAUDE_CODE_*: prevents "nested session" rejection
