@@ -10,6 +10,8 @@ import requests
 from i18n import t
 from utils import (
     answer_callback_query,
+    download_telegram_file,
+    extract_photos_from_message,
     load_json,
     new_task_id,
     save_json,
@@ -556,6 +558,38 @@ def run_chat(text: str) -> str:
         return run_claude_chat(text)
     # codex default → codex chat
     return run_codex_chat(text)
+
+
+def run_claude_chat_with_image(text: str, image_paths: list) -> str:
+    """Chat with Claude including images. Uses Claude CLI --image flag."""
+    import shutil
+    claude_bin = os.getenv("CLAUDE_BIN", "").strip()
+    if not claude_bin:
+        claude_bin = (
+            shutil.which("claude.cmd") or shutil.which("claude")
+            or ("claude.cmd" if os.name == "nt" else "claude")
+        )
+    timeout_sec = int(os.getenv("CHAT_TIMEOUT_SEC", "300"))
+    from config import get_claude_model
+    model = get_claude_model()
+    cmd = [claude_bin, "-p", text, "--output-format", "text",
+           "--dangerously-skip-permissions"]
+    if model:
+        cmd += ["--model", model]
+    for img_path in image_paths:
+        cmd += ["--image", img_path]
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT",
+                         "ANTHROPIC_API_KEY")}
+    try:
+        proc = subprocess.run(cmd, text=True, capture_output=True,
+                              timeout=timeout_sec, check=False, env=env)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("claude chat with image timeout")
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(err[:1200] or "claude chat with image failed")
+    return (proc.stdout or "").strip()[-3500:] or "(empty response)"
 
 
 def run_screenshot_once(chat_id: int, text: str) -> None:
@@ -2839,7 +2873,7 @@ def _handle_backend_select_callback(cb_id: str, data: str, chat_id: int, user_id
     answer_callback_query(cb_id, t("callback.switched", tag="", model=backend))
 
 
-def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
+def handle_pending_action(chat_id: int, user_id: int, text: str, photos: list = None) -> bool:
     """Check if there is a pending action and handle the user's text input.
 
     Returns True if a pending action was handled, False otherwise.
@@ -2852,23 +2886,43 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
     context = pending.get("context") or {}
     txt = (text or "").strip()
 
-    if not txt:
+    has_photo = bool(photos)
+
+    # For actions that only accept text, reject photo input with friendly message
+    text_only_actions = {
+        "screenshot", "archive_search", "archive_show", "pipeline_config",
+        "mgr_restart", "mgr_reinit", "ops_restart", "set_workspace",
+        "reset_workspace", "accept_otp", "reject_otp", "reject_reason",
+        "retry_otp", "auth_debug", "pipeline_config_custom",
+        "workspace_add", "workspace_remove", "workspace_set_default",
+        "search_root_add",
+    }
+    if has_photo and action in text_only_actions:
+        send_text(chat_id, "当前步骤仅支持文本输入")
+        return True
+
+    if not txt and not has_photo:
         return False
 
     # -- New Task --
     if action == "new_task":
-        task_id = create_task(chat_id, user_id, "/task {}".format(txt))
+        if has_photo and not txt:
+            txt = "请根据图片内容执行任务"
+        task_id = create_task(chat_id, user_id, "/task {}".format(txt), photos=photos)
         task = load_json(task_file("pending", task_id))
         task_code = task.get("task_code", "-")
+        img_hint = "（含 {} 张附件）".format(len(photos)) if photos else ""
         send_text(
             chat_id,
-            t("msg.task_created_simple", code=task_code, task_id=task_id, text=txt[:200]),
+            t("msg.task_created_simple", code=task_code, task_id=task_id, text=txt[:200]) + img_hint,
             reply_markup=task_inline_keyboard(task_code),
         )
         return True
 
     # -- New Task with Workspace Selection --
     if action == "new_task_with_workspace":
+        if has_photo and not txt:
+            txt = "请根据图片内容执行任务"
         ws_id = context.get("ws_id", "")
         ws_label = context.get("ws_label", ws_id)
         # Fallback: verify workspace still exists; if deleted, use default
@@ -2908,12 +2962,13 @@ def handle_pending_action(chat_id: int, user_id: int, text: str) -> bool:
             )
         else:
             # No active task, create immediately with workspace targeting
-            task_id = create_task_for_workspace(chat_id, user_id, txt, ws_id, ws_label)
+            task_id = create_task_for_workspace(chat_id, user_id, txt, ws_id, ws_label, photos=photos)
             task = load_json(task_file("pending", task_id))
             task_code = task.get("task_code", "-")
+            img_hint = "（含 {} 张附件）".format(len(photos)) if photos else ""
             send_text(
                 chat_id,
-                t("msg.task_created_ws", code=task_code, task_id=task_id, ws=ws_label, text=txt[:200]),
+                t("msg.task_created_ws", code=task_code, task_id=task_id, ws=ws_label, text=txt[:200]) + img_hint,
                 reply_markup=task_inline_keyboard(task_code),
             )
         return True
@@ -4828,13 +4883,18 @@ def _extract_workspace_target(text: str) -> Tuple[str, str]:
     return "", text
 
 
-def create_task(chat_id: int, user_id: int, raw_text: str) -> str:
+def create_task(chat_id: int, user_id: int, raw_text: str, photos: list = None) -> str:
     task_id = new_task_id()
     text = parse_task_text(raw_text) or raw_text.strip()
     action = infer_action(raw_text)
 
     # Parse workspace targeting prefix
     target_ws_label, clean_text = _extract_workspace_target(text)
+
+    # If photo with no text, use default description
+    if photos and not text.strip():
+        text = "请根据图片内容执行任务"
+        clean_text = text
 
     task = {
         "task_id": task_id,
@@ -4845,21 +4905,42 @@ def create_task(chat_id: int, user_id: int, raw_text: str) -> str:
         "status": "pending",
         "created_at": utc_iso(),
         "updated_at": utc_iso(),
+        "images": [],
     }
 
     # Add workspace routing info if specified
     if target_ws_label:
         task["target_workspace"] = target_ws_label
 
+    # Download and store images
+    if photos:
+        task_dir = tasks_root() / "pending"
+        attachments_dir = task_dir / (task_id + "_attachments")
+        for i, photo in enumerate(photos):
+            try:
+                local_path = download_telegram_file(photo["file_id"], attachments_dir)
+                task["images"].append({
+                    "file_id": photo["file_id"],
+                    "local_path": str(local_path),
+                    "width": photo.get("width", 0),
+                    "height": photo.get("height", 0),
+                })
+            except Exception as exc:
+                print("[create_task] image download failed: {}".format(exc))
+
     task["task_code"] = register_task_created(task)
     save_json(task_file("pending", task_id), task)
     return task_id
 
 
-def create_task_for_workspace(chat_id: int, user_id: int, text: str, ws_id: str, ws_label: str) -> str:
+def create_task_for_workspace(chat_id: int, user_id: int, text: str, ws_id: str, ws_label: str, photos: list = None) -> str:
     """Create a task explicitly targeting a specific workspace by ID."""
     task_id = new_task_id()
     action = infer_action(text)
+
+    # If photo with no text, use default description
+    if photos and not text.strip():
+        text = "请根据图片内容执行任务"
 
     task = {
         "task_id": task_id,
@@ -4872,7 +4953,24 @@ def create_task_for_workspace(chat_id: int, user_id: int, text: str, ws_id: str,
         "updated_at": utc_iso(),
         "target_workspace_id": ws_id,
         "target_workspace": ws_label,
+        "images": [],
     }
+
+    # Download and store images
+    if photos:
+        task_dir = tasks_root() / "pending"
+        attachments_dir = task_dir / (task_id + "_attachments")
+        for i, photo in enumerate(photos):
+            try:
+                local_path = download_telegram_file(photo["file_id"], attachments_dir)
+                task["images"].append({
+                    "file_id": photo["file_id"],
+                    "local_path": str(local_path),
+                    "width": photo.get("width", 0),
+                    "height": photo.get("height", 0),
+                })
+            except Exception as exc:
+                print("[create_task_for_workspace] image download failed: {}".format(exc))
 
     task["task_code"] = register_task_created(task)
     save_json(task_file("pending", task_id), task)

@@ -10,6 +10,8 @@ import requests
 
 from utils import (
     answer_callback_query,
+    download_telegram_file,
+    extract_photos_from_message,
     load_json,
     new_task_id,
     save_json,
@@ -59,6 +61,7 @@ from bot_commands import (
     run_screenshot_once,
     run_codex_chat,
     run_chat,
+    run_claude_chat_with_image,
     acceptance_tag,
     acceptance_next_action,
     task_inline_keyboard,
@@ -242,29 +245,44 @@ def run() -> None:
 
                 msg = upd.get("message") or upd.get("edited_message") or {}
                 text = (msg.get("text") or "").strip()
+                caption = (msg.get("caption") or "").strip()
                 chat_id = int((msg.get("chat") or {}).get("id") or 0)
                 user_id = int((msg.get("from") or {}).get("id") or 0)
                 if not chat_id:
                     continue
 
-                # Check for pending interactive action first (from button clicks)
-                if not text.startswith("/") and handle_pending_action(chat_id, user_id, text):
+                # Extract photo info from message
+                photos = extract_photos_from_message(msg)
+                has_photo = len(photos) > 0
+
+                # For photo messages, use caption as text if no text field
+                if has_photo and not text:
+                    text = caption
+
+                # Unsupported media types (video, audio, document without photo)
+                if not has_photo and not text and (msg.get("video") or msg.get("audio") or msg.get("voice") or msg.get("document")):
+                    send_text(chat_id, "当前仅支持文本和图片消息")
                     continue
 
-                if handle_command(chat_id, user_id, text):
+                # Check for pending interactive action first (from button clicks)
+                if not text.startswith("/") and handle_pending_action(chat_id, user_id, text, photos=photos):
+                    continue
+
+                if not has_photo and handle_command(chat_id, user_id, text):
                     continue
 
                 task_text = parse_task_text(text)
                 if task_text:
-                    task_id = create_task(chat_id, user_id, text)
+                    task_id = create_task(chat_id, user_id, text, photos=photos)
                     task = load_json(task_file("pending", task_id))
                     task_code = task.get("task_code", "-")
+                    img_hint = "（含 {} 张附件）".format(len(photos)) if photos else ""
                     send_text(
                         chat_id,
                         t("msg.task_created",
                           code=task_code,
                           task_id=task_id,
-                          text=task_text[:200]),
+                          text=task_text[:200]) + img_hint,
                         reply_markup=task_inline_keyboard(task_code),
                     )
                     continue
@@ -273,18 +291,40 @@ def run() -> None:
                     send_text(chat_id, t("msg.unknown_command"))
                     continue
 
-                if is_screenshot_text(text):
+                if not has_photo and is_screenshot_text(text):
                     try:
                         run_screenshot_once(chat_id, text)
                     except Exception as exc:
                         send_text(chat_id, t("msg.screenshot_failed", err=str(exc)[:1000]))
                     continue
 
-                try:
-                    reply = run_chat(text)
-                    send_text(chat_id, reply)
-                except Exception as exc:
-                    send_text(chat_id, t("msg.chat_failed", err=str(exc)[:1000]))
+                # Chat mode (text or image)
+                if has_photo:
+                    try:
+                        chat_text = text or "请描述这张图片的内容"
+                        # Download image to temp dir for chat
+                        import tempfile
+                        with tempfile.TemporaryDirectory(prefix="aming_chat_img_") as tmpdir:
+                            image_paths = []
+                            for p in photos:
+                                try:
+                                    local = download_telegram_file(p["file_id"], Path(tmpdir))
+                                    image_paths.append(str(local))
+                                except Exception as dl_err:
+                                    send_text(chat_id, "图片下载失败: {}".format(str(dl_err)[:500]))
+                                    break
+                            else:
+                                from bot_commands import run_claude_chat_with_image
+                                reply = run_claude_chat_with_image(chat_text, image_paths)
+                                send_text(chat_id, reply)
+                    except Exception as exc:
+                        send_text(chat_id, t("msg.chat_failed", err=str(exc)[:1000]))
+                else:
+                    try:
+                        reply = run_chat(text)
+                        send_text(chat_id, reply)
+                    except Exception as exc:
+                        send_text(chat_id, t("msg.chat_failed", err=str(exc)[:1000]))
 
             now_ts = time.time()
             if now_ts - last_reconcile_ts >= reconcile_interval_sec:

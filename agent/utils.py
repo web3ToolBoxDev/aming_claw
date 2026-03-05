@@ -117,6 +117,52 @@ def answer_callback_query(callback_query_id: str, text: str = "", show_alert: bo
     )
 
 
+def download_telegram_file(file_id: str, dest_dir: Path) -> Path:
+    """Download a Telegram file by file_id to dest_dir, return local Path."""
+    if not file_id or not file_id.strip():
+        raise ValueError("file_id must not be empty")
+    token = telegram_token()
+    # Step 1: getFile to obtain file_path
+    url = "https://api.telegram.org/bot{}/getFile".format(token)
+    resp = requests.get(url, params={"file_id": file_id}, timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError("getFile failed: HTTP {}".format(resp.status_code))
+    body = resp.json()
+    if not body.get("ok"):
+        raise RuntimeError("getFile failed: {}".format(body))
+    file_path = body["result"]["file_path"]
+    # Step 2: download binary
+    dl_url = "https://api.telegram.org/file/bot{}/{}".format(token, file_path)
+    dl_resp = requests.get(dl_url, timeout=30)
+    if dl_resp.status_code != 200:
+        raise RuntimeError("file download failed: HTTP {}".format(dl_resp.status_code))
+    content_type = dl_resp.headers.get("Content-Type", "")
+    if content_type and not content_type.startswith("image/"):
+        raise RuntimeError("unexpected content type: {}".format(content_type))
+    # Determine extension from file_path
+    ext = Path(file_path).suffix or ".jpg"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    local_name = uuid.uuid4().hex[:12] + ext
+    local_path = dest_dir / local_name
+    local_path.write_bytes(dl_resp.content)
+    return local_path
+
+
+def extract_photos_from_message(msg: dict) -> list:
+    """Extract photo info from a Telegram message. Returns list of dicts with file_id, width, height."""
+    photos = msg.get("photo")
+    if not photos or not isinstance(photos, list):
+        return []
+    # Take the largest resolution (last element)
+    best = photos[-1]
+    return [{
+        "file_id": best.get("file_id", ""),
+        "file_unique_id": best.get("file_unique_id", ""),
+        "width": best.get("width", 0),
+        "height": best.get("height", 0),
+    }]
+
+
 def send_document(chat_id: int, path: Path, caption: str = "") -> None:
     with path.open("rb") as f:
         tg_post(

@@ -153,14 +153,33 @@ def _get_task_text(task: Dict) -> str:
     return str(task.get("_retry_enhanced_text") or task.get("text") or "")
 
 
+def _image_attachment_hint(task: Dict) -> str:
+    """Build image attachment hint text for prompts."""
+    images = task.get("images") or []
+    if not images:
+        return ""
+    return "\n\n[附件: 图片 {} 张, 请参考任务目录 attachments/ 下的文件]".format(len(images))
+
+
+def encode_image_base64(path: str) -> str:
+    """Read an image file and return its base64 encoding."""
+    import base64
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("ascii")
+
+
 def build_codex_prompt(task: Dict) -> str:
     text = _get_task_text(task)
-    return t("ai_prompt.codex_system", task_id=task["task_id"], text=text)
+    prompt = t("ai_prompt.codex_system", task_id=task["task_id"], text=text)
+    prompt += _image_attachment_hint(task)
+    return prompt
 
 
 def build_claude_prompt(task: Dict) -> str:
     text = _get_task_text(task)
-    return t("ai_prompt.claude_system", task_id=task["task_id"], text=text)
+    prompt = t("ai_prompt.claude_system", task_id=task["task_id"], text=text)
+    prompt += _image_attachment_hint(task)
+    return prompt
 
 
 # ── Git helpers ───────────────────────────────────────────────────────────────
@@ -360,6 +379,12 @@ def run_claude(task: Dict, extra_guard: str = "", attempt_tag: str = "",
     if dangerous:
         extra += ["--dangerously-skip-permissions"]
     cmd = _base_claude_cmd(extra_flags=extra)
+
+    # Append --image flags for task images (Claude CLI vision support)
+    for img in (task.get("images") or []):
+        img_path = img.get("local_path", "")
+        if img_path and Path(img_path).exists():
+            cmd += ["--image", img_path]
 
     # Strip env vars that interfere with Claude CLI:
     # - CLAUDECODE/CLAUDE_CODE_*: prevents "nested session" rejection
@@ -635,6 +660,9 @@ def build_pipeline_stage_prompt(task: Dict, stage_name: str, context: str,
             t("ai_prompt.task_content_label"), _get_task_text(task))
     )
     prompt = "\n\n".join(parts)
+    # Append image hint for PM stage (first stage that analyzes requirements)
+    if stage_name.lower() in ("pm", "plan"):
+        prompt += _image_attachment_hint(task)
     # Append Codex execution hint for code-execution stages routed to OpenAI/Codex
     if is_codex_routed and stage_name.lower() not in _ANALYSIS_STAGES:
         prompt += _CODEX_EXEC_HINT
