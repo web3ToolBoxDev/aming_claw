@@ -116,9 +116,9 @@ class EventBus:
             if project_id:
                 channel = f"{REDIS_CHANNEL_PREFIX}:{project_id}"
                 r.publish(channel, message)
-
-            # Also publish to global channel
-            r.publish(f"{REDIS_CHANNEL_PREFIX}:*", message)
+            else:
+                # No project_id, publish to global channel
+                r.publish(f"{REDIS_CHANNEL_PREFIX}:global", message)
 
         except Exception:
             log.exception("Failed to publish event to Redis: %s", event)

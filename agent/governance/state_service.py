@@ -25,24 +25,29 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def init_node_states(conn: sqlite3.Connection, project_id: str, graph) -> int:
+def init_node_states(conn: sqlite3.Connection, project_id: str, graph, sync_status: bool = True) -> int:
     """Initialize node_state rows from graph.
 
     Reads parsed_verify_status and parsed_build_status from graph node data
     (set during markdown import). Falls back to 'pending'/'impl:missing'.
+
+    If sync_status=True (default), also updates existing nodes whose markdown
+    status differs from the DB (e.g., markdown says 'pass' but DB says 'pending').
     """
     count = 0
     now = _utc_iso()
     for node_id in graph.list_nodes():
+        node_data = graph.get_node(node_id)
+        verify = node_data.get("parsed_verify_status", "pending")
+        build = node_data.get("parsed_build_status",
+                              node_data.get("build_status", "impl:missing"))
+
         existing = conn.execute(
-            "SELECT 1 FROM node_state WHERE project_id = ? AND node_id = ?",
+            "SELECT verify_status, build_status FROM node_state WHERE project_id = ? AND node_id = ?",
             (project_id, node_id),
         ).fetchone()
+
         if not existing:
-            node_data = graph.get_node(node_id)
-            verify = node_data.get("parsed_verify_status", "pending")
-            build = node_data.get("parsed_build_status",
-                                  node_data.get("build_status", "impl:missing"))
             conn.execute(
                 """INSERT INTO node_state
                    (project_id, node_id, verify_status, build_status, updated_at, version)
@@ -50,6 +55,25 @@ def init_node_states(conn: sqlite3.Connection, project_id: str, graph) -> int:
                 (project_id, node_id, verify, build, now),
             )
             count += 1
+        elif sync_status and verify != "pending":
+            # Sync: if markdown declares a non-pending status and DB is still pending, update
+            db_status = existing["verify_status"]
+            if db_status == "pending" and verify != "pending":
+                # Map markdown status to enum
+                status_map = {
+                    "pass": "qa_pass",
+                    "T2-pass": "t2_pass",
+                    "fail": "failed",
+                    "skipped": "skipped",
+                }
+                mapped = status_map.get(verify, verify)
+                conn.execute(
+                    """UPDATE node_state SET verify_status = ?, build_status = ?,
+                       updated_at = ?, updated_by = 'import-sync'
+                       WHERE project_id = ? AND node_id = ?""",
+                    (mapped, build, now, project_id, node_id),
+                )
+                count += 1
     return count
 
 
@@ -261,14 +285,20 @@ def verify_update(
 
         updated.append(node_id)
 
-        # 7. Event
-        event_bus.publish("node.status_changed", {
+        # 7. Event (in-process + outbox for reliable delivery)
+        event_payload = {
             "project_id": project_id,
             "node_id": node_id,
             "from": from_status.value,
             "to": target.value,
             "role": role.value,
-        })
+        }
+        event_bus.publish("node.status_changed", event_payload)
+        try:
+            from .outbox import write_outbox
+            write_outbox(conn, "node.status_changed", event_payload, project_id)
+        except Exception:
+            pass  # Outbox table may not exist on older DBs
 
     # Compute downstream impact
     downstream = set()
@@ -282,25 +312,56 @@ def verify_update(
     }
 
 
+# Named release profiles
+RELEASE_PROFILES = {
+    "full": {"scope": ["*"], "min_status": "qa_pass", "description": "All nodes must be qa_pass"},
+    "hotfix": {"scope": ["L0.*", "L1.*"], "min_status": "t2_pass", "description": "Core layers T2-pass only"},
+    "foundation": {"scope": ["L0.*"], "min_status": "qa_pass", "description": "Foundation layer only"},
+    "governance": {"scope": ["L4.*", "L5.*", "L6.*"], "min_status": "t2_pass", "description": "Governance stack"},
+}
+
+
 def release_gate(
     conn: sqlite3.Connection,
     project_id: str,
     graph,
     scope: list[str] = None,
     profile: str = None,
+    min_status: str = "qa_pass",
 ) -> dict:
-    """Release gate check. Returns 200 if all green, raises ReleaseBlockedError otherwise."""
+    """Release gate check with profile support.
+
+    Args:
+        scope: Node patterns to check (e.g., ["L3.*", "L4.1"]). Default: all nodes.
+        profile: Named profile (full, hotfix, foundation, governance). Overrides scope/min_status.
+        min_status: Minimum required status. Default: qa_pass.
+    """
     import fnmatch
+
+    # Apply named profile
+    if profile and profile in RELEASE_PROFILES:
+        p = RELEASE_PROFILES[profile]
+        scope = p.get("scope", scope)
+        min_status = p.get("min_status", min_status)
+    elif profile and profile not in RELEASE_PROFILES:
+        from .errors import ValidationError
+        raise ValidationError(
+            f'Unknown profile: {profile}. Available: {list(RELEASE_PROFILES.keys())}'
+        )
+
+    # Determine acceptable statuses based on min_status
+    status_order = ["pending", "testing", "t2_pass", "qa_pass"]
+    min_idx = status_order.index(min_status) if min_status in status_order else 3
+    acceptable = set(status_order[min_idx:]) | {"waived"}
 
     all_nodes = graph.list_nodes()
     check_nodes = all_nodes
 
-    # Filter by scope if provided
     if scope:
         check_nodes = [n for n in all_nodes if any(fnmatch.fnmatch(n, p) for p in scope)]
 
     blockers = []
-    summary = {"qa_pass": 0, "t2_pass": 0, "pending": 0, "failed": 0, "waived": 0, "other": 0}
+    summary = {"qa_pass": 0, "t2_pass": 0, "pending": 0, "testing": 0, "failed": 0, "waived": 0, "other": 0}
 
     for node_id in check_nodes:
         state = get_node_status(conn, project_id, node_id)
@@ -311,19 +372,21 @@ def release_gate(
         else:
             summary["other"] += 1
 
-        if status not in ("qa_pass", "waived"):
+        if status not in acceptable:
             blockers.append({
                 "node_id": node_id,
                 "status": status,
-                "reason": f"Node is {status}, not qa_pass",
+                "required": min_status,
             })
 
     result = {
         "release": len(blockers) == 0,
         "profile": profile,
+        "min_status": min_status,
         "checked_nodes": len(check_nodes),
         "total_nodes": len(all_nodes),
         "summary": summary,
+        "available_profiles": list(RELEASE_PROFILES.keys()),
     }
 
     if blockers:
@@ -422,11 +485,17 @@ def rollback(conn: sqlite3.Connection, project_id: str, target_version: int, ses
         nodes_affected=len(changes),
     )
 
-    event_bus.publish("rollback.executed", {
+    rollback_payload = {
         "project_id": project_id,
         "from_version": current_version,
         "to_version": target_version,
-    })
+    }
+    event_bus.publish("rollback.executed", rollback_payload)
+    try:
+        from .outbox import write_outbox
+        write_outbox(conn, "rollback.executed", rollback_payload, project_id)
+    except Exception:
+        pass
 
     return {
         "rolled_back_from": current_version,

@@ -68,7 +68,36 @@ def write_memory(
         module_id=entry.module_id, kind=entry.kind,
     )
 
+    # Forward to dbservice (async, best-effort)
+    _forward_to_dbservice(project_id, entry_dict)
+
     return entry_dict
+
+
+def _forward_to_dbservice(project_id: str, entry: dict) -> None:
+    """Forward memory write to dbservice for semantic search. Best-effort."""
+    import os
+    dbservice_url = os.environ.get("DBSERVICE_URL", "")
+    if not dbservice_url:
+        return
+    try:
+        import requests
+        ref_id = entry.get("id", f"{entry.get('module_id', '')}:{entry.get('kind', '')}:{entry.get('created_at', '')}")
+        requests.post(
+            f"{dbservice_url}/knowledge/upsert",
+            json={
+                "refId": ref_id,
+                "type": entry.get("kind", "knowledge"),
+                "title": f"{entry.get('module_id', '')}: {entry.get('kind', '')}",
+                "body": entry.get("content", ""),
+                "tags": [entry.get("module_id", ""), entry.get("kind", "")] + entry.get("related_nodes", []),
+                "scope": project_id,
+                "status": "active",
+            },
+            timeout=3,
+        )
+    except Exception:
+        pass  # Best-effort
 
 
 def query_by_module(project_id: str, module_id: str, active_only: bool = True) -> list[dict]:

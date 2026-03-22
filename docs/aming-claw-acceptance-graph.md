@@ -410,3 +410,97 @@ L4.17  Docker 部署  [impl:done] [verify:pending] v1.0
       secondary:[start_governance.py, init_project.py]
       test:[]
 ```
+
+## L5 — v4 地基层（P0，依赖 L4）
+
+```
+L5.1  Redis Streams 消息队列  [impl:pending] [verify:pending] v4.0
+      deps:[L4.17]
+      gate_mode: explicit
+      gates:[L4.17]
+      verify: L4
+      test_coverage: none
+      primary:[agent/telegram_gateway/gateway.py, agent/telegram_gateway/chat_proxy.py]
+      secondary:[docker-compose.governance.yml]
+      test:[]
+      description: Gateway LPUSH/RPOP → XADD/XREADGROUP+ACK，消息不丢失
+
+L5.2  Event Outbox 双轨投递  [impl:pending] [verify:pending] v4.0
+      deps:[L4.13, L4.1]
+      gate_mode: explicit
+      gates:[L4.13]
+      verify: L4
+      test_coverage: none
+      primary:[agent/governance/event_bus.py, agent/governance/outbox.py]
+      secondary:[agent/governance/db.py]
+      test:[]
+      description: 事件先写 outbox 表(同事务)，后台 worker 异步投递到 Redis/dbservice
+
+L5.3  双令牌模型 (refresh+access)  [impl:pending] [verify:pending] v4.0
+      deps:[L4.7]
+      gate_mode: explicit
+      gates:[L4.7]
+      verify: L4
+      test_coverage: none
+      primary:[agent/governance/role_service.py, agent/governance/server.py]
+      secondary:[agent/governance/project_service.py]
+      test:[]
+      description: refresh_token(90d)+access_token(4h)，支持 revoke/rotate
+
+L5.4  Agent Lifecycle API  [impl:pending] [verify:pending] v4.0
+      deps:[L4.7, L4.1]
+      gate_mode: explicit
+      gates:[L4.7]
+      verify: L4
+      test_coverage: none
+      primary:[agent/governance/agent_lifecycle.py, agent/governance/server.py]
+      secondary:[]
+      test:[]
+      description: register/heartbeat/deregister/orphans + lease 租约机制
+```
+
+## L6 — v4 一致性层（P1，依赖 L5）
+
+```
+L6.1  Session Context (snapshot+log+version)  [impl:pending] [verify:pending] v4.0
+      deps:[L5.1, L5.4]
+      gate_mode: explicit
+      gates:[L5.1, L5.4]
+      verify: L4
+      test_coverage: none
+      primary:[agent/governance/session_context.py]
+      secondary:[]
+      test:[]
+      description: 乐观锁防覆盖，append log 防丢失
+
+L6.2  dbservice Docker 集成  [impl:pending] [verify:pending] v4.0
+      deps:[L4.17]
+      gate_mode: auto
+      verify: L4
+      test_coverage: none
+      primary:[dbservice/, docker-compose.governance.yml, nginx/nginx.conf]
+      secondary:[]
+      test:[]
+      description: dbservice 容器化 + dev-workflow domain pack + 降级策略
+
+L6.3  Message Worker (阻塞消费+租约)  [impl:pending] [verify:pending] v4.0
+      deps:[L5.1, L5.4, L6.1]
+      gate_mode: explicit
+      gates:[L5.1, L5.4, L6.1]
+      verify: L4
+      test_coverage: none
+      primary:[agent/telegram_gateway/message_worker.py]
+      secondary:[]
+      test:[]
+      description: 阻塞消费+租约互斥+Cron兜底，三级容错
+
+L6.4  可观测性 (trace_id+结构化日志)  [impl:pending] [verify:pending] v4.0
+      deps:[L5.2]
+      gate_mode: auto
+      verify: L2
+      test_coverage: none
+      primary:[agent/governance/observability.py]
+      secondary:[agent/telegram_gateway/gateway.py]
+      test:[]
+      description: trace_id 串联全链路，结构化日志，关键指标监控
+```

@@ -15,11 +15,11 @@ log = logging.getLogger(__name__)
 # Event → Telegram message formatters
 EVENT_FORMATTERS = {
     "node.status_changed": lambda p: (
-        f"\u2705 [{p.get('project_id')}] {p.get('node_id')} \u2192 {p.get('new_status')}"
-        if p.get("new_status") in ("t2_pass", "qa_pass")
-        else f"\u274c [{p.get('project_id')}] {p.get('node_id')} \u2192 {p.get('new_status')}"
-        if p.get("new_status") == "failed"
-        else f"\U0001f504 [{p.get('project_id')}] {p.get('node_id')} \u2192 {p.get('new_status')}"
+        f"\u2705 [{p.get('project_id')}] {p.get('node_id')} \u2192 {p.get('to', p.get('new_status'))}"
+        if p.get("to", p.get("new_status")) in ("t2_pass", "qa_pass")
+        else f"\u274c [{p.get('project_id')}] {p.get('node_id')} \u2192 {p.get('to', p.get('new_status'))}"
+        if p.get("to", p.get("new_status")) == "failed"
+        else f"\U0001f504 [{p.get('project_id')}] {p.get('node_id')} \u2192 {p.get('to', p.get('new_status'))}"
     ),
     "gate.satisfied": lambda p: (
         f"\U0001f680 [{p.get('project_id')}] Gate {p.get('gate_id', 'unknown')} \u5df2\u6ee1\u8db3"
@@ -70,8 +70,8 @@ class GovEventListener:
             self._redis = redis.Redis.from_url(
                 self._redis_url,
                 decode_responses=True,
-                socket_timeout=5,
                 socket_connect_timeout=5,
+                # No socket_timeout for subscribe — it blocks indefinitely
             )
             self._redis.ping()
         except Exception as e:
@@ -106,11 +106,16 @@ class GovEventListener:
                         break
                     if msg["type"] not in ("pmessage", "message"):
                         continue
+                    log.info("GovEventListener: received message type=%s channel=%s",
+                             msg.get("type"), msg.get("channel"))
                     try:
                         data = json.loads(msg["data"])
                         self._handle_event(data)
-                    except (json.JSONDecodeError, TypeError):
+                    except (json.JSONDecodeError, TypeError) as e:
+                        log.warning("GovEventListener: failed to parse message: %s", e)
                         continue
+                    except Exception as e:
+                        log.exception("GovEventListener: error handling event: %s", e)
 
             except Exception as e:
                 if not self._running:
@@ -131,9 +136,11 @@ class GovEventListener:
         if formatter:
             try:
                 text = formatter(payload)
+                log.info("GovEventListener: sending notification: %s", text)
                 self._notify(text)
+                log.info("GovEventListener: notification sent successfully")
             except Exception:
-                log.exception("Failed to format event %s", event)
+                log.exception("Failed to format/send event %s", event)
         else:
             # Unknown event, log but don't notify
             log.debug("GovEventListener: unhandled event %s", event)

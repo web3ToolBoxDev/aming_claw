@@ -31,7 +31,7 @@ from .impact_analyzer import ImpactAnalyzer
 from .models import ImpactAnalysisRequest, FileHitPolicy
 
 import os
-PORT = int(os.environ.get("GOVERNANCE_PORT", "30006"))
+PORT = int(os.environ.get("GOVERNANCE_PORT", "40006"))
 
 # --- Route Registry ---
 ROUTES = []
@@ -256,12 +256,287 @@ def handle_heartbeat(ctx: RequestContext):
     return result
 
 
+@route("GET", "/api/role/verify")
+def handle_role_verify(ctx: RequestContext):
+    """Verify a token and return session info. Used by Gateway for auth."""
+    if not ctx.token:
+        from .errors import AuthError
+        raise AuthError("Missing token")
+
+    # Try to find session from token across all projects
+    rc = get_redis()
+    from .role_service import _hash_token
+    th = _hash_token(ctx.token)
+    session_id = rc.get_session_by_token(th) if rc else None
+    project_id = ""
+
+    if session_id:
+        cached = rc.get_cached_session(session_id)
+        if cached:
+            project_id = cached.get("project_id", "")
+
+    if not project_id:
+        # Fallback: scan projects
+        for p in project_service.list_projects():
+            try:
+                with DBContext(p["project_id"]) as conn:
+                    session = role_service.authenticate(conn, ctx.token)
+                    return {
+                        "valid": True,
+                        "session_id": session["session_id"],
+                        "principal_id": session.get("principal_id", ""),
+                        "role": session.get("role", ""),
+                        "project_id": p["project_id"],
+                    }
+            except Exception:
+                continue
+        from .errors import AuthError
+        raise AuthError("Invalid token")
+
+    with DBContext(project_id) as conn:
+        session = role_service.authenticate(conn, ctx.token)
+        return {
+            "valid": True,
+            "session_id": session["session_id"],
+            "principal_id": session.get("principal_id", ""),
+            "role": session.get("role", ""),
+            "project_id": project_id,
+        }
+
+
 @route("GET", "/api/role/{project_id}/sessions")
 def handle_list_sessions(ctx: RequestContext):
     project_id = ctx.get_project_id()
     with DBContext(project_id) as conn:
         sessions = role_service.list_sessions(conn, project_id)
     return {"sessions": sessions}
+
+
+# --- Token (dual-token model) ---
+
+@route("POST", "/api/token/refresh")
+def handle_token_refresh(ctx: RequestContext):
+    """Exchange refresh_token for short-lived access_token."""
+    refresh_token = ctx.body.get("refresh_token", "")
+    if not refresh_token:
+        from .errors import ValidationError
+        raise ValidationError("refresh_token required")
+
+    # Find project from token
+    from . import token_service
+    from .role_service import _hash_token
+    th = _hash_token(refresh_token)
+    rc = get_redis()
+    session_id = rc.get_session_by_token(th) if rc else None
+    project_id = ""
+
+    if session_id:
+        cached = rc.get_cached_session(session_id)
+        if cached:
+            project_id = cached.get("project_id", "")
+
+    if not project_id:
+        for p in project_service.list_projects():
+            try:
+                with DBContext(p["project_id"]) as conn:
+                    result = token_service.issue_access_token(conn, refresh_token)
+                    return result
+            except Exception:
+                continue
+        from .errors import AuthError
+        raise AuthError("Invalid refresh token")
+
+    with DBContext(project_id) as conn:
+        return token_service.issue_access_token(conn, refresh_token)
+
+
+@route("POST", "/api/token/revoke")
+def handle_token_revoke(ctx: RequestContext):
+    """Revoke a refresh token."""
+    refresh_token = ctx.body.get("refresh_token", "")
+    if not refresh_token:
+        from .errors import ValidationError
+        raise ValidationError("refresh_token required")
+
+    from . import token_service
+    for p in project_service.list_projects():
+        try:
+            with DBContext(p["project_id"]) as conn:
+                return token_service.revoke_refresh_token(conn, refresh_token)
+        except Exception:
+            continue
+    from .errors import AuthError
+    raise AuthError("Token not found")
+
+
+@route("POST", "/api/token/rotate")
+def handle_token_rotate(ctx: RequestContext):
+    """Rotate: issue new refresh token, invalidate old."""
+    refresh_token = ctx.body.get("refresh_token", "")
+    if not refresh_token:
+        from .errors import ValidationError
+        raise ValidationError("refresh_token required")
+
+    from . import token_service
+    for p in project_service.list_projects():
+        try:
+            with DBContext(p["project_id"]) as conn:
+                return token_service.rotate_refresh_token(conn, refresh_token)
+        except Exception:
+            continue
+    from .errors import AuthError
+    raise AuthError("Token not found")
+
+
+# --- Agent Lifecycle ---
+
+@route("POST", "/api/agent/register")
+def handle_agent_register(ctx: RequestContext):
+    """Register an agent and get a lease."""
+    project_id = ctx.body.get("project_id", "")
+    if not project_id:
+        from .errors import ValidationError
+        raise ValidationError("project_id required")
+
+    from . import agent_lifecycle
+    with DBContext(project_id) as conn:
+        session = ctx.require_auth(conn)
+        return agent_lifecycle.register_agent(
+            conn, project_id, session,
+            expected_duration_sec=int(ctx.body.get("expected_duration_sec", 0)),
+        )
+
+
+@route("POST", "/api/agent/heartbeat")
+def handle_agent_heartbeat(ctx: RequestContext):
+    """Renew agent lease."""
+    lease_id = ctx.body.get("lease_id", "")
+    if not lease_id:
+        from .errors import ValidationError
+        raise ValidationError("lease_id required")
+
+    from . import agent_lifecycle
+    return agent_lifecycle.heartbeat(
+        lease_id, status=ctx.body.get("status", "idle"),
+    )
+
+
+@route("POST", "/api/agent/deregister")
+def handle_agent_deregister(ctx: RequestContext):
+    """Deregister an agent."""
+    lease_id = ctx.body.get("lease_id", "")
+    if not lease_id:
+        from .errors import ValidationError
+        raise ValidationError("lease_id required")
+
+    from . import agent_lifecycle
+    return agent_lifecycle.deregister(lease_id)
+
+
+@route("GET", "/api/agent/orphans")
+def handle_agent_orphans(ctx: RequestContext):
+    """List orphaned agents (expired leases)."""
+    project_id = ctx.query.get("project_id", "")
+    from . import agent_lifecycle
+    orphans = agent_lifecycle.find_orphans(project_id or None)
+    return {"orphans": orphans, "count": len(orphans)}
+
+
+@route("POST", "/api/agent/cleanup")
+def handle_agent_cleanup(ctx: RequestContext):
+    """Clean up orphaned agents. Coordinator only."""
+    project_id = ctx.body.get("project_id", "")
+    if not project_id:
+        from .errors import ValidationError
+        raise ValidationError("project_id required")
+
+    with DBContext(project_id) as conn:
+        session = ctx.require_auth(conn)
+        if session.get("role") != "coordinator":
+            from .errors import PermissionDeniedError
+            raise PermissionDeniedError(session.get("role", ""), "agent.cleanup",
+                                        {"detail": "Only coordinator can cleanup orphans"})
+
+    from . import agent_lifecycle
+    return agent_lifecycle.cleanup_orphans(project_id)
+
+
+# --- Session Context ---
+
+@route("POST", "/api/context/{project_id}/save")
+def handle_context_save(ctx: RequestContext):
+    """Save session context snapshot."""
+    project_id = ctx.get_project_id()
+    from . import session_context
+    return session_context.save_snapshot(
+        project_id, ctx.body.get("context", ctx.body),
+        expected_version=ctx.body.get("expected_version"),
+    )
+
+
+@route("GET", "/api/context/{project_id}/load")
+def handle_context_load(ctx: RequestContext):
+    """Load session context snapshot."""
+    project_id = ctx.get_project_id()
+    from . import session_context
+    data = session_context.load_snapshot(project_id)
+    if data is None:
+        return {"context": None, "exists": False}
+    return {"context": data, "exists": True}
+
+
+@route("POST", "/api/context/{project_id}/log")
+def handle_context_log_append(ctx: RequestContext):
+    """Append entry to session log."""
+    project_id = ctx.get_project_id()
+    from . import session_context
+    return session_context.append_log(
+        project_id,
+        entry_type=ctx.body.get("type", "action"),
+        content=ctx.body.get("content", {}),
+    )
+
+
+@route("GET", "/api/context/{project_id}/log")
+def handle_context_log_read(ctx: RequestContext):
+    """Read session log entries."""
+    project_id = ctx.get_project_id()
+    from . import session_context
+    entries = session_context.read_log(project_id, limit=int(ctx.query.get("limit", "50")))
+    return {"entries": entries, "count": len(entries)}
+
+
+@route("POST", "/api/context/{project_id}/assemble")
+def handle_context_assemble(ctx: RequestContext):
+    """Assemble context from dbservice for a task type."""
+    project_id = ctx.get_project_id()
+    task_type = ctx.body.get("task_type", "dev_general")
+    token_budget = int(ctx.body.get("token_budget", 5000))
+
+    import requests as http_requests
+    dbservice_url = os.environ.get("DBSERVICE_URL", "")
+    if not dbservice_url:
+        return {"context": [], "degraded": True, "reason": "DBSERVICE_URL not set"}
+
+    try:
+        resp = http_requests.post(
+            f"{dbservice_url}/assemble-context",
+            json={"taskType": task_type, "scope": project_id, "tokenBudget": token_budget},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        return {"context": [], "degraded": True, "reason": f"dbservice returned {resp.status_code}"}
+    except Exception as e:
+        return {"context": [], "degraded": True, "reason": str(e)}
+
+
+@route("POST", "/api/context/{project_id}/archive")
+def handle_context_archive(ctx: RequestContext):
+    """Archive context to long-term memory and clear."""
+    project_id = ctx.get_project_id()
+    from . import session_context
+    return session_context.archive_context(project_id)
 
 
 # --- Workflow ---
@@ -288,6 +563,33 @@ def handle_import_graph(ctx: RequestContext):
 def handle_verify_update(ctx: RequestContext):
     project_id = ctx.get_project_id()
 
+    # Input validation with helpful messages
+    nodes = ctx.body.get("nodes", [])
+    status = ctx.body.get("status", "")
+    evidence = ctx.body.get("evidence")
+
+    if not nodes:
+        from .errors import ValidationError
+        raise ValidationError(
+            'Missing "nodes" field. Example: {"nodes": ["L1.3"], "status": "testing", '
+            '"evidence": {"type": "test_report", "producer": "tester-001"}}'
+        )
+    if not isinstance(nodes, list):
+        from .errors import ValidationError
+        raise ValidationError(f'"nodes" must be a list, got {type(nodes).__name__}')
+    if not status:
+        from .errors import ValidationError
+        raise ValidationError(
+            'Missing "status" field. Valid values: pending, testing, t2_pass, qa_pass, failed, waived, skipped'
+        )
+    if evidence is not None and not isinstance(evidence, dict):
+        from .errors import ValidationError
+        raise ValidationError(
+            f'"evidence" must be a dict, got {type(evidence).__name__}. '
+            'Example: {"type": "test_report", "producer": "tester-001", "tool": "pytest", '
+            '"summary": {"passed": 42, "failed": 0}}'
+        )
+
     with DBContext(project_id) as conn:
         # Idempotency check
         rc = get_redis()
@@ -301,10 +603,10 @@ def handle_verify_update(ctx: RequestContext):
 
         result = state_service.verify_update(
             conn, project_id, graph,
-            node_ids=ctx.body.get("nodes", []),
-            target_status=ctx.body.get("status", ""),
+            node_ids=nodes,
+            target_status=status,
             session=session,
-            evidence_dict=ctx.body.get("evidence"),
+            evidence_dict=evidence,
         )
 
         # Store idempotency
@@ -479,11 +781,309 @@ def handle_audit_violations(ctx: RequestContext):
     return {"entries": entries, "count": len(entries)}
 
 
+# --- Task Registry ---
+
+@route("POST", "/api/task/{project_id}/create")
+def handle_task_create(ctx: RequestContext):
+    project_id = ctx.get_project_id()
+    from . import task_registry
+    with DBContext(project_id) as conn:
+        session = ctx.require_auth(conn)
+        return task_registry.create_task(
+            conn, project_id,
+            prompt=ctx.body.get("prompt", ""),
+            task_type=ctx.body.get("type", "task"),
+            related_nodes=ctx.body.get("related_nodes"),
+            created_by=session.get("principal_id", ""),
+            priority=int(ctx.body.get("priority", 0)),
+            max_attempts=int(ctx.body.get("max_attempts", 3)),
+            metadata=ctx.body.get("metadata"),
+        )
+
+
+@route("POST", "/api/task/{project_id}/claim")
+def handle_task_claim(ctx: RequestContext):
+    project_id = ctx.get_project_id()
+    from . import task_registry
+    with DBContext(project_id) as conn:
+        session = ctx.require_auth(conn)
+        task = task_registry.claim_task(conn, project_id, session.get("principal_id", ""))
+        if task is None:
+            return {"task": None, "message": "No tasks available"}
+        return {"task": task}
+
+
+@route("POST", "/api/task/{project_id}/complete")
+def handle_task_complete(ctx: RequestContext):
+    project_id = ctx.get_project_id()
+    from . import task_registry
+    with DBContext(project_id) as conn:
+        ctx.require_auth(conn)
+        return task_registry.complete_task(
+            conn, ctx.body.get("task_id", ""),
+            status=ctx.body.get("status", "succeeded"),
+            result=ctx.body.get("result"),
+            error_message=ctx.body.get("error_message", ""),
+        )
+
+
+@route("GET", "/api/task/{project_id}/list")
+def handle_task_list(ctx: RequestContext):
+    project_id = ctx.get_project_id()
+    from . import task_registry
+    with DBContext(project_id) as conn:
+        tasks = task_registry.list_tasks(
+            conn, project_id,
+            status=ctx.query.get("status"),
+            limit=int(ctx.query.get("limit", "50")),
+        )
+    return {"tasks": tasks, "count": len(tasks)}
+
+
 # --- Health ---
 
 @route("GET", "/api/health")
 def handle_health(ctx: RequestContext):
     return {"status": "ok", "service": "governance", "port": PORT}
+
+
+@route("GET", "/api/metrics")
+def handle_metrics(ctx: RequestContext):
+    """Return in-memory metrics snapshot."""
+    from .observability import get_metrics
+    return get_metrics()
+
+
+@route("GET", "/api/health/deep")
+def handle_deep_health(ctx: RequestContext):
+    """Deep health check: Redis, SQLite, outbox, queues."""
+    from .observability import check_outbox_health
+    checks = {"governance": "ok", "port": PORT}
+
+    # Redis
+    rc = get_redis()
+    checks["redis"] = "ok" if rc.available else "degraded"
+
+    # Outbox alerts
+    alerts = []
+    for p in project_service.list_projects():
+        alerts.extend(check_outbox_health(p["project_id"]))
+    checks["alerts"] = alerts
+    checks["alert_count"] = len(alerts)
+
+    return checks
+
+
+# --- Documentation ---
+
+_DOCS = {
+    "overview": {
+        "title": "Governance Service Overview",
+        "description": "Workflow governance service for multi-agent coordination. Manages project initialization, role assignment, node verification, release gating, memory, and audit.",
+        "base_url": "http://localhost:40000",
+        "api_prefix": "/api",
+        "gateway_prefix": "/gateway",
+        "auth": "All API calls (except /api/init, /api/health, /api/project/list, /api/docs) require X-Gov-Token header.",
+    },
+    "quickstart": {
+        "title": "Coordinator Quickstart",
+        "steps": [
+            {
+                "step": 1,
+                "action": "Init project (human does this once)",
+                "method": "POST /api/init",
+                "body": {"project_id": "myProject", "password": "secret"},
+                "returns": "coordinator_token (save this!)",
+            },
+            {
+                "step": 2,
+                "action": "Import acceptance graph",
+                "method": "POST /api/wf/{project_id}/import-graph",
+                "headers": {"X-Gov-Token": "gov-xxx"},
+                "body": {"markdown": "# Acceptance Graph\\n## L0 Foundation\\n- L0.1 ..."},
+            },
+            {
+                "step": 3,
+                "action": "Bind to Telegram (for message relay)",
+                "method": "POST /gateway/bind",
+                "body": {"token": "gov-xxx", "chat_id": 123456, "project_id": "myProject"},
+            },
+            {
+                "step": 4,
+                "action": "Assign roles to other agents",
+                "method": "POST /api/role/assign",
+                "headers": {"X-Gov-Token": "gov-xxx"},
+                "body": {"project_id": "myProject", "principal_id": "tester-001", "role": "tester"},
+                "returns": "agent_token for the tester",
+            },
+            {
+                "step": 5,
+                "action": "Start working - verify nodes, check gates, release",
+                "see": "workflow_rules",
+            },
+        ],
+    },
+    "endpoints": {
+        "title": "API Endpoints",
+        "groups": {
+            "init": {
+                "POST /api/init": "Create project + get coordinator token. Repeat with password to reset token.",
+            },
+            "project": {
+                "GET /api/project/list": "List all projects with node counts.",
+            },
+            "role": {
+                "POST /api/role/assign": "Coordinator assigns role+token to agent. Body: {project_id, principal_id, role}",
+                "POST /api/role/revoke": "Revoke agent session. Body: {project_id, session_id}",
+                "POST /api/role/heartbeat": "Agent keepalive. Body: {project_id?, status?}",
+                "GET /api/role/verify": "Verify token, returns session info. Used by Gateway.",
+                "GET /api/role/{project_id}/sessions": "List active sessions for a project.",
+            },
+            "workflow": {
+                "POST /api/wf/{project_id}/import-graph": "Import acceptance graph from markdown.",
+                "POST /api/wf/{project_id}/verify-update": "Update node verification status. Body: {nodes, status, evidence}",
+                "POST /api/wf/{project_id}/baseline": "Batch set historical state (coordinator only). Body: {nodes: {id: status}, reason}",
+                "POST /api/wf/{project_id}/release-gate": "Check if all nodes pass for release.",
+                "POST /api/wf/{project_id}/rollback": "Rollback node state to a version.",
+                "GET /api/wf/{project_id}/summary": "Status summary (counts by status).",
+                "GET /api/wf/{project_id}/node/{node_id}": "Single node details.",
+                "GET /api/wf/{project_id}/export": "Export graph as JSON or Mermaid. Query: format=json|mermaid",
+                "GET /api/wf/{project_id}/impact": "File change impact analysis. Query: files=a.py,b.py",
+            },
+            "memory": {
+                "POST /api/mem/{project_id}/write": "Write memory entry. Body: {module, kind, content, related_nodes?, supersedes?}",
+                "GET /api/mem/{project_id}/query": "Query memory. Query: module=, kind=, node=",
+            },
+            "audit": {
+                "GET /api/audit/{project_id}/log": "Query audit log. Query: limit=, event=, since=",
+                "GET /api/audit/{project_id}/violations": "Query violations. Query: limit=, since=",
+            },
+        },
+    },
+    "workflow_rules": {
+        "title": "Workflow Verification Rules",
+        "status_flow": {
+            "states": ["pending", "testing", "t2_pass", "qa_pass", "failed", "waived", "skipped"],
+            "transitions": {
+                "pending": ["testing"],
+                "testing": ["t2_pass", "failed"],
+                "t2_pass": ["qa_pass", "failed"],
+                "qa_pass": "(terminal - verified)",
+                "failed": ["testing"],
+            },
+        },
+        "role_permissions": {
+            "coordinator": "Can do everything: baseline, assign roles, rollback, import graph, verify-update.",
+            "tester": "Can transition: pending->testing, testing->t2_pass/failed.",
+            "qa": "Can transition: t2_pass->qa_pass/failed.",
+            "dev": "Can transition: pending->testing, testing->t2_pass/failed (same as tester).",
+            "observer": "Read-only. Can query status, summary, export.",
+        },
+        "evidence_format": {
+            "description": "Evidence must be a dict, not a string.",
+            "required_fields": ["type", "producer"],
+            "optional_fields": ["tool", "summary", "artifact_uri", "checksum", "created_at"],
+            "example": {
+                "type": "test_report",
+                "producer": "tester-001",
+                "tool": "pytest",
+                "summary": {"passed": 42, "failed": 0},
+            },
+        },
+        "verify_update_example": {
+            "method": "POST /api/wf/{project_id}/verify-update",
+            "headers": {"X-Gov-Token": "agent-token"},
+            "body": {
+                "nodes": ["L1.3"],
+                "status": "t2_pass",
+                "evidence": {
+                    "type": "test_report",
+                    "producer": "tester-001",
+                    "tool": "pytest",
+                    "summary": {"passed": 10, "failed": 0},
+                },
+            },
+        },
+        "gate_rules": "Nodes with dependencies (gates) cannot advance until upstream nodes satisfy their gate policy. Use GET /api/wf/{project_id}/node/{node_id} to check gate status.",
+        "release_gate": "POST /api/wf/{project_id}/release-gate checks if all nodes in scope are qa_pass. Returns {release: true/false, blocking_nodes: [...]}.",
+    },
+    "memory_guide": {
+        "title": "Memory Service Guide",
+        "description": "Store and query development knowledge (patterns, pitfalls, decisions, workarounds) per project.",
+        "kinds": ["decision", "pitfall", "workaround", "invariant", "ownership", "pattern"],
+        "write_example": {
+            "method": "POST /api/mem/{project_id}/write",
+            "headers": {"X-Gov-Token": "token"},
+            "body": {
+                "module": "auth",
+                "kind": "pitfall",
+                "content": "Never store session tokens in localStorage - use httpOnly cookies.",
+                "related_nodes": ["L2.3"],
+                "applies_when": "Implementing any auth-related feature",
+            },
+        },
+        "query_examples": [
+            "GET /api/mem/{project_id}/query?module=auth",
+            "GET /api/mem/{project_id}/query?kind=pitfall",
+            "GET /api/mem/{project_id}/query?node=L2.3",
+        ],
+    },
+    "telegram_integration": {
+        "title": "Telegram Gateway Integration",
+        "description": "The Gateway relays messages between Telegram users and Coordinators via Redis Pub/Sub.",
+        "architecture": "Telegram <-> Gateway (Docker) <-> Redis <-> Coordinator (host)",
+        "coordinator_setup": {
+            "step_1": "Import ChatProxy: from telegram_gateway.chat_proxy import ChatProxy",
+            "step_2": "Create proxy: proxy = ChatProxy(token='gov-xxx', gateway_url='http://localhost:40000', redis_url='redis://localhost:40079/0')",
+            "step_3": "Bind to chat: proxy.bind(chat_id=YOUR_CHAT_ID, project_id='myProject')",
+            "step_4_blocking": "proxy.listen(on_message=lambda msg: proxy.reply(process(msg['text'])))",
+            "step_4_background": "proxy.start(on_message=handler)  # non-blocking",
+        },
+        "gateway_api": {
+            "POST /gateway/bind": "Bind coordinator token to chat_id. Body: {token, chat_id, project_id}",
+            "POST /gateway/reply": "Send message to Telegram. Body: {token, chat_id?, text}. If no chat_id, uses bound chat.",
+            "POST /gateway/unbind": "Unbind chat_id. Body: {chat_id}",
+            "GET /gateway/health": "Gateway health check.",
+            "GET /gateway/status": "List all active routes (bound coordinators).",
+        },
+        "message_flow": {
+            "user_to_coordinator": "User sends text in Telegram -> Gateway publishes to Redis chat:inbox:{token_hash} -> Coordinator receives via ChatProxy",
+            "coordinator_to_user": "Coordinator calls POST /gateway/reply -> Gateway calls Telegram sendMessage",
+            "governance_events": "Governance publishes events to Redis gov:events:{project_id} -> Gateway formats and sends to admin chat",
+        },
+        "telegram_commands": {
+            "/menu": "Interactive menu showing registered coordinators with switch buttons",
+            "/bind <token>": "Bind coordinator to current chat",
+            "/unbind": "Unbind current coordinator",
+            "/status [project]": "Show project verification status",
+            "/projects": "List all projects",
+            "/health": "Service health check",
+        },
+    },
+}
+
+
+@route("GET", "/api/docs")
+def handle_docs_index(ctx: RequestContext):
+    """Return available documentation sections."""
+    sections = []
+    for key, doc in _DOCS.items():
+        sections.append({
+            "section": key,
+            "title": doc.get("title", key),
+            "url": f"/api/docs/{key}",
+        })
+    return {"sections": sections}
+
+
+@route("GET", "/api/docs/{section}")
+def handle_docs_section(ctx: RequestContext):
+    """Return a specific documentation section."""
+    section = ctx.path_params.get("section", "")
+    if section not in _DOCS:
+        from .errors import GovernanceError
+        raise GovernanceError(f"Unknown doc section: {section}. Available: {list(_DOCS.keys())}", 404)
+    return _DOCS[section]
 
 
 # ============================================================
@@ -505,6 +1105,15 @@ def main():
         print("EventBus: Redis Pub/Sub bridge enabled")
     else:
         print("EventBus: Redis unavailable, in-process only")
+
+    # Start outbox worker for reliable event delivery
+    try:
+        from .outbox import OutboxWorker
+        outbox_worker = OutboxWorker()
+        outbox_worker.start()
+        print("OutboxWorker: started")
+    except Exception as e:
+        print(f"OutboxWorker: failed to start ({e})")
 
     server = create_server()
     print(f"Governance service listening on port {PORT}")

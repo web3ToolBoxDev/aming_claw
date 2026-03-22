@@ -18,7 +18,7 @@ if _agent_dir not in sys.path:
 from utils import tasks_root
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 -- Node runtime state
@@ -63,15 +63,39 @@ CREATE TABLE IF NOT EXISTS sessions (
     metadata_json TEXT
 );
 
--- Task tracking
+-- Task registry (v4: upgraded from file-based)
 CREATE TABLE IF NOT EXISTS tasks (
     task_id       TEXT PRIMARY KEY,
     project_id    TEXT NOT NULL,
     status        TEXT NOT NULL DEFAULT 'created',
+    type          TEXT NOT NULL DEFAULT 'task',
+    prompt        TEXT,
     related_nodes TEXT,
+    assigned_to   TEXT,
     created_by    TEXT,
     created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
+    updated_at    TEXT NOT NULL,
+    started_at    TEXT,
+    completed_at  TEXT,
+    result_json   TEXT,
+    error_message TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts  INTEGER NOT NULL DEFAULT 3,
+    priority      INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT
+);
+-- idx_tasks_status and idx_tasks_assigned created in migration v2
+
+-- Task attempts (retry tracking)
+CREATE TABLE IF NOT EXISTS task_attempts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       TEXT NOT NULL REFERENCES tasks(task_id),
+    attempt_num   INTEGER NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'running',
+    started_at    TEXT NOT NULL,
+    completed_at  TEXT,
+    result_json   TEXT,
+    error_message TEXT
 );
 
 -- Idempotency keys
@@ -103,6 +127,22 @@ CREATE TABLE IF NOT EXISTS snapshots (
     created_by    TEXT,
     PRIMARY KEY (project_id, version)
 );
+
+-- Event outbox (transactional outbox pattern)
+CREATE TABLE IF NOT EXISTS event_outbox (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type    TEXT NOT NULL,
+    payload_json  TEXT NOT NULL,
+    project_id    TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    delivered_at  TEXT,
+    retry_count   INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT,
+    dead_letter   INTEGER NOT NULL DEFAULT 0,
+    trace_id      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON event_outbox(delivered_at) WHERE delivered_at IS NULL AND dead_letter = 0;
+CREATE INDEX IF NOT EXISTS idx_outbox_dead ON event_outbox(dead_letter) WHERE dead_letter = 1;
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -182,7 +222,61 @@ def _run_migrations(conn: sqlite3.Connection, from_version: int, to_version: int
             2: _migrate_v1_to_v2,
         }
     """
-    MIGRATIONS = {}
+    def _migrate_v1_to_v2(c):
+        """Add new columns to tasks table + event_outbox + task_attempts."""
+        # Add missing columns to tasks (ALTER TABLE ADD is safe for existing data)
+        for col, typedef in [
+            ("type", "TEXT NOT NULL DEFAULT 'task'"),
+            ("prompt", "TEXT"),
+            ("assigned_to", "TEXT"),
+            ("started_at", "TEXT"),
+            ("completed_at", "TEXT"),
+            ("result_json", "TEXT"),
+            ("error_message", "TEXT"),
+            ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("max_attempts", "INTEGER NOT NULL DEFAULT 3"),
+            ("priority", "INTEGER NOT NULL DEFAULT 0"),
+            ("metadata_json", "TEXT"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE tasks ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        # Create task_attempts table if not exists
+        c.execute("""CREATE TABLE IF NOT EXISTS task_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            attempt_num INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'running',
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            result_json TEXT,
+            error_message TEXT
+        )""")
+
+        # Create event_outbox if not exists (may already be from schema)
+        c.execute("""CREATE TABLE IF NOT EXISTS event_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            delivered_at TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            next_retry_at TEXT,
+            dead_letter INTEGER NOT NULL DEFAULT 0,
+            trace_id TEXT
+        )""")
+
+        # Create indexes
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(project_id, status)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to, status)")
+        except sqlite3.OperationalError:
+            pass
+
+    MIGRATIONS = {2: _migrate_v1_to_v2}
     for version in range(from_version + 1, to_version + 1):
         if version in MIGRATIONS:
             MIGRATIONS[version](conn)

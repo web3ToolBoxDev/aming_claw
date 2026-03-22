@@ -57,7 +57,7 @@ def get_token_from_env(role: str = "") -> str | None:
 
 
 def connect_from_env(
-    governance_url: str = "http://localhost:30006",
+    governance_url: str = "http://localhost:40000",
     role: str = "",
     project_id: str = "",
 ) -> dict:
@@ -119,7 +119,7 @@ def connect_from_env(
 def check_team_status(
     project_id: str,
     token: str,
-    governance_url: str = "http://localhost:30006",
+    governance_url: str = "http://localhost:40000",
 ) -> dict:
     """Check the status of all roles in the project.
 

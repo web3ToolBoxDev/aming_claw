@@ -2,16 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Copy requirements first for layer caching
-COPY agent/requirements.txt agent/requirements.txt
-RUN pip install --no-cache-dir -r agent/requirements.txt
+RUN pip install --no-cache-dir requests redis
 
-# Copy agent source (coordinator, bot_commands, utils, etc.)
-COPY agent/ agent/
-
-# Create shared-volume directory structure
-RUN mkdir -p /app/shared-volume/codex-tasks/state
+COPY agent/telegram_gateway/ agent/telegram_gateway/
 
 WORKDIR /app/agent
+
+ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "-m", "telegram_gateway.gateway"]

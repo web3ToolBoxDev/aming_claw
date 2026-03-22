@@ -17,7 +17,7 @@ class GovernanceClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:30006",
+        base_url: str = "http://localhost:40000",
         token: str = "",
         max_retries: int = 5,
         base_delay: float = 2.0,

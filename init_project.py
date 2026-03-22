@@ -11,7 +11,7 @@ import sys
 import getpass
 import requests
 
-GOVERNANCE_URL = "http://localhost:30006"
+GOVERNANCE_URL = "http://localhost:40000"
 
 
 def main():

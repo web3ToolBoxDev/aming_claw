@@ -1,0 +1,555 @@
+'use strict';
+
+const http = require('http');
+const path = require('path');
+const { TransformersEmbedder } = require('./lib/transformersEmbedder');
+const { BridgeLLM } = require('./lib/bridgeLLM');
+
+const knowledgeStore = require('./lib/knowledgeStore');
+
+const PORT = parseInt(process.env.DBSERVICE_PORT || '30002', 10);
+const SAVE_PATH = process.env.DBSERVICE_SAVE_PATH || '';
+
+// Patch mem0 factories to support our custom embedder/LLM
+const oss = require('mem0ai/oss');
+const { Memory, EmbedderFactory, LLMFactory } = oss;
+
+// Store custom instances to inject via factory
+let _customEmbedder = null;
+let _customLLM = null;
+
+const _origEmbedderCreate = EmbedderFactory.create;
+EmbedderFactory.create = function (provider, config) {
+    if (provider === 'custom') return _customEmbedder;
+    return _origEmbedderCreate.call(this, provider, config);
+};
+
+const _origLLMCreate = LLMFactory.create;
+LLMFactory.create = function (provider, config) {
+    if (provider === 'custom') return _customLLM;
+    return _origLLMCreate.call(this, provider, config);
+};
+
+let memoryInstance = null;
+let initPromise = null;
+let initError = null;
+
+// --------------- lazy init ---------------
+
+async function getMemory(llmConfig = {}) {
+    if (memoryInstance) return memoryInstance;
+    if (initPromise) return initPromise;
+
+    initPromise = (async () => {
+        try {
+            _customEmbedder = new TransformersEmbedder();
+            _customLLM = new BridgeLLM(llmConfig);
+
+            const historyDbPath = SAVE_PATH
+                ? path.join(SAVE_PATH, 'db', 'mem0_history.db')
+                : path.join(__dirname, 'mem0_history.db');
+
+            memoryInstance = new Memory({
+                embedder: { provider: 'custom', config: {} },
+                llm: { provider: 'custom', config: {} },
+                vectorStore: {
+                    provider: 'memory',
+                    config: { collectionName: 'toolbox-memories', dimension: 384 }
+                },
+                historyDbPath,
+                disableHistory: false
+            });
+
+            console.log(`[dbservice] Memory initialized (historyDb: ${historyDbPath})`);
+            return memoryInstance;
+        } catch (err) {
+            initError = err;
+            initPromise = null;
+            console.error('[dbservice] Memory init failed:', err.message);
+            throw err;
+        }
+    })();
+
+    return initPromise;
+}
+
+// --------------- HTTP helpers ---------------
+
+function readBody(req) {
+    return new Promise((resolve, reject) => {
+        let data = '';
+        req.on('data', (chunk) => { data += chunk; });
+        req.on('end', () => {
+            try { resolve(JSON.parse(data)); } catch { resolve({}); }
+        });
+        req.on('error', reject);
+    });
+}
+
+function sendJSON(res, statusCode, data) {
+    res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+}
+
+// --------------- routes ---------------
+
+async function handleStore(req, res) {
+    const body = await readBody(req);
+    const { namespace, text, role, metadata, llmConfig } = body;
+
+    if (!namespace || !text) {
+        return sendJSON(res, 400, { success: false, error: 'namespace and text are required' });
+    }
+
+    try {
+        // Update LLM config if provided (allows agent to pass its current provider)
+        if (llmConfig && _customLLM) {
+            if (llmConfig.apiKey) _customLLM.apiKey = llmConfig.apiKey;
+            if (llmConfig.model) _customLLM.model = llmConfig.model;
+            if (llmConfig.provider) _customLLM.provider = llmConfig.provider;
+            if (llmConfig.baseURL) _customLLM.baseURL = llmConfig.baseURL;
+        }
+        const memory = await getMemory(llmConfig || {});
+        const result = await memory.add(text, {
+            userId: namespace,
+            metadata: { role: role || 'user', ...metadata, timestamp: Date.now() }
+        });
+        sendJSON(res, 200, { success: true, result });
+    } catch (err) {
+        console.error('[dbservice] store error:', err.message);
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleSearch(req, res) {
+    const body = await readBody(req);
+    const { namespace, query, topK } = body;
+
+    if (!namespace || !query) {
+        return sendJSON(res, 400, { success: false, error: 'namespace and query are required' });
+    }
+
+    try {
+        const memory = await getMemory({});
+        const results = await memory.search(query, {
+            userId: namespace,
+            limit: topK || 5
+        });
+        sendJSON(res, 200, { success: true, results: results || [] });
+    } catch (err) {
+        console.error('[dbservice] search error:', err.message);
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleClear(req, res) {
+    const body = await readBody(req);
+    const { namespace } = body;
+
+    if (!namespace) {
+        return sendJSON(res, 400, { success: false, error: 'namespace is required' });
+    }
+
+    try {
+        const memory = await getMemory({});
+
+        // Try deleteAll by userId first
+        try {
+            await memory.deleteAll({ userId: namespace });
+            console.log(`[dbservice] deleteAll completed for namespace=${namespace}`);
+        } catch (delErr) {
+            console.warn(`[dbservice] deleteAll failed for namespace=${namespace}: ${delErr.message}, falling back to reset()`);
+        }
+
+        // Verify by searching — if anything remains, use reset() as nuclear option
+        try {
+            const check = await memory.search('user profile skills experience', { userId: namespace, limit: 3 });
+            const remaining = check?.results?.length || check?.length || 0;
+            if (remaining > 0) {
+                console.warn(`[dbservice] ${remaining} memories still remain after deleteAll, using reset()`);
+                await memory.reset();
+                console.log('[dbservice] memory.reset() completed');
+            }
+        } catch (checkErr) {
+            console.warn('[dbservice] verify search failed:', checkErr.message);
+        }
+
+        sendJSON(res, 200, { success: true });
+    } catch (err) {
+        console.error('[dbservice] clear error:', err.message);
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleHealth(req, res) {
+    sendJSON(res, 200, {
+        success: true,
+        status: memoryInstance ? 'ready' : (initError ? 'error' : 'initializing'),
+        error: initError ? initError.message : undefined,
+        port: PORT,
+        savePath: SAVE_PATH || '(default)'
+    });
+}
+
+// --------------- knowledge store routes ---------------
+
+async function handleKnowledgeUpsert(req, res) {
+    const body = await readBody(req);
+    if (!body.type || !body.content) {
+        return sendJSON(res, 400, { success: false, error: 'type and content are required' });
+    }
+    try {
+        const refId = knowledgeStore.upsert(body);
+        sendJSON(res, 200, { success: true, refId });
+    } catch (err) {
+        console.error('[dbservice] knowledge upsert error:', err.message);
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleKnowledgeSearch(req, res) {
+    const body = await readBody(req);
+    if (!body.query) {
+        return sendJSON(res, 400, { success: false, error: 'query is required' });
+    }
+    try {
+        const results = knowledgeStore.search(body.query, body.types, body.limit);
+        sendJSON(res, 200, { success: true, results });
+    } catch (err) {
+        console.error('[dbservice] knowledge search error:', err.message);
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleKnowledgeFind(req, res) {
+    const body = await readBody(req);
+    try {
+        let results = [];
+        if (body.refId) {
+            const doc = knowledgeStore.findByRef(body.refId);
+            results = doc ? [doc] : [];
+        } else if (body.type) {
+            results = knowledgeStore.findByType(body.type, body.subType);
+        } else if (body.tags) {
+            results = knowledgeStore.findByTags(body.tags);
+        } else if (body.scope) {
+            results = knowledgeStore.findByScope(body.scope);
+        }
+        sendJSON(res, 200, { success: true, results });
+    } catch (err) {
+        console.error('[dbservice] knowledge find error:', err.message);
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleKnowledgeExpand(req, res) {
+    const body = await readBody(req);
+    if (!body.types || !Array.isArray(body.types)) {
+        return sendJSON(res, 400, { success: false, error: 'types array is required' });
+    }
+    try {
+        const results = knowledgeStore.expandByTypes(body.types);
+        sendJSON(res, 200, { success: true, results });
+    } catch (err) {
+        console.error('[dbservice] knowledge expand error:', err.message);
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleKnowledgeRemove(req, res) {
+    const body = await readBody(req);
+    try {
+        if (body.refId) {
+            knowledgeStore.remove(body.refId);
+        } else if (body.type) {
+            knowledgeStore.removeByType(body.type, body.scope);
+        }
+        sendJSON(res, 200, { success: true });
+    } catch (err) {
+        console.error('[dbservice] knowledge remove error:', err.message);
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleKnowledgeStats(req, res) {
+    try {
+        sendJSON(res, 200, { success: true, ...knowledgeStore.stats() });
+    } catch (err) {
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleKnowledgePromote(req, res) {
+    const body = await readBody(req);
+    if (!body.refId) {
+        return sendJSON(res, 400, { success: false, error: 'refId is required' });
+    }
+    try {
+        const ok = knowledgeStore.promote(body.refId);
+        sendJSON(res, 200, { success: ok });
+    } catch (err) {
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleKnowledgeAudit(req, res) {
+    const body = await readBody(req);
+    if (!body.refId) {
+        return sendJSON(res, 400, { success: false, error: 'refId is required' });
+    }
+    try {
+        const results = knowledgeStore.getAuditLog(body.refId, body.limit || 50);
+        sendJSON(res, 200, { success: true, results });
+    } catch (err) {
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleKnowledgeResolve(req, res) {
+    const body = await readBody(req);
+    if (!body.type || !Array.isArray(body.scopes)) {
+        return sendJSON(res, 400, { success: false, error: 'type and scopes[] are required' });
+    }
+    try {
+        const doc = knowledgeStore.findResolved(body.type, body.subType || '', body.scopes);
+        sendJSON(res, 200, { success: true, result: doc });
+    } catch (err) {
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleKnowledgeRegisterPack(req, res) {
+    const body = await readBody(req);
+    if (!body.domain || !body.types) {
+        return sendJSON(res, 400, { success: false, error: 'domain and types are required' });
+    }
+    try {
+        const schema = require('./lib/memorySchema');
+        schema.registerDomainPack(body.domain, { types: body.types });
+        sendJSON(res, 200, { success: true, domain: body.domain, typesRegistered: Object.keys(body.types) });
+    } catch (err) {
+        console.error('[dbservice] register-pack error:', err.message);
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleKnowledgeFresh(req, res) {
+    const body = await readBody(req);
+    if (!body.type) {
+        return sendJSON(res, 400, { success: false, error: 'type is required' });
+    }
+    try {
+        const results = knowledgeStore.findFresh(body.type, body.scope, body.maxAgeDays || 30);
+        sendJSON(res, 200, { success: true, results });
+    } catch (err) {
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+// --------------- Phase 8 handlers ---------------
+
+const contextAssembly = require('./lib/contextAssembly');
+const memoryRelations = require('./lib/memoryRelations');
+
+async function handleAssembleContext(req, res) {
+    const body = await readBody(req);
+    if (!body.taskType) {
+        return sendJSON(res, 400, { success: false, error: 'taskType is required' });
+    }
+    try {
+        const results = contextAssembly.assembleContext(body.taskType, body.options || {});
+        sendJSON(res, 200, { success: true, results, totalDocs: results.length, totalTokens: results.reduce((s, r) => s + r.tokens, 0) });
+    } catch (err) {
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleRelations(req, res) {
+    const body = await readBody(req);
+    if (!body.action) {
+        return sendJSON(res, 400, { success: false, error: 'action is required' });
+    }
+    try {
+        switch (body.action) {
+            case 'add': {
+                const id = memoryRelations.addRelation(body.fromRefId, body.relation, body.toRefId, body.metadata);
+                return sendJSON(res, 200, { success: true, id });
+            }
+            case 'from':
+                return sendJSON(res, 200, { success: true, results: memoryRelations.findRelationsFrom(body.fromRefId, body.relation) });
+            case 'to':
+                return sendJSON(res, 200, { success: true, results: memoryRelations.findRelationsTo(body.toRefId, body.relation) });
+            case 'by_relation':
+                return sendJSON(res, 200, { success: true, results: memoryRelations.findByRelation(body.relation) });
+            case 'remove':
+                return sendJSON(res, 200, { success: true, removed: memoryRelations.removeRelation(body.id) });
+            case 'remove_for':
+                return sendJSON(res, 200, { success: true, removed: memoryRelations.removeRelationsFor(body.refId) });
+            default:
+                return sendJSON(res, 400, { success: false, error: `Unknown action: ${body.action}` });
+        }
+    } catch (err) {
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleEvents(req, res) {
+    const body = await readBody(req);
+    if (!body.action) {
+        return sendJSON(res, 400, { success: false, error: 'action is required' });
+    }
+    try {
+        switch (body.action) {
+            case 'log': {
+                const id = memoryRelations.logEvent(body.eventType, body);
+                return sendJSON(res, 200, { success: true, id });
+            }
+            case 'get':
+                return sendJSON(res, 200, { success: true, results: memoryRelations.getEvents(body.refId, body.limit) });
+            case 'by_type':
+                return sendJSON(res, 200, { success: true, results: memoryRelations.getEventsByType(body.eventType, body.limit) });
+            case 'by_actor':
+                return sendJSON(res, 200, { success: true, results: memoryRelations.getEventsByActor(body.actorId, body.limit) });
+            default:
+                return sendJSON(res, 400, { success: false, error: `Unknown action: ${body.action}` });
+        }
+    } catch (err) {
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleFindByKey(req, res) {
+    const body = await readBody(req);
+    if (!body.memoryKey) {
+        return sendJSON(res, 400, { success: false, error: 'memoryKey is required' });
+    }
+    try {
+        const doc = knowledgeStore.findByMemoryKey(body.memoryKey);
+        sendJSON(res, 200, { success: true, result: doc });
+    } catch (err) {
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+async function handleCleanup(req, res) {
+    const body = await readBody(req);
+    try {
+        if (body.dryRun) {
+            const cold = knowledgeStore.findColdMemories(body);
+            return sendJSON(res, 200, { success: true, dryRun: true, wouldArchive: cold.length, docs: cold.map(d => ({ refId: d.refId, type: d.type, lastUsedAt: d.lastUsedAt, accessCount: d.accessCount })) });
+        }
+        const result = knowledgeStore.cleanupColdMemories(body);
+        sendJSON(res, 200, { success: true, ...result });
+    } catch (err) {
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+}
+
+// --------------- server ---------------
+
+const server = http.createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        return res.end();
+    }
+
+    const url = req.url?.split('?')[0];
+
+    try {
+        if (url === '/health' && req.method === 'GET') {
+            return await handleHealth(req, res);
+        }
+        // mem0 memory routes
+        if (url === '/memory/store' && req.method === 'POST') {
+            return await handleStore(req, res);
+        }
+        if (url === '/memory/search' && req.method === 'POST') {
+            return await handleSearch(req, res);
+        }
+        if (url === '/memory/clear' && (req.method === 'POST' || req.method === 'DELETE')) {
+            return await handleClear(req, res);
+        }
+        // knowledge store routes
+        if (url === '/knowledge/upsert' && req.method === 'POST') {
+            return await handleKnowledgeUpsert(req, res);
+        }
+        if (url === '/knowledge/search' && req.method === 'POST') {
+            return await handleKnowledgeSearch(req, res);
+        }
+        if (url === '/knowledge/find' && req.method === 'POST') {
+            return await handleKnowledgeFind(req, res);
+        }
+        if (url === '/knowledge/expand' && req.method === 'POST') {
+            return await handleKnowledgeExpand(req, res);
+        }
+        if (url === '/knowledge/remove' && (req.method === 'POST' || req.method === 'DELETE')) {
+            return await handleKnowledgeRemove(req, res);
+        }
+        if (url === '/knowledge/stats' && req.method === 'GET') {
+            return await handleKnowledgeStats(req, res);
+        }
+        if (url === '/knowledge/promote' && req.method === 'POST') {
+            return await handleKnowledgePromote(req, res);
+        }
+        if (url === '/knowledge/audit' && req.method === 'POST') {
+            return await handleKnowledgeAudit(req, res);
+        }
+        if (url === '/knowledge/resolve' && req.method === 'POST') {
+            return await handleKnowledgeResolve(req, res);
+        }
+        if (url === '/knowledge/fresh' && req.method === 'POST') {
+            return await handleKnowledgeFresh(req, res);
+        }
+        if (url === '/knowledge/register-pack' && req.method === 'POST') {
+            return await handleKnowledgeRegisterPack(req, res);
+        }
+        // Story 8.1: Context assembly
+        if (url === '/knowledge/assemble-context' && req.method === 'POST') {
+            return await handleAssembleContext(req, res);
+        }
+        // Story 8.2: Relations & Events
+        if (url === '/knowledge/relations' && req.method === 'POST') {
+            return await handleRelations(req, res);
+        }
+        if (url === '/knowledge/events' && req.method === 'POST') {
+            return await handleEvents(req, res);
+        }
+        // Story 8.4: Find by memoryKey
+        if (url === '/knowledge/find-by-key' && req.method === 'POST') {
+            return await handleFindByKey(req, res);
+        }
+        // Story 8.5: Cold memory cleanup
+        if (url === '/knowledge/cleanup' && req.method === 'POST') {
+            return await handleCleanup(req, res);
+        }
+        sendJSON(res, 404, { success: false, error: 'Not found' });
+    } catch (err) {
+        console.error('[dbservice] Unhandled error:', err);
+        sendJSON(res, 500, { success: false, error: err.message });
+    }
+});
+
+const BIND_HOST = process.env.BIND_HOST || '0.0.0.0';
+server.listen(PORT, BIND_HOST, () => {
+    console.log(`[dbservice] Memory service listening on http://${BIND_HOST}:${PORT}`);
+    // Pre-warm: start loading the embedding model in background
+    getMemory({}).catch(() => {});
+    // Initialize knowledge store
+    const ksPath = SAVE_PATH ? path.join(SAVE_PATH, 'db') : path.join(__dirname, 'data');
+    knowledgeStore.init(ksPath).catch(err => {
+        console.error('[dbservice] Knowledge store init failed:', err.message);
+    });
+});
+
+process.on('SIGTERM', () => {
+    console.log('[dbservice] Received SIGTERM, shutting down');
+    server.close(() => process.exit(0));
+});
+process.on('SIGINT', () => {
+    console.log('[dbservice] Received SIGINT, shutting down');
+    server.close(() => process.exit(0));
+});

@@ -3,7 +3,7 @@ services:
   nginx:
     image: nginx:alpine
     ports:
-      - "30000:80"
+      - "40000:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -21,22 +21,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.governance
-    # No host port mapping - accessed via nginx
     expose:
-      - "30006"
+      - "40006"
     volumes:
       - governance-data:/app/shared-volume/codex-tasks/state/governance
       - .:/workspace:ro
     environment:
-      - GOVERNANCE_PORT=30006
+      - GOVERNANCE_PORT=40006
       - REDIS_URL=redis://redis:6379/0
+      - DBSERVICE_URL=http://dbservice:40002
       - SHARED_VOLUME_PATH=/app/shared-volume
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:30006/api/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:40006/api/health')"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -47,20 +47,21 @@ services:
       context: .
       dockerfile: Dockerfile.governance
     expose:
-      - "30007"
+      - "40007"
     volumes:
       - governance-dev-data:/app/shared-volume/codex-tasks/state/governance
       - .:/workspace:ro
     environment:
-      - GOVERNANCE_PORT=30007
+      - GOVERNANCE_PORT=40007
       - REDIS_URL=redis://redis:6379/1
+      - DBSERVICE_URL=http://dbservice:40002
       - SHARED_VOLUME_PATH=/app/shared-volume
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:30007/api/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:40007/api/health')"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -72,15 +73,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.telegram-gateway
+    expose:
+      - "40010"
     volumes:
       - task-data:/app/shared-volume/codex-tasks
     env_file:
       - .env
     environment:
-      - GOVERNANCE_URL=http://governance:30006
+      - GOVERNANCE_URL=http://governance:40006
       - REDIS_URL=redis://redis:6379/0
       - SHARED_VOLUME_PATH=/app/shared-volume
       - TELEGRAM_ADMIN_CHAT_ID=${TELEGRAM_ADMIN_CHAT_ID:-7848961760}
+      - GATEWAY_PORT=40010
     depends_on:
       governance:
         condition: service_healthy
@@ -88,13 +92,33 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # --- Memory Service ---
+  dbservice:
+    build:
+      context: ./dbservice
+    expose:
+      - "40002"
+    ports:
+      - "40002:40002"
+    volumes:
+      - memory-data:/app/db
+    environment:
+      - DBSERVICE_PORT=40002
+      - DBSERVICE_SAVE_PATH=/app/db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:40002/health',r=>{process.exit(r.statusCode===200?0:1)})"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   # --- Redis ---
   redis:
     image: redis:7-alpine
     expose:
       - "6379"
     ports:
-      - "6380:6379"
+      - "40079:6379"
     volumes:
       - redis-data:/data
     command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
@@ -113,4 +137,6 @@ volumes:
   redis-data:
     driver: local
   task-data:
+    driver: local
+  memory-data:
     driver: local

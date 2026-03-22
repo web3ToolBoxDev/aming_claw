@@ -12,6 +12,8 @@ COPY agent/ agent/
 # Create shared-volume directory structure
 RUN mkdir -p /app/shared-volume/codex-tasks/state/governance
 
-EXPOSE 30006
+EXPOSE 40006
+
+ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "-m", "agent.governance.server"]

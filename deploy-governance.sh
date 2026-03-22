@@ -3,9 +3,9 @@
 #
 # Strategy:
 #   1. Build new image
-#   2. Start new container on staging port (30007)
+#   2. Start new container on staging port (40007)
 #   3. Health check + smoke test
-#   4. Swap: stop old, start new on production port (30006)
+#   4. Swap: stop old, start new on production port (40006)
 #
 # Data safety:
 #   - Docker volume (governance-data) is NEVER deleted
@@ -22,8 +22,8 @@ set -e
 
 COMPOSE_FILE="docker-compose.governance.yml"
 SERVICE="governance"
-PROD_PORT=30006
-STAGE_PORT=30007
+PROD_PORT=40006
+STAGE_PORT=40007
 HEALTH_RETRIES=10
 HEALTH_DELAY=3
 
@@ -72,12 +72,12 @@ services:
   governance-staging:
     image: aming_claw-governance:latest
     ports:
-      - "${STAGE_PORT}:30006"
+      - "${STAGE_PORT}:40006"
     volumes:
       - governance-data:/app/shared-volume/codex-tasks/state/governance
       - .:/workspace:ro
     environment:
-      - GOVERNANCE_PORT=30006
+      - GOVERNANCE_PORT=40006
       - REDIS_URL=redis://redis:6379/0
       - SHARED_VOLUME_PATH=/app/shared-volume
     depends_on:
@@ -90,9 +90,9 @@ STAGING
 docker run -d \
     --name governance-staging \
     --network container:aming_claw-redis-1 \
-    -p ${STAGE_PORT}:30006 \
+    -p ${STAGE_PORT}:40006 \
     -v aming_claw_governance-data:/app/shared-volume/codex-tasks/state/governance \
-    -e GOVERNANCE_PORT=30006 \
+    -e GOVERNANCE_PORT=40006 \
     -e REDIS_URL=redis://redis:6379/0 \
     -e SHARED_VOLUME_PATH=/app/shared-volume \
     aming_claw-governance:latest \
@@ -100,9 +100,9 @@ docker run -d \
         # Network mode might fail, try with bridge
         docker run -d \
             --name governance-staging \
-            -p ${STAGE_PORT}:30006 \
+            -p ${STAGE_PORT}:40006 \
             -v aming_claw_governance-data:/app/shared-volume/codex-tasks/state/governance \
-            -e GOVERNANCE_PORT=30006 \
+            -e GOVERNANCE_PORT=40006 \
             -e SHARED_VOLUME_PATH=/app/shared-volume \
             aming_claw-governance:latest
     }
