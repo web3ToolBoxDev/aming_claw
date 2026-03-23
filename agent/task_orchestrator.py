@@ -708,18 +708,36 @@ class TaskOrchestrator:
     def _needs_pm_analysis(self, text: str) -> bool:
         """Check if user message needs PM analysis before Coordinator.
 
-        PM is triggered for:
-        - New feature requests
-        - Complex multi-step requests
-        - Architecture changes
-        - Explicit "需求" / "设计" / "方案" keywords
+        PM is triggered for any dev-related request to ensure PRD with
+        explicit target_files is generated before Dev task dispatch.
+        Only pure queries (状态/查看/列出) skip PM.
         """
-        pm_keywords = [
-            "新功能", "new feature", "添加功能", "设计", "方案", "需求",
-            "架构", "重构", "redesign", "RFC", "PRD",
-            "我要", "我想要", "能不能加", "需要一个",
+        # Skip PM for pure queries
+        query_only = [
+            "状态", "status", "查看", "列出", "list", "show",
+            "查询", "多少", "几个", "有没有", "ping",
         ]
-        return any(kw in text.lower() for kw in pm_keywords)
+        lower = text.lower()
+        if any(kw in lower for kw in query_only) and not any(
+            kw in lower for kw in ["修", "改", "加", "写", "实现", "fix", "add"]
+        ):
+            return False
+
+        # Trigger PM for anything that implies code changes
+        pm_keywords = [
+            # Chinese
+            "新功能", "添加功能", "设计", "方案", "需求",
+            "架构", "重构", "需要", "修改", "增加", "补充",
+            "优化", "实现", "修复", "修", "改", "加",
+            "写", "创建", "删除", "移除",
+            "我要", "我想要", "能不能加", "需要一个",
+            # English
+            "new feature", "redesign", "RFC", "PRD",
+            "implement", "add", "fix", "update", "modify",
+            "enhance", "refactor", "create", "remove", "delete",
+            "Gap", "gap",
+        ]
+        return any(kw in lower for kw in pm_keywords)
 
     def _run_pm_analysis(self, text: str, project_id: str, chat_id: int) -> dict:
         """Run PM AI to analyze requirements and generate PRD."""

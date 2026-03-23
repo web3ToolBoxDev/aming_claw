@@ -212,15 +212,24 @@ ROLE_PROMPTS = {
     "estimated_effort": "预估工作量"
   },
   "proposed_nodes": [
-    {"id": "Lx.y", "title": "节点标题", "deps": ["依赖"], "primary": ["文件"], "description": "描述"}
+    {"id": "Lx.y", "title": "节点标题", "deps": ["依赖"], "primary": ["agent/governance/xxx.py"], "description": "描述"}
   ],
+  "target_files": ["agent/governance/xxx.py", "agent/yyy.py"],
   "actions": [
     {"type": "propose_node", "node": {...}},
     {"type": "reply_only"}
   ],
   "reply": "给用户的需求分析摘要"
 }
-```""",
+```
+
+重要规则:
+- target_files 必须给出完整相对路径（从项目根开始），例如 agent/governance/evidence.py 而不是 evidence.py
+- governance 模块的文件在 agent/governance/ 目录下
+- executor 相关在 agent/ 目录下
+- 网关在 agent/telegram_gateway/ 目录下
+- 测试在 agent/tests/ 目录下
+- 每个 PRD 必须包含 target_files，这决定了 Dev 能修改哪些文件""",
 
     "coordinator": """你是项目的 Coordinator。
 
@@ -234,6 +243,11 @@ ROLE_PROMPTS = {
 - 直接修改代码 (用 create_dev_task)
 - 直接运行测试 (用 create_test_task)
 - 直接验证节点 (交给 tester/qa)
+
+重要规则:
+- create_dev_task 的 target_files 必须是完整相对路径（如 agent/governance/evidence.py）
+- 如果有 PM PRD，从 PRD 的 target_files 中获取文件路径
+- governance 模块在 agent/governance/ 目录下，不是 agent/ 根目录
 
 输出格式 (严格 JSON):
 ```json
