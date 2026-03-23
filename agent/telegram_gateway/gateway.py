@@ -67,7 +67,35 @@ def tg_api(method: str, data: dict = None) -> dict:
     return resp.json()
 
 
+import re as _re
+
+def _escape_telegram(text: str) -> str:
+    """Strip all Markdown formatting symbols to ensure plain-text output."""
+    # Remove heading markers: # at line start (before other replacements)
+    text = _re.sub(r'^#{1,6}\s*', '', text, flags=_re.MULTILINE)
+    # Remove horizontal rules: ---, ***, +++ on their own line
+    text = _re.sub(r'^[-*+]{3,}\s*$', '', text, flags=_re.MULTILINE)
+    # Remove list item markers at line start: - item, + item, * item
+    text = _re.sub(r'^[\-\+\*]\s+', '', text, flags=_re.MULTILINE)
+    # Remove ordered list markers: 1. item
+    text = _re.sub(r'^\d+\.\s+', '', text, flags=_re.MULTILINE)
+    # Remove blockquote markers
+    text = _re.sub(r'^>\s*', '', text, flags=_re.MULTILINE)
+    # Remove link/image syntax: [text](url) → text, ![alt](url) → alt
+    text = _re.sub(r'!?\[([^\]]*)\]\([^)]*\)', r'\1', text)
+    # Remove remaining bare brackets and parens from markdown artifacts
+    text = _re.sub(r'[\[\]()]', '', text)
+    # Remove bold/italic markers: **, *, __, _
+    text = _re.sub(r'\*{1,2}|_{1,2}', '', text)
+    # Remove inline code and code blocks: ` and ```
+    text = _re.sub(r'`+', '', text)
+    # Remove remaining stray ! characters used in markdown
+    text = text.replace('!', '')
+    return text
+
+
 def send_text(chat_id, text: str, **kwargs) -> None:
+    text = _escape_telegram(text)
     if len(text) > 4000:
         text = text[:4000] + "\n...(truncated)"
     tg_api("sendMessage", {"chat_id": chat_id, "text": text, **kwargs})
