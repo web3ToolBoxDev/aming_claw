@@ -474,16 +474,25 @@ def process_task(path: Path) -> None:
             # v6: Save result, move to results, trigger next step
             result_path = move_task(processing, "results")
             save_json(result_path, result)
-            _registry_complete(task, "succeeded")
+            exec_status = "succeeded" if result.get("status") in ("completed", "succeeded") else "failed"
+            _registry_complete(task, exec_status)
 
-            # Auto-trigger coordinator eval for dev/test tasks
-            if task.get("type") in ("dev_task", "test_task"):
-                try:
+            # Auto-trigger chain per task type
+            task_type = task.get("type", "")
+            try:
+                if task_type == "dev_task":
                     _trigger_coordinator_eval(task, result)
-                except Exception as eval_err:
-                    print(f"[executor] coordinator eval trigger failed: {eval_err}")
-                    if chat_id:
-                        _gateway_notify(chat_id, f"Eval 触发失败: {str(eval_err)[:200]}")
+                elif task_type == "test_task" and exec_status == "succeeded":
+                    from task_orchestrator import TaskOrchestrator
+                    TaskOrchestrator().handle_test_complete(
+                        task_id=task["task_id"], project_id=task.get("project_id", ""),
+                        token=task.get("_gov_token", ""), chat_id=chat_id,
+                        test_report=result.get("executor", {}))
+                # qa_task triggers merge inside process_qa_task_v6 directly
+            except Exception as chain_err:
+                print(f"[executor] chain trigger failed: {chain_err}")
+                if chat_id:
+                    _gateway_notify(chat_id, f"链路触发失败: {str(chain_err)[:200]}")
         else:
             # Legacy path: old finalize → pending_acceptance → send_text
             if task.get("action") in ("codex", "claude", "pipeline"):
