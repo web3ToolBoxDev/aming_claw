@@ -139,6 +139,14 @@ class DecisionValidator:
         errors = []
         action_type = action.get("type", "")
 
+        # Intercept memory delete attempts by dev role
+        if role == "dev" and action_type in ("memory_delete", "delete_memory"):
+            return LayerResult(
+                layer="policy",
+                passed=False,
+                errors=["权限拒绝：dev 角色不能直接删除记忆，请使用 propose_memory_cleanup 并等待 QA 审核"],
+            )
+
         from role_permissions import check_permission, check_verify_permission
         allowed, reason = check_permission(role, action_type)
         if not allowed:
