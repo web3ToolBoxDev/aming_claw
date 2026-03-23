@@ -723,7 +723,8 @@ def process_test_task_v6(task: Dict, processing: Path) -> Dict:
     token = task.get("_gov_token", os.getenv("GOV_COORDINATOR_TOKEN", ""))
     tlog = TaskLogger(task_id)
     tlog.log_event("test_task_start", {"project_id": project_id})
-    workspace = str(resolve_workspace())
+    # Use project root, not thread-local workspace (which may be search-workspace)
+    workspace = os.getenv("CODEX_WORKSPACE", str(Path(__file__).resolve().parent.parent))
 
     try:
         import re as _re
@@ -761,7 +762,7 @@ def process_qa_task_v6(task: Dict, processing: Path) -> Dict:
     token = task.get("_gov_token", os.getenv("GOV_COORDINATOR_TOKEN", ""))
     tlog = TaskLogger(task_id)
     tlog.log_event("qa_task_start", {"project_id": project_id})
-    workspace = str(resolve_workspace())
+    workspace = os.getenv("CODEX_WORKSPACE", str(Path(__file__).resolve().parent.parent))
 
     try:
         tlog.log_event("running_verify_loop")
