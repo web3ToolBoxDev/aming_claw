@@ -1,21 +1,31 @@
-"""Task Registry — SQLite-backed task lifecycle management.
+"""Task Registry — SQLite-backed task lifecycle management (v5).
 
-Replaces file-based task tracking with proper state machine:
-  created → queued → running → succeeded / failed / cancelled
+Dual-field state model:
+  execution_status: queued → claimed → running → succeeded/failed/timed_out/cancelled
+  notification_status: none → pending → sent → read
 
-Supports: retry, priority, assignment, result storage.
+Supports: retry, priority, assignment, fencing token, progress heartbeat.
 """
 
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
 
 log = logging.getLogger(__name__)
 
-VALID_STATUSES = {"created", "queued", "running", "succeeded", "failed", "cancelled"}
-TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
+EXECUTION_STATUSES = {
+    "queued", "claimed", "running", "waiting_human", "blocked",
+    "succeeded", "failed", "cancelled", "timed_out", "enqueue_failed",
+}
+TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
+
+NOTIFICATION_STATUSES = {"none", "pending", "sent", "read"}
+
+# Backward compat
+VALID_STATUSES = EXECUTION_STATUSES
 
 
 def _utc_iso() -> str:
@@ -25,6 +35,11 @@ def _utc_iso() -> str:
 
 def _new_task_id() -> str:
     return f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+
+
+def _utc_iso_after(seconds: int) -> str:
+    from datetime import datetime, timezone, timedelta
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def create_task(
@@ -42,13 +57,16 @@ def create_task(
     task_id = _new_task_id()
     now = _utc_iso()
 
+    notify = "pending" if (metadata or {}).get("chat_id") else "none"
     conn.execute(
         """INSERT INTO tasks
-           (task_id, project_id, status, type, prompt, related_nodes,
+           (task_id, project_id, status, execution_status, notification_status,
+            type, prompt, related_nodes,
             created_by, created_at, updated_at, priority, max_attempts, metadata_json)
-           VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, 'queued', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            task_id, project_id, task_type, prompt,
+            task_id, project_id, notify,
+            task_type, prompt,
             json.dumps(related_nodes or []),
             created_by, now, now, priority, max_attempts,
             json.dumps(metadata or {}),
@@ -65,33 +83,51 @@ def create_task(
     }
 
 
-def claim_task(conn: sqlite3.Connection, project_id: str, assigned_to: str) -> dict | None:
-    """Claim the next available task (FIFO by priority then creation time).
+def claim_task(
+    conn: sqlite3.Connection,
+    project_id: str,
+    assigned_to: str,
+    worker_id: str = "",
+) -> tuple[dict, str] | tuple[None, str]:
+    """Claim the next available task with fencing token.
 
-    Returns task dict or None if no tasks available.
+    Returns (task_dict, fence_token) or (None, "") if no tasks.
     """
     now = _utc_iso()
     row = conn.execute(
         """SELECT task_id, type, prompt, related_nodes, priority, attempt_count, max_attempts, metadata_json
            FROM tasks
-           WHERE project_id = ? AND status IN ('created', 'queued')
+           WHERE project_id = ? AND execution_status IN ('queued')
            ORDER BY priority DESC, created_at ASC
            LIMIT 1""",
         (project_id,),
     ).fetchone()
 
     if not row:
-        return None
+        return None, ""
 
     task_id = row["task_id"]
     attempt_num = row["attempt_count"] + 1
+    fence_token = f"fence-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    lease_expires = _utc_iso_after(300)  # 5 min lease
 
-    conn.execute(
-        """UPDATE tasks SET status = 'running', assigned_to = ?,
-           started_at = ?, updated_at = ?, attempt_count = ?
-           WHERE task_id = ?""",
-        (assigned_to, now, now, attempt_num, task_id),
+    # CAS update: only queued → claimed
+    result = conn.execute(
+        """UPDATE tasks SET status = 'claimed', execution_status = 'claimed',
+           assigned_to = ?, started_at = ?, updated_at = ?, attempt_count = ?,
+           metadata_json = json_set(COALESCE(metadata_json, '{}'),
+             '$.fence_token', ?,
+             '$.lease_owner', ?,
+             '$.lease_expires_at', ?,
+             '$.worker_pid', ?
+           )
+           WHERE task_id = ? AND execution_status IN ('queued')""",
+        (assigned_to, now, now, attempt_num,
+         fence_token, worker_id or assigned_to, lease_expires, str(os.getpid()),
+         task_id),
     )
+    if result.rowcount == 0:
+        return None, ""  # Already claimed by another worker
 
     conn.execute(
         """INSERT INTO task_attempts (task_id, attempt_num, status, started_at)
@@ -107,7 +143,7 @@ def claim_task(conn: sqlite3.Connection, project_id: str, assigned_to: str) -> d
         "priority": row["priority"],
         "attempt_num": attempt_num,
         "metadata": json.loads(row["metadata_json"] or "{}"),
-    }
+    }, fence_token
 
 
 def complete_task(
@@ -116,15 +152,16 @@ def complete_task(
     status: str = "succeeded",
     result: dict = None,
     error_message: str = "",
+    fence_token: str = "",
 ) -> dict:
-    """Mark a task as completed (succeeded/failed)."""
-    if status not in ("succeeded", "failed"):
+    """Mark a task as completed (succeeded/failed). Dual-field update."""
+    if status not in ("succeeded", "failed", "timed_out"):
         from .errors import ValidationError
         raise ValidationError(f"Invalid completion status: {status}")
 
     now = _utc_iso()
     row = conn.execute(
-        "SELECT attempt_count, max_attempts FROM tasks WHERE task_id = ?",
+        "SELECT attempt_count, max_attempts, notification_status, metadata_json FROM tasks WHERE task_id = ?",
         (task_id,),
     ).fetchone()
 
@@ -132,16 +169,34 @@ def complete_task(
         from .errors import GovernanceError
         raise GovernanceError(f"Task not found: {task_id}", 404)
 
-    # Update task
-    final_status = status
+    # Fence token check (if provided)
+    if fence_token:
+        stored_fence = json.loads(row["metadata_json"] or "{}").get("fence_token", "")
+        if stored_fence and stored_fence != fence_token:
+            from .errors import GovernanceError
+            raise GovernanceError("Fence token mismatch: task reclaimed by another worker", 409)
+
+    # Determine execution status
+    exec_status = status
     if status == "failed" and row["attempt_count"] < row["max_attempts"]:
-        final_status = "queued"  # Auto-retry
+        exec_status = "queued"  # Auto-retry
+
+    # Determine notification status
+    notify_status = row["notification_status"]
+    if exec_status in TERMINAL_STATUSES and notify_status == "none":
+        # Has chat_id → needs notification
+        meta = json.loads(row["metadata_json"] or "{}")
+        if meta.get("chat_id"):
+            notify_status = "pending"
 
     conn.execute(
-        """UPDATE tasks SET status = ?, completed_at = ?, updated_at = ?,
+        """UPDATE tasks SET status = ?, execution_status = ?,
+           notification_status = ?,
+           completed_at = ?, updated_at = ?,
            result_json = ?, error_message = ?
            WHERE task_id = ?""",
-        (final_status, now, now,
+        (exec_status, exec_status, notify_status,
+         now, now,
          json.dumps(result or {}, ensure_ascii=False), error_message,
          task_id),
     )
@@ -167,10 +222,79 @@ def cancel_task(conn: sqlite3.Connection, task_id: str) -> dict:
     """Cancel a task."""
     now = _utc_iso()
     conn.execute(
-        "UPDATE tasks SET status = 'cancelled', updated_at = ? WHERE task_id = ? AND status NOT IN ('succeeded', 'failed', 'cancelled')",
+        """UPDATE tasks SET status = 'cancelled', execution_status = 'cancelled',
+           updated_at = ?
+           WHERE task_id = ? AND execution_status NOT IN ('succeeded', 'failed', 'cancelled', 'timed_out')""",
         (now, task_id),
     )
     return {"task_id": task_id, "status": "cancelled"}
+
+
+def mark_notified(conn: sqlite3.Connection, task_id: str) -> dict:
+    """Mark a task's notification as sent."""
+    now = _utc_iso()
+    conn.execute(
+        "UPDATE tasks SET notification_status = 'sent', notified_at = ? WHERE task_id = ?",
+        (now, task_id),
+    )
+    return {"task_id": task_id, "notification_status": "sent"}
+
+
+def list_pending_notifications(conn: sqlite3.Connection, project_id: str) -> list[dict]:
+    """List tasks that need notification (execution done but user not notified)."""
+    rows = conn.execute(
+        """SELECT task_id, execution_status, result_json, error_message,
+                  completed_at, metadata_json
+           FROM tasks
+           WHERE project_id = ? AND notification_status = 'pending'
+             AND execution_status IN ('succeeded', 'failed', 'timed_out', 'cancelled')
+           ORDER BY completed_at ASC""",
+        (project_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_progress(conn: sqlite3.Connection, task_id: str,
+                    phase: str, percent: int, message: str) -> dict:
+    """Update task progress heartbeat."""
+    now = _utc_iso()
+    conn.execute(
+        """UPDATE tasks SET
+           execution_status = 'running',
+           updated_at = ?,
+           metadata_json = json_set(COALESCE(metadata_json, '{}'),
+             '$.progress_phase', ?,
+             '$.progress_percent', ?,
+             '$.progress_message', ?,
+             '$.progress_at', ?,
+             '$.lease_expires_at', ?
+           )
+           WHERE task_id = ? AND execution_status IN ('claimed', 'running')""",
+        (now, phase, percent, message, now, _utc_iso_after(300), task_id),
+    )
+    return {"task_id": task_id, "phase": phase, "percent": percent}
+
+
+def recover_stale_tasks(conn: sqlite3.Connection, project_id: str) -> dict:
+    """Recover tasks with expired leases — re-queue them."""
+    now = _utc_iso()
+    rows = conn.execute(
+        """SELECT task_id FROM tasks
+           WHERE project_id = ? AND execution_status IN ('claimed', 'running')
+             AND json_extract(metadata_json, '$.lease_expires_at') < ?""",
+        (project_id, now),
+    ).fetchall()
+
+    recovered = 0
+    for row in rows:
+        conn.execute(
+            "UPDATE tasks SET execution_status = 'queued', status = 'queued' WHERE task_id = ?",
+            (row["task_id"],),
+        )
+        recovered += 1
+        log.info("Recovered stale task: %s", row["task_id"])
+
+    return {"recovered": recovered}
 
 
 def list_tasks(

@@ -1,11 +1,16 @@
-"""Dual-token model: refresh_token (90d) + access_token (4h).
+"""Token service — v5 simplified model.
 
-refresh_token: Long-lived, held by human. Only used to get access_tokens.
-access_token: Short-lived, used for all API calls. Auto-renewable.
+DEPRECATED (v5): refresh/access dual-token model is no longer used.
+  - project_token (gov-xxx): never expires, held by Gateway
+  - agent_token (gov-xxx): 24h TTL, assigned by coordinator
 
-Security operations:
-  - revoke: Invalidate refresh_token (requires password)
-  - rotate: Issue new refresh_token, invalidate old one
+KEPT:
+  - revoke_refresh_token: still works for revoking project_token
+  - authenticate_access: still works (accepts both gov-* and gat-* for backward compat)
+
+DEPRECATED functions:
+  - issue_access_token: no longer needed, project_token used directly
+  - rotate_refresh_token: simplified to revoke + re-init
 """
 
 import hashlib

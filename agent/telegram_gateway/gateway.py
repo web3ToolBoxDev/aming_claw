@@ -86,6 +86,7 @@ def poll_updates(offset: int) -> dict:
 # --- Governance API helpers ---
 
 def gov_api(method: str, path: str, data: dict = None, token: str = None) -> dict:
+    """Call governance API. If no token provided, auto-uses the bound project_token from route table."""
     url = f"{GOVERNANCE_URL}{path}"
     headers = {"Content-Type": "application/json"}
     if token:
@@ -98,6 +99,20 @@ def gov_api(method: str, path: str, data: dict = None, token: str = None) -> dic
         return resp.json()
     except Exception as e:
         return {"error": str(e)}
+
+
+def gov_api_for_chat(chat_id: int, method: str, path: str, data: dict = None) -> dict:
+    """Call governance API using the project_token bound to this chat.
+
+    v5: Gateway acts as token proxy — CLI sessions don't need their own token.
+    """
+    route = get_route(chat_id)
+    if not route:
+        return {"error": "No project bound to this chat. Use /bind first."}
+    token = route.get("token", "")
+    if not token:
+        return {"error": "No token in route. Re-bind with /bind <token>."}
+    return gov_api(method, path, data=data, token=token)
 
 
 def verify_token(token: str) -> dict | None:
@@ -183,31 +198,85 @@ def ensure_consumer_group(r, stream_key: str, group: str = "coordinator-group") 
 
 
 def forward_to_coordinator(chat_id: int, text: str, route: dict, msg: dict = None) -> None:
-    """Push user message to coordinator's inbox via Redis Stream (XADD)."""
-    r = get_redis()
-    if not r:
-        send_text(chat_id, "Redis 不可用，无法转发消息")
-        return
+    """Forward message to Coordinator via task file → Executor → Claude CLI.
 
-    th = route.get("token_hash", "")
-    stream_key = f"chat:inbox:{th}"
+    v5.1: Gateway 写 coordinator_chat task 文件到 shared-volume。
+    宿主机 Executor 消费并启动 Claude CLI session。
+    Executor 完成后直接通过 Gateway API 回复用户。
+    """
+    project_id = route.get("project_id", "")
+    token = route.get("token", "")
 
-    # Ensure consumer group exists
-    ensure_consumer_group(r, stream_key)
+    # 1. Assemble context for Coordinator
+    context_parts = []
 
-    # XADD to stream
-    entry = {
-        "chat_id": str(chat_id),
-        "text": text,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "message_id": str((msg or {}).get("message_id", "")),
-    }
+    summary = gov_api("GET", f"/api/wf/{project_id}/summary", token=token)
+    total = summary.get("total_nodes", 0)
+    by_status = summary.get("by_status", {})
+    context_parts.append(f"项目: {project_id}, {total} 节点, 状态: {by_status}")
+
+    runtime = gov_api("GET", f"/api/runtime/{project_id}", token=token)
+    active = runtime.get("active_tasks", [])
+    queued = runtime.get("queued_tasks", [])
+    if active:
+        context_parts.append(f"运行中任务: {len(active)}")
+    if queued:
+        context_parts.append(f"排队任务: {len(queued)}")
+
+    ctx = gov_api("GET", f"/api/context/{project_id}/load", token=token)
+    ctx_data = ctx.get("context")
+    if ctx_data and ctx_data.get("current_focus"):
+        context_parts.append(f"当前焦点: {ctx_data['current_focus']}")
+
+    # Memories from dbservice
     try:
-        msg_id = r.xadd(stream_key, entry, maxlen=1000)
-        log.info("XADD %s → %s: %s", stream_key, msg_id, text[:50])
-    except Exception as e:
-        log.error("XADD failed: %s", e)
-        send_text(chat_id, "消息入队失败，请重试")
+        import requests as _req
+        dbservice_url = os.environ.get("DBSERVICE_URL", "http://dbservice:40002")
+        mem_resp = _req.post(f"{dbservice_url}/knowledge/search",
+            json={"query": text[:100], "scope": project_id, "limit": 3},
+            timeout=3)
+        memories = mem_resp.json().get("results", [])
+        if memories:
+            mem_texts = [m["doc"]["content"][:100] for m in memories[:3]]
+            context_parts.append(f"相关记忆: {'; '.join(mem_texts)}")
+    except Exception:
+        pass
+
+    context = "\n".join(context_parts)
+
+    # 2. Write coordinator_chat task file (atomic)
+    from datetime import datetime, timezone
+    import uuid as _uuid
+
+    task_id = f"coord-{int(datetime.now(timezone.utc).timestamp())}-{_uuid.uuid4().hex[:6]}"
+    task_data = {
+        "task_id": task_id,
+        "chat_id": chat_id,
+        "project_id": project_id,
+        "text": text,
+        "prompt": text,
+        "action": "coordinator_chat",
+        "type": "coordinator_chat",
+        "_gov_token": token,
+        "_coordinator_context": context,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    shared_vol = os.environ.get("SHARED_VOLUME_PATH", "/app/shared-volume")
+    pending_dir = os.path.join(shared_vol, "codex-tasks", "pending")
+    os.makedirs(pending_dir, exist_ok=True)
+
+    tmp_path = os.path.join(pending_dir, f"{task_id}.tmp.json")
+    final_path = os.path.join(pending_dir, f"{task_id}.json")
+
+    with open(tmp_path, "w") as f:
+        json.dump(task_data, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.rename(tmp_path, final_path)
+
+    send_text(chat_id, "正在处理...")
+    log.info("Coordinator task created: %s for chat %d", task_id, chat_id)
 
 
 # --- Inline Keyboard helpers ---
@@ -253,14 +322,24 @@ def list_all_routes() -> list[dict]:
 # --- Menu builders ---
 
 def build_main_menu(chat_id: int) -> tuple[str, dict]:
-    """Build main menu with current status."""
+    """Build main menu with runtime status."""
     route = get_route(chat_id)
     routes = list_all_routes()
 
     if route:
         project = route.get("project_id", "unknown")
-        th = route.get("token_hash", "")[:8]
-        status_line = f"当前: {project} (coordinator: {th}...)"
+        token = route.get("token", "")
+        # Get runtime status
+        runtime = gov_api("GET", f"/api/runtime/{project}", token=token)
+        summary = runtime.get("summary", {})
+        active = summary.get("active", 0)
+        queued = summary.get("queued", 0)
+        pending = summary.get("pending_notify", 0)
+        runtime_line = ""
+        if active: runtime_line += f" {active} 运行中"
+        if queued: runtime_line += f" {queued} 排队"
+        if pending: runtime_line += f" {pending} 未读"
+        status_line = f"当前: {project}" + (f" [{runtime_line.strip()}]" if runtime_line else " [空闲]")
     else:
         status_line = "当前: 未绑定任何 Coordinator"
 
@@ -273,22 +352,27 @@ def build_main_menu(chat_id: int) -> tuple[str, dict]:
 
     buttons = []
 
-    # Switch coordinator buttons
+    # Project buttons with status
     if routes:
         for r in routes:
             proj = r.get("project_id", "?")
             th = r.get("token_hash", "")[:8]
             is_active = route and route.get("token_hash") == r.get("token_hash")
-            label = f"{'>> ' if is_active else ''}{proj} ({th})"
+            # Get node stats for each project
+            proj_summary = gov_api("GET", f"/api/wf/{proj}/summary")
+            total = proj_summary.get("total_nodes", 0)
+            passed = proj_summary.get("by_status", {}).get("qa_pass", 0)
+            pct = int(passed / total * 100) if total else 0
+            prefix = ">> " if is_active else ""
+            label = f"{prefix}{proj} ({total}节点 {pct}%)"
             buttons.append([{"text": label, "callback_data": f"switch:{r.get('token_hash', '')}"}])
 
-    # Action buttons
     buttons.append([
         {"text": "项目状态", "callback_data": "action:status"},
-        {"text": "项目列表", "callback_data": "action:projects"},
+        {"text": "运行时", "callback_data": "action:runtime"},
     ])
     buttons.append([
-        {"text": "服务健康", "callback_data": "action:health"},
+        {"text": "项目列表", "callback_data": "action:projects"},
         {"text": "解绑", "callback_data": "action:unbind"},
     ])
 
@@ -369,6 +453,27 @@ def handle_callback_query(callback: dict) -> None:
         answer_callback(cb_id)
         return
 
+    if data == "action:runtime":
+        route = get_route(int(chat_id))
+        if route:
+            pid = route.get("project_id", "")
+            result = gov_api("GET", f"/api/runtime/{pid}", token=route.get("token", ""))
+            s = result.get("summary", {})
+            lines = [f"{pid} 运行时:"]
+            lines.append(f"  运行中: {s.get('active', 0)}")
+            lines.append(f"  排队中: {s.get('queued', 0)}")
+            lines.append(f"  待通知: {s.get('pending_notify', 0)}")
+            for t in result.get("active_tasks", [])[:3]:
+                meta = json.loads(t.get("metadata_json", "{}")) if isinstance(t.get("metadata_json"), str) else t.get("metadata_json", {})
+                phase = meta.get("progress_phase", "")
+                pct = meta.get("progress_percent", "")
+                lines.append(f"  > {t.get('task_id','')} {phase} {pct}%")
+            send_text(int(chat_id), "\n".join(lines))
+        else:
+            send_text(int(chat_id), "未绑定项目")
+        answer_callback(cb_id)
+        return
+
     if data == "action:unbind":
         if unbind_route(int(chat_id)):
             answer_callback(cb_id, "已解绑")
@@ -423,15 +528,34 @@ def handle_message(chat_id: int, text: str, msg: dict = None) -> None:
         if not session:
             send_text(chat_id, "Token 验证失败，请检查 token 是否正确")
             return
+
+        # Auto-save old project context before switching
+        old_route = get_route(chat_id)
+        if old_route and old_route.get("project_id"):
+            old_pid = old_route["project_id"]
+            old_token = old_route.get("token", "")
+            try:
+                gov_api("POST", f"/api/context/{old_pid}/save",
+                    data={"context": {"saved_reason": "project_switch", "switched_to": session.get("project_id", "")}},
+                    token=old_token)
+            except Exception:
+                pass
+
         project_id = session.get("project_id", "")
         role = session.get("role", "")
         bind_route(chat_id, token, project_id)
+
+        # Load new project context
+        ctx_result = gov_api("GET", f"/api/context/{project_id}/load", token=token)
+        ctx = ctx_result.get("context")
+        ctx_info = ""
+        if ctx and ctx.get("current_focus"):
+            ctx_info = f"\n  上次焦点: {ctx['current_focus']}"
+
         send_text(chat_id,
-            f"已绑定 Coordinator\n"
-            f"  项目: {project_id}\n"
-            f"  角色: {role}\n"
-            f"  Token: {token[:20]}...\n\n"
-            f"现在发送的消息将转发给 Coordinator。")
+            f"已绑定 {project_id}\n"
+            f"  角色: {role}{ctx_info}\n\n"
+            f"发送消息即可操作。")
         return
 
     if cmd == "/unbind":
@@ -475,19 +599,131 @@ def handle_message(chat_id: int, text: str, msg: dict = None) -> None:
         send_text(chat_id, "\n".join(lines))
         return
 
-    # Not a command → forward to coordinator if bound
+    # Not a command → forward to Coordinator
+    # v5.1: Gateway 不做决策，所有非命令消息全部转给 Coordinator
     if text.startswith("/"):
         send_text(chat_id, f"未知命令: {cmd}\n输入 /help 查看帮助")
         return
 
     route = get_route(chat_id)
     if not route:
-        # Show menu with hint
         text_body, kb = build_main_menu(chat_id)
         send_menu(chat_id, text_body, kb)
         return
 
+    # 所有非命令消息 → Coordinator 处理
     forward_to_coordinator(chat_id, text, route, msg)
+
+
+# --- Message Classifier (two-stage) ---
+
+import re
+
+def classify_message(text: str) -> str:
+    """Two-stage classifier: rules first, keyword fallback."""
+    # Stage 1: Rules
+    danger_kw = ["rollback", "delete", "revoke", "release", "deploy",
+                 "回滚", "删除", "发布", "撤销", "rm -rf"]
+    if any(kw in text.lower() for kw in danger_kw):
+        return "dangerous"
+
+    query_patterns = [
+        r"(状态|status|进度|progress)\s*(怎么样|是什么|查|看|？|\?)",
+        r"(多少|几个|有没有)\s*(节点|node|任务|task|pending)",
+        r"(列表|list|列出|查看|显示|show)",
+        r"什么情况|当前|目前|现在.*怎么",
+    ]
+    for p in query_patterns:
+        if re.search(p, text, re.I):
+            return "query"
+
+    # Stage 2: Keyword fallback
+    task_kw = ["帮我", "写", "改", "修", "创建", "实现", "优化", "添加",
+               "测试", "fix", "add", "create", "implement", "update", "build"]
+    if any(kw in text.lower() for kw in task_kw):
+        return "task"
+
+    return "chat"
+
+
+def handle_query(chat_id: int, text: str, route: dict) -> None:
+    """Handle query-type messages: call API and reply directly."""
+    project_id = route.get("project_id", "")
+    token = route.get("token", "")
+
+    # Try to detect what they're asking about
+    if any(kw in text for kw in ["运行", "任务", "task", "进度", "runtime"]):
+        result = gov_api("GET", f"/api/runtime/{project_id}", token=token)
+        summary = result.get("summary", {})
+        lines = [f"{project_id} 运行时:"]
+        lines.append(f"  运行中: {summary.get('active', 0)}")
+        lines.append(f"  排队中: {summary.get('queued', 0)}")
+        lines.append(f"  待通知: {summary.get('pending_notify', 0)}")
+        send_text(chat_id, "\n".join(lines))
+    else:
+        result = gov_api("GET", f"/api/wf/{project_id}/summary", token=token)
+        if "error" in result:
+            send_text(chat_id, f"Error: {result['error']}")
+            return
+        by_status = result.get("by_status", {})
+        total = result.get("total_nodes", 0)
+        lines = [f"{project_id} ({total} 节点):"]
+        for status, count in by_status.items():
+            lines.append(f"  {status}: {count}")
+        send_text(chat_id, "\n".join(lines))
+
+
+def handle_task_dispatch(chat_id: int, text: str, route: dict) -> None:
+    """Handle task-type messages: create task in registry + write task file atomically."""
+    import uuid as _uuid
+    project_id = route.get("project_id", "")
+    token = route.get("token", "")
+
+    # 1. Create task in registry (DB first — source of truth)
+    result = gov_api("POST", f"/api/task/{project_id}/create",
+        data={
+            "prompt": text,
+            "type": "dev_task",
+            "metadata": {"chat_id": chat_id, "source": "telegram"},
+        },
+        token=token,
+    )
+
+    if "error" in result:
+        send_text(chat_id, f"任务创建失败: {result['error']}")
+        return
+
+    task_id = result.get("task_id", f"task-{_uuid.uuid4().hex[:12]}")
+
+    # 2. Write task file atomically (.tmp → fsync → rename)
+    from datetime import datetime, timezone
+    task_data = {
+        "task_id": task_id,
+        "chat_id": chat_id,
+        "project_id": project_id,
+        "text": text,
+        "prompt": text,
+        "backend": "claude",
+        "action": "claude",
+        "type": "dev_task",
+        "_gov_token": token,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    shared_vol = os.environ.get("SHARED_VOLUME_PATH", "/app/shared-volume")
+    pending_dir = os.path.join(shared_vol, "codex-tasks", "pending")
+    os.makedirs(pending_dir, exist_ok=True)
+
+    tmp_path = os.path.join(pending_dir, f"{task_id}.tmp.json")
+    final_path = os.path.join(pending_dir, f"{task_id}.json")
+
+    with open(tmp_path, "w") as f:
+        json.dump(task_data, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.rename(tmp_path, final_path)
+
+    send_text(chat_id, f"已创建任务 {task_id[-8:]}\n等待执行...")
 
 
 # --- HTTP API for coordinators ---
@@ -604,6 +840,51 @@ class GatewayAPIHandler(BaseHTTPRequestHandler):
 
 
 # --- Event listener (governance events → Telegram) ---
+
+def check_pending_notifications() -> None:
+    """Check all projects for completed tasks needing notification."""
+    routes = list_all_routes()
+    seen_projects = set()
+    for route in routes:
+        pid = route.get("project_id", "")
+        if not pid or pid in seen_projects:
+            continue
+        seen_projects.add(pid)
+        token = route.get("token", "")
+
+        # Query pending notifications
+        result = gov_api("GET", f"/api/runtime/{pid}", token=token)
+        pending = result.get("pending_notifications", [])
+
+        for task in pending:
+            chat_id = None
+            meta = task.get("metadata_json", "{}")
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+            chat_id = meta.get("chat_id")
+
+            if not chat_id:
+                continue
+
+            # Build notification
+            exec_status = task.get("execution_status", "")
+            task_id = task.get("task_id", "")
+            if exec_status == "succeeded":
+                result_json = task.get("result_json", "{}")
+                send_text(int(chat_id), f"任务完成: {task_id[-8:]}\n{str(result_json)[:200]}")
+            elif exec_status == "failed":
+                err = task.get("error_message", "")
+                send_text(int(chat_id), f"任务失败: {task_id[-8:]}\n{err[:200]}")
+            else:
+                send_text(int(chat_id), f"任务 {task_id[-8:]} 状态: {exec_status}")
+
+            # Mark notified
+            gov_api("POST", f"/api/task/{pid}/notify",
+                data={"task_id": task_id}, token=token)
+
 
 def send_notification(text: str) -> None:
     if ADMIN_CHAT_ID:
@@ -728,6 +1009,12 @@ def run() -> None:
                 except Exception as e:
                     log.exception("Error handling message: %s", e)
                     send_text(chat_id, f"处理失败: {str(e)[:200]}")
+
+            # Check pending notifications (task completions)
+            try:
+                check_pending_notifications()
+            except Exception:
+                pass
 
         except KeyboardInterrupt:
             log.info("Stopped")

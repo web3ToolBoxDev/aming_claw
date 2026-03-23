@@ -154,6 +154,14 @@ class AcceptanceGraph:
         secondary = self._extract_list(text, [r'secondary:\s*\[(.*?)\]', r'secondary:\[(.*?)\]'])
         test_files = self._extract_list(text, [r'test:\s*\[(.*?)\]', r'test:\[(.*?)\]'])
 
+        # Artifacts (multi-line: "- type: xxx\n  section: yyy")
+        artifacts = self._parse_artifacts(text)
+
+        # Description
+        description = self._extract_field(text, [
+            r'description:\s*(.+?)(?:\n|$)',
+        ], "")
+
         # Propagation
         propagation = self._extract_field(text, [
             r'propagation:\s*(\w+)', r'propagation:(\w+)',
@@ -192,6 +200,8 @@ class AcceptanceGraph:
         # Store parsed statuses for init_node_states to read
         node_def._parsed_verify_status = parsed_vs
         node_def._parsed_build_status = parsed_bs
+        node_def._artifacts = artifacts
+        node_def._description = description or ""
         return node_def
 
     def _extract_field(self, text: str, patterns: list[str], default=None) -> str | None:
@@ -200,6 +210,43 @@ class AcceptanceGraph:
             if m:
                 return m.group(1)
         return default
+
+    def _parse_artifacts(self, text: str) -> list[dict]:
+        """Parse artifacts block from node text.
+
+        Format:
+          artifacts:
+            - type: api_docs
+              section: coverage_check
+            - type: test_file
+        """
+        artifacts = []
+        in_artifacts = False
+        current = {}
+
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("artifacts:"):
+                in_artifacts = True
+                continue
+            if not in_artifacts:
+                continue
+            # End of artifacts block (next field or empty)
+            if stripped and not stripped.startswith("-") and not stripped.startswith("type:") and not stripped.startswith("section:") and not stripped.startswith("check:") and not stripped.startswith("required:"):
+                break
+
+            if stripped.startswith("- type:"):
+                if current:
+                    artifacts.append(current)
+                current = {"type": stripped.split(":", 1)[1].strip()}
+            elif ":" in stripped and current:
+                key, val = stripped.split(":", 1)
+                current[key.strip()] = val.strip()
+
+        if current:
+            artifacts.append(current)
+
+        return artifacts
 
     def _extract_list(self, text: str, patterns: list[str]) -> list[str]:
         for p in patterns:
@@ -224,6 +271,10 @@ class AcceptanceGraph:
             self.G.nodes[node_def.id]["parsed_verify_status"] = node_def._parsed_verify_status
         if hasattr(node_def, "_parsed_build_status"):
             self.G.nodes[node_def.id]["parsed_build_status"] = node_def._parsed_build_status
+        if hasattr(node_def, "_artifacts"):
+            self.G.nodes[node_def.id]["artifacts"] = node_def._artifacts
+        if hasattr(node_def, "_description"):
+            self.G.nodes[node_def.id]["description"] = node_def._description
 
         self.G.nodes[node_def.id]["_deps"] = []
         self.G.nodes[node_def.id]["_gates_raw"] = deps

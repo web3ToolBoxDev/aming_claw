@@ -25,7 +25,9 @@ from . import audit_service
 
 import os
 SESSION_TTL_HOURS = int(os.environ.get("GOVERNANCE_SESSION_TTL_HOURS", "24"))
-COORDINATOR_TTL_YEARS = 10  # effectively never expires
+# v5: project_token (coordinator) never expires — Gateway holds it as proxy
+# Agent tokens (dev/tester/qa) still expire after SESSION_TTL_HOURS
+COORDINATOR_TTL_YEARS = 100  # effectively never expires
 
 
 def _utc_iso() -> str:

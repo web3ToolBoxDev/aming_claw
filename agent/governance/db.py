@@ -18,7 +18,7 @@ if _agent_dir not in sys.path:
 from utils import tasks_root
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 -- Node runtime state
@@ -276,7 +276,24 @@ def _run_migrations(conn: sqlite3.Connection, from_version: int, to_version: int
         except sqlite3.OperationalError:
             pass
 
-    MIGRATIONS = {2: _migrate_v1_to_v2}
+    def _migrate_v2_to_v3(c):
+        """Add dual-field status model to tasks."""
+        for col, typedef in [
+            ("execution_status", "TEXT NOT NULL DEFAULT 'queued'"),
+            ("notification_status", "TEXT NOT NULL DEFAULT 'none'"),
+            ("notified_at", "TEXT"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE tasks ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass
+        # Sync execution_status from status for existing rows
+        try:
+            c.execute("UPDATE tasks SET execution_status = status WHERE execution_status = 'queued' AND status != 'queued'")
+        except sqlite3.OperationalError:
+            pass
+
+    MIGRATIONS = {2: _migrate_v1_to_v2, 3: _migrate_v2_to_v3}
     for version in range(from_version + 1, to_version + 1):
         if version in MIGRATIONS:
             MIGRATIONS[version](conn)

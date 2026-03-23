@@ -48,6 +48,8 @@ services:
       dockerfile: Dockerfile.governance
     expose:
       - "40007"
+    ports:
+      - "40007:40007"
     volumes:
       - governance-dev-data:/app/shared-volume/codex-tasks/state/governance
       - .:/workspace:ro
@@ -76,7 +78,7 @@ services:
     expose:
       - "40010"
     volumes:
-      - task-data:/app/shared-volume/codex-tasks
+      - ./shared-volume/codex-tasks:/app/shared-volume/codex-tasks
     env_file:
       - .env
     environment:
@@ -135,8 +137,6 @@ volumes:
   governance-dev-data:
     driver: local
   redis-data:
-    driver: local
-  task-data:
     driver: local
   memory-data:
     driver: local

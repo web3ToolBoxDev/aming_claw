@@ -316,7 +316,7 @@ def handle_list_sessions(ctx: RequestContext):
 
 @route("POST", "/api/token/refresh")
 def handle_token_refresh(ctx: RequestContext):
-    """Exchange refresh_token for short-lived access_token."""
+    """DEPRECATED (v5): Exchange refresh_token for access_token. Use project_token directly."""
     refresh_token = ctx.body.get("refresh_token", "")
     if not refresh_token:
         from .errors import ValidationError
@@ -371,7 +371,7 @@ def handle_token_revoke(ctx: RequestContext):
 
 @route("POST", "/api/token/rotate")
 def handle_token_rotate(ctx: RequestContext):
-    """Rotate: issue new refresh token, invalidate old."""
+    """DEPRECATED (v5): Use revoke + re-init instead."""
     refresh_token = ctx.body.get("refresh_token", "")
     if not refresh_token:
         from .errors import ValidationError
@@ -640,7 +640,56 @@ def handle_release_gate(ctx: RequestContext):
             conn, project_id, graph,
             scope=ctx.body.get("scope"),
             profile=ctx.body.get("profile"),
+            min_status=ctx.body.get("min_status", "qa_pass"),
         )
+    return result
+
+
+@route("POST", "/api/wf/{project_id}/artifacts-check")
+def handle_artifacts_check(ctx: RequestContext):
+    """Check artifacts for nodes before qa_pass."""
+    project_id = ctx.get_project_id()
+    node_ids = ctx.body.get("nodes", [])
+    if not node_ids:
+        from .errors import ValidationError
+        raise ValidationError('Missing "nodes" field.')
+
+    graph = project_service.load_project_graph(project_id)
+    from .artifacts import check_artifacts_for_qa_pass
+    return check_artifacts_for_qa_pass(node_ids, graph, project_id)
+
+
+@route("POST", "/api/wf/{project_id}/coverage-check")
+def handle_coverage_check(ctx: RequestContext):
+    """Check if changed files are covered by acceptance graph nodes. Records result for gatekeeper."""
+    project_id = ctx.get_project_id()
+    changed_files = ctx.body.get("files", [])
+    if not changed_files:
+        from .errors import ValidationError
+        raise ValidationError('Missing "files" field. Provide list of changed file paths.')
+
+    graph = project_service.load_project_graph(project_id)
+    from .coverage_check import check_feature_coverage
+    result = check_feature_coverage(graph, changed_files)
+
+    # Record result for gatekeeper
+    try:
+        from . import gatekeeper
+        with DBContext(project_id) as conn:
+            session = None
+            try:
+                session = ctx.require_auth(conn)
+            except Exception:
+                pass
+            gatekeeper.record_check(
+                conn, project_id, "coverage_check",
+                passed=result.get("pass", False),
+                result=result,
+                created_by=session.get("principal_id", "") if session else "",
+            )
+    except Exception:
+        pass  # Non-critical
+
     return result
 
 
@@ -840,6 +889,67 @@ def handle_task_list(ctx: RequestContext):
     return {"tasks": tasks, "count": len(tasks)}
 
 
+@route("GET", "/api/runtime/{project_id}")
+def handle_runtime(ctx: RequestContext):
+    """Runtime projection — read-only view from Task Registry. No state of its own."""
+    project_id = ctx.get_project_id()
+    from . import task_registry, session_context
+    with DBContext(project_id) as conn:
+        active = task_registry.list_tasks(conn, project_id, status="running")
+        queued = task_registry.list_tasks(conn, project_id, status="queued")
+        claimed = task_registry.list_tasks(conn, project_id, status="claimed")
+        pending_notify = task_registry.list_pending_notifications(conn, project_id)
+
+    context = session_context.load_snapshot(project_id)
+
+    return {
+        "project_id": project_id,
+        "active_tasks": active,
+        "queued_tasks": queued,
+        "claimed_tasks": claimed,
+        "pending_notifications": pending_notify,
+        "context": context,
+        "summary": {
+            "active": len(active),
+            "queued": len(queued),
+            "claimed": len(claimed),
+            "pending_notify": len(pending_notify),
+        },
+    }
+
+
+@route("POST", "/api/task/{project_id}/progress")
+def handle_task_progress(ctx: RequestContext):
+    """Update task progress heartbeat."""
+    project_id = ctx.get_project_id()
+    from . import task_registry
+    with DBContext(project_id) as conn:
+        return task_registry.update_progress(
+            conn, ctx.body.get("task_id", ""),
+            phase=ctx.body.get("phase", "running"),
+            percent=int(ctx.body.get("percent", 0)),
+            message=ctx.body.get("message", ""),
+        )
+
+
+@route("POST", "/api/task/{project_id}/notify")
+def handle_task_notify(ctx: RequestContext):
+    """Mark task notification as sent."""
+    project_id = ctx.get_project_id()
+    from . import task_registry
+    with DBContext(project_id) as conn:
+        return task_registry.mark_notified(conn, ctx.body.get("task_id", ""))
+
+
+@route("POST", "/api/task/{project_id}/recover")
+def handle_task_recover(ctx: RequestContext):
+    """Recover stale tasks with expired leases."""
+    project_id = ctx.get_project_id()
+    from . import task_registry
+    with DBContext(project_id) as conn:
+        return task_registry.recover_stale_tasks(conn, project_id)
+
+
 # --- Health ---
 
 @route("GET", "/api/health")
@@ -886,42 +996,111 @@ _DOCS = {
         "auth": "All API calls (except /api/init, /api/health, /api/project/list, /api/docs) require X-Gov-Token header.",
     },
     "quickstart": {
-        "title": "Coordinator Quickstart",
+        "title": "Coordinator Session Quickstart",
+        "base_url": "http://localhost:40000",
+        "prerequisites": "Human has already run init_project.py and has the coordinator refresh_token (gov-xxx).",
         "steps": [
             {
                 "step": 1,
-                "action": "Init project (human does this once)",
-                "method": "POST /api/init",
-                "body": {"project_id": "myProject", "password": "secret"},
-                "returns": "coordinator_token (save this!)",
+                "phase": "AUTH",
+                "action": "Exchange refresh_token for access_token (4h TTL)",
+                "method": "POST /api/token/refresh",
+                "body": {"refresh_token": "gov-xxx (from init_project.py)"},
+                "returns": "access_token (gat-xxx), expires_in_sec, session_id, project_id, role",
+                "note": "Use access_token for all subsequent API calls. Auto-renew before expiry.",
             },
             {
                 "step": 2,
-                "action": "Import acceptance graph",
-                "method": "POST /api/wf/{project_id}/import-graph",
-                "headers": {"X-Gov-Token": "gov-xxx"},
-                "body": {"markdown": "# Acceptance Graph\\n## L0 Foundation\\n- L0.1 ..."},
+                "phase": "LIFECYCLE",
+                "action": "Register agent and get a lease",
+                "method": "POST /api/agent/register",
+                "headers": {"X-Gov-Token": "gat-xxx (access_token)"},
+                "body": {"project_id": "amingClaw", "expected_duration_sec": 3600},
+                "returns": "lease_id, heartbeat_interval_sec (120s)",
+                "note": "Heartbeat every 2 min to renew lease. Lease expires in 5 min without heartbeat.",
             },
             {
                 "step": 3,
-                "action": "Bind to Telegram (for message relay)",
-                "method": "POST /gateway/bind",
-                "body": {"token": "gov-xxx", "chat_id": 123456, "project_id": "myProject"},
+                "phase": "CONTEXT",
+                "action": "Load previous session context (if any)",
+                "method": "GET /api/context/{project_id}/load",
+                "headers": {"X-Gov-Token": "gat-xxx"},
+                "returns": "{context: {...}, exists: true/false}",
+                "note": "Contains current_focus, active_nodes, pending_tasks, recent_messages from last session.",
             },
             {
                 "step": 4,
-                "action": "Assign roles to other agents",
-                "method": "POST /api/role/assign",
-                "headers": {"X-Gov-Token": "gov-xxx"},
-                "body": {"project_id": "myProject", "principal_id": "tester-001", "role": "tester"},
-                "returns": "agent_token for the tester",
+                "phase": "CONTEXT",
+                "action": "Assemble task-aware context from memory",
+                "method": "POST /api/context/{project_id}/assemble",
+                "headers": {"X-Gov-Token": "gat-xxx"},
+                "body": {"task_type": "dev_general", "token_budget": 5000},
+                "returns": "Prioritized memories (pitfalls, decisions, architecture) within token budget",
+                "note": "Task types: dev_general, telegram_handler, verify_node, code_review, release_check",
             },
             {
                 "step": 5,
-                "action": "Start working - verify nodes, check gates, release",
-                "see": "workflow_rules",
+                "phase": "TELEGRAM",
+                "action": "Bind to Telegram chat for message relay",
+                "method": "POST /gateway/bind",
+                "body": {"token": "gat-xxx", "chat_id": 7848961760, "project_id": "amingClaw"},
+                "note": "After binding, user messages in Telegram are pushed to Redis Stream chat:inbox:{hash}.",
+            },
+            {
+                "step": 6,
+                "phase": "TELEGRAM",
+                "action": "Consume messages from Redis Stream",
+                "code": "from telegram_gateway.chat_proxy import ChatProxy\nproxy = ChatProxy(token='gat-xxx', gateway_url='http://localhost:40000', redis_url='redis://localhost:40079/0')\nproxy.start(on_message=handler)  # background thread",
+                "note": "ChatProxy uses XREADGROUP+ACK. Unacked messages survive crashes.",
+            },
+            {
+                "step": 7,
+                "phase": "WORK",
+                "action": "Check project status",
+                "method": "GET /api/wf/{project_id}/summary",
+                "headers": {"X-Gov-Token": "gat-xxx"},
+                "returns": "{total_nodes, by_status: {pending, testing, t2_pass, qa_pass, ...}}",
+            },
+            {
+                "step": 8,
+                "phase": "WORK",
+                "action": "Verify nodes (tester role)",
+                "method": "POST /api/wf/{project_id}/verify-update",
+                "headers": {"X-Gov-Token": "tester-token"},
+                "body": {
+                    "nodes": ["L1.3"],
+                    "status": "t2_pass",
+                    "evidence": {"type": "test_report", "producer": "tester-001", "tool": "pytest", "summary": {"passed": 42, "failed": 0}},
+                },
+                "note": "Flow: pending->testing->t2_pass (tester), t2_pass->qa_pass (qa). Evidence required.",
+            },
+            {
+                "step": 9,
+                "phase": "WORK",
+                "action": "Reply to Telegram user",
+                "method": "POST /gateway/reply",
+                "body": {"token": "gat-xxx", "chat_id": 7848961760, "text": "Task completed"},
+                "note": "Or use proxy.reply('text') from ChatProxy.",
+            },
+            {
+                "step": 10,
+                "phase": "SAVE",
+                "action": "Save session context before exit",
+                "method": "POST /api/context/{project_id}/save",
+                "headers": {"X-Gov-Token": "gat-xxx"},
+                "body": {"context": {"current_focus": "...", "active_nodes": ["..."], "pending_tasks": ["..."], "recent_messages": []}},
+                "note": "Use expected_version for optimistic locking. Context persists to Redis (24h TTL) + SQLite.",
+            },
+            {
+                "step": 11,
+                "phase": "EXIT",
+                "action": "Deregister agent",
+                "method": "POST /api/agent/deregister",
+                "body": {"lease_id": "lease-xxx"},
+                "note": "Releases lease. Gateway detects offline, queues messages for next session.",
             },
         ],
+        "lifecycle_summary": "AUTH(token) -> LIFECYCLE(register) -> CONTEXT(load+assemble) -> TELEGRAM(bind+consume) -> WORK(verify+reply) -> SAVE(context) -> EXIT(deregister)",
     },
     "endpoints": {
         "title": "API Endpoints",
@@ -1029,15 +1208,14 @@ _DOCS = {
         ],
     },
     "telegram_integration": {
-        "title": "Telegram Gateway Integration",
-        "description": "The Gateway relays messages between Telegram users and Coordinators via Redis Pub/Sub.",
-        "architecture": "Telegram <-> Gateway (Docker) <-> Redis <-> Coordinator (host)",
-        "coordinator_setup": {
-            "step_1": "Import ChatProxy: from telegram_gateway.chat_proxy import ChatProxy",
-            "step_2": "Create proxy: proxy = ChatProxy(token='gov-xxx', gateway_url='http://localhost:40000', redis_url='redis://localhost:40079/0')",
-            "step_3": "Bind to chat: proxy.bind(chat_id=YOUR_CHAT_ID, project_id='myProject')",
-            "step_4_blocking": "proxy.listen(on_message=lambda msg: proxy.reply(process(msg['text'])))",
-            "step_4_background": "proxy.start(on_message=handler)  # non-blocking",
+        "title": "Telegram Gateway Integration (v5.1)",
+        "description": "Gateway 只做消息收发。非命令消息启动 Coordinator CLI session 处理。Coordinator 负责对话+决策+任务编排。",
+        "architecture": "Telegram <-> Gateway (Docker) -> Claude CLI session (Coordinator) -> Governance API",
+        "v5_1_change": "Gateway 不再分类 query/task/chat，不再直接创建 task。所有决策权归 Coordinator。",
+        "role_boundary": {
+            "gateway": "消息收发 + /command 处理。不做决策、不创建 task。",
+            "coordinator": "对话 + 决策 + 任务编排。不自己写代码。",
+            "dev_executor": "代码执行。不和用户对话。",
         },
         "gateway_api": {
             "POST /gateway/bind": "Bind coordinator token to chat_id. Body: {token, chat_id, project_id}",
@@ -1047,8 +1225,9 @@ _DOCS = {
             "GET /gateway/status": "List all active routes (bound coordinators).",
         },
         "message_flow": {
-            "user_to_coordinator": "User sends text in Telegram -> Gateway publishes to Redis chat:inbox:{token_hash} -> Coordinator receives via ChatProxy",
-            "coordinator_to_user": "Coordinator calls POST /gateway/reply -> Gateway calls Telegram sendMessage",
+            "user_to_coordinator": "User sends text -> Gateway launches Claude CLI session (Coordinator) with context -> Coordinator processes -> reply via Gateway",
+            "coordinator_to_user": "Coordinator stdout -> Gateway sends to Telegram",
+            "task_creation": "Only Coordinator can create tasks (POST /api/task/create). Gateway cannot.",
             "governance_events": "Governance publishes events to Redis gov:events:{project_id} -> Gateway formats and sends to admin chat",
         },
         "telegram_commands": {
@@ -1059,6 +1238,351 @@ _DOCS = {
             "/projects": "List all projects",
             "/health": "Service health check",
         },
+    },
+    "coverage_check": {
+        "title": "Feature Coverage Check (流程保障)",
+        "description": "Detect untracked code changes before release. Reverse impact analysis: checks if all changed files have corresponding acceptance graph nodes.",
+        "problem_solved": "Prevents features from being shipped without workflow tracking. Catches cases where developers implement code without first creating acceptance nodes.",
+        "api": {
+            "POST /api/wf/{project_id}/coverage-check": {
+                "description": "Check if changed files are covered by acceptance graph nodes.",
+                "headers": {"X-Gov-Token": "required"},
+                "body": {
+                    "files": ["agent/governance/outbox.py", "agent/new_feature.py"],
+                },
+                "returns": {
+                    "covered": [{"file": "agent/governance/outbox.py", "nodes": ["L5.2", "L7.2"]}],
+                    "uncovered": [{"file": "agent/new_feature.py", "suggestion": "Create a new node..."}],
+                    "coverage_pct": 50.0,
+                    "pass": False,
+                },
+            },
+        },
+        "integration_with_release_gate": {
+            "description": "Run coverage-check before release-gate. If pass=false, block release until all files have nodes.",
+            "recommended_flow": [
+                "1. git diff --name-only main..HEAD → get changed files",
+                "2. POST /api/wf/{pid}/coverage-check {files: [...]}",
+                "3. If pass=false → create missing nodes, verify them",
+                "4. POST /api/wf/{pid}/release-gate {profile: 'full'}",
+            ],
+        },
+        "gate_types": {
+            "L9.1 Feature Coverage Check": "Checks file→node mapping. Uncovered files → warning/block.",
+            "L9.2 Node-Before-Code Gate": "verify-update checks if evidence.changed_files are all covered by some node's primary/secondary. Enforces 'create node before writing code'.",
+            "L9.3 Artifacts Check": "qa_pass time checks if companion deliverables (api_docs, tests) are complete.",
+            "L9.5 Gatekeeper Coverage": "release-gate auto-checks latest coverage-check result. No run / stale / failed → block release.",
+        },
+    },
+    "gatekeeper": {
+        "title": "Gatekeeper (发布前置校验)",
+        "description": "Gatekeeper is a program (not an AI role) embedded in the governance service. It enforces pre-release checks at two levels: verify-update time and release-gate time.",
+        "check_points": {
+            "verify-update (前置拦截)": {
+                "when": "Any node transitions to t2_pass or qa_pass",
+                "what": "Checks that the node's declared primary files are all covered by graph nodes",
+                "blocks": "If primary files are uncovered → rejects verify-update with error message",
+                "module": "state_service._check_node_coverage → coverage_check.check_feature_coverage",
+            },
+            "release-gate (发布拦截)": {
+                "when": "POST /api/wf/{pid}/release-gate is called",
+                "what": "Checks that a coverage-check was run recently (within 1 hour) and passed",
+                "blocks": "If never run → 'Run coverage-check first'. If stale → 'Re-run'. If failed → 'Uncovered files'.",
+                "module": "gatekeeper.verify_pre_release → reads gatekeeper_checks table",
+            },
+        },
+        "api": {
+            "POST /api/wf/{project_id}/coverage-check": {
+                "description": "Run coverage check AND auto-record result for gatekeeper.",
+                "body": {"files": ["agent/governance/server.py"]},
+                "side_effect": "Result written to gatekeeper_checks table for release-gate to read.",
+            },
+            "POST /api/wf/{project_id}/artifacts-check": {
+                "description": "Check if nodes have required companion artifacts (docs, tests).",
+                "body": {"nodes": ["L9.3"]},
+            },
+            "POST /api/wf/{project_id}/release-gate": {
+                "description": "Release gate now includes gatekeeper check automatically.",
+                "gatekeeper_field": "Response includes 'gatekeeper': {pass, checks, missing, stale}",
+            },
+        },
+        "flow": [
+            "1. Developer changes code",
+            "2. POST /api/wf/{pid}/coverage-check {files: [changed files]}",
+            "3a. pass:true → gatekeeper records pass → can proceed to release",
+            "3b. pass:false → create missing nodes → re-run coverage-check",
+            "4. POST /api/wf/{pid}/release-gate → gatekeeper auto-checks latest coverage result",
+            "5. All pass → release approved",
+        ],
+        "storage": "gatekeeper_checks table in project SQLite DB. Each coverage-check auto-records.",
+        "config": {
+            "max_age_sec": "3600 (1 hour). Stale results require re-running coverage-check.",
+            "required_checks": ["coverage_check"],
+            "future_checks": ["security_scan", "dependency_audit", "performance_regression"],
+        },
+        "artifacts_auto_infer": {
+            "title": "L9.6 Artifacts 自动推断",
+            "description": "Nodes without explicit artifacts: declaration are auto-analyzed. If primary files contain @route → api_docs required. If test files declared → test_file required.",
+            "rules": [
+                "primary .py file has @route() → auto-require api_docs (section inferred from title)",
+                "node declares test:[] with files → auto-require test_file existence",
+                "declared artifacts take precedence over inferred",
+            ],
+            "module": "artifacts.infer_required_artifacts",
+        },
+        "deploy_coverage_check": {
+            "title": "L9.7 Deploy 前置 Coverage-Check",
+            "description": "deploy-governance.sh automatically runs coverage-check before building. Uncovered files block deployment.",
+            "usage": "GOV_COORDINATOR_TOKEN=gov-xxx ./deploy-governance.sh",
+            "bypass": "SKIP_COVERAGE_CHECK=1 ./deploy-governance.sh (not recommended)",
+            "limitation": "Only protects deploy-governance.sh path. docker compose up --build bypasses this check.",
+            "mitigation": "verify_loop.sh should be run after any deployment to catch violations.",
+        },
+        "verify_loop": {
+            "title": "Post-Verification Self-Check Script",
+            "description": "scripts/verify_loop.sh runs 7 checks after any verification. Catches process violations that individual checks miss.",
+            "usage": "bash scripts/verify_loop.sh <token> <project_id>",
+            "checks": [
+                "1. Node status — all qa_pass?",
+                "2. Coverage — all changed files have graph nodes?",
+                "3. Docs/Artifacts — nodes with @route have api_docs?",
+                "4. Memory — code changes have corresponding dbservice entries? (L9.8)",
+                "5. Docs update — API nodes have documentation sections?",
+                "6. Gatekeeper — release-gate passes?",
+            ],
+            "memory_check_rule": "If >5 code files changed but <5 memories → FAIL. If >10 changed but <10 memories → WARN. Forces developers to document decisions and pitfalls.",
+        },
+        "scheduled_task_management": {
+            "title": "L9.9 Scheduled Task 管理",
+            "description": "Task prompt 模板存在 scripts/task-templates/ 目录，受 git 跟踪和 coverage-check 保护。",
+            "template_location": "scripts/task-templates/telegram-handler.md",
+            "variables": "{PROJECT_ID}, {TOKEN}, {CHAT_ID}, {STREAM}, {GROUP}, {BASE}",
+            "key_fix": "消息必须用 XREADGROUP 消费 + XACK 确认，不能用 XRANGE（不跟踪消费进度）",
+        },
+        "human_intervention": {
+            "title": "人工介入流程",
+            "guide": "docs/human-intervention-guide.md",
+            "boundaries": {
+                "fully_automated": ["代码测试", "verify-update", "coverage-check", "记忆写入", "消息回复(非敏感)"],
+                "needs_human_confirm": ["新节点创建", "baseline 批量变更", "跨项目操作"],
+                "must_be_human": ["Token 管理", "发布确认", "rollback", "删除", "Scheduled Task 授权"],
+                "human_verification": ["Telegram 交互行为", "UI 变更", "安全功能"],
+            },
+            "trigger_keywords": ["紧急", "urgent", "人工", "manual", "rollback", "delete", "release", "deploy"],
+            "verification_flow": "AI 通知人类 → 人类测试 → 回复'验收通过/失败' → AI 提交 verify-update",
+        },
+    },
+    "token_model": {
+        "title": "Token Model (v5 简化版)",
+        "description": "消息驱动模式下简化 token：project_token 不过期，Gateway 代理认证。去掉了 refresh/access 双令牌。",
+        "tokens": {
+            "project_token (gov-xxx)": {
+                "holder": "Gateway / 人类",
+                "ttl": "不过期",
+                "scope": "项目 API 全权限 (coordinator 级别)",
+                "obtain": "POST /api/init {project_id, password}",
+            },
+            "agent_token (gov-xxx)": {
+                "holder": "dev/tester/qa 进程",
+                "ttl": "24h",
+                "scope": "受限 API (verify-update, heartbeat 等角色操作)",
+                "obtain": "POST /api/role/assign (coordinator 分配)",
+            },
+        },
+        "api": {
+            "POST /api/init": "创建项目 + 获取 project_token",
+            "POST /api/token/revoke": "人工撤销 project_token (需密码)",
+            "POST /api/role/assign": "coordinator 分配 agent_token",
+        },
+        "deprecated": [
+            "POST /api/token/refresh — 不再需要，project_token 不过期",
+            "POST /api/token/rotate — 简化为 revoke + 重新 init",
+            "access_token (gat-*) — 不再使用",
+        ],
+        "security": [
+            "init 密码保护（重置 token 需要密码）",
+            "revoke 能力保留（人工可撤销）",
+            "网络隔离（token 只在 localhost / Docker 内网）",
+            "Gateway 代理认证（CLI session 不直接持有 token）",
+            "agent_token 仍有 24h TTL（独立进程权限有时间限制）",
+        ],
+    },
+    "agent_lifecycle": {
+        "title": "Agent Lifecycle (租约管理)",
+        "description": "Register/heartbeat/deregister agents with lease-based lifecycle. Orphan detection for stale agents.",
+        "api": {
+            "POST /api/agent/register": {
+                "description": "Register an agent, get a lease.",
+                "headers": {"X-Gov-Token": "required"},
+                "body": {"project_id": "amingClaw", "expected_duration_sec": 3600},
+                "returns": {"lease_id": "lease-xxx", "heartbeat_interval_sec": 120, "lease_ttl_sec": 600},
+            },
+            "POST /api/agent/heartbeat": {
+                "description": "Renew lease. Call every 2 minutes.",
+                "body": {"lease_id": "lease-xxx", "status": "idle|busy|processing", "worker_pid": 12345},
+                "returns": {"ok": True, "lease_renewed_until": "..."},
+            },
+            "POST /api/agent/deregister": {
+                "description": "Release lease on exit.",
+                "body": {"lease_id": "lease-xxx"},
+            },
+            "GET /api/agent/orphans": {
+                "description": "List agents with expired leases.",
+                "query": "project_id=amingClaw (optional)",
+                "returns": {"orphans": [{"session_id": "...", "principal_id": "...", "worker_pid": 12345, "reason": "no_active_lease"}]},
+            },
+            "POST /api/agent/cleanup": {
+                "description": "Coordinator cleans up orphaned agents.",
+                "headers": {"X-Gov-Token": "coordinator token"},
+                "body": {"project_id": "amingClaw"},
+            },
+        },
+        "lease_mechanism": "Agent registers → gets lease (5min TTL in Redis). Heartbeat every 2min renews. No heartbeat for 5min → lease expires → agent marked orphan. Gateway checks lease before routing messages.",
+    },
+    "session_context": {
+        "title": "Session Context (跨会话状态)",
+        "description": "Persist coordinator working state across sessions. Snapshot + append log with optimistic locking.",
+        "api": {
+            "POST /api/context/{project_id}/save": {
+                "description": "Save session context snapshot.",
+                "body": {
+                    "context": {"current_focus": "...", "active_nodes": ["L1.3"], "pending_tasks": ["..."], "chat_id": 123, "recent_messages": []},
+                    "expected_version": 5,
+                },
+                "returns": {"ok": True, "version": 6},
+                "note": "expected_version enables optimistic locking. Omit for unconditional save.",
+            },
+            "GET /api/context/{project_id}/load": {
+                "description": "Load latest session context.",
+                "returns": {"context": {"...": "..."}, "exists": True},
+            },
+            "POST /api/context/{project_id}/log": {
+                "description": "Append entry to session log.",
+                "body": {"type": "decision|msg_in|msg_out|action", "content": {"text": "..."}},
+            },
+            "GET /api/context/{project_id}/log": {
+                "description": "Read session log entries.",
+                "query": "limit=50",
+            },
+            "POST /api/context/{project_id}/assemble": {
+                "description": "Assemble task-aware context from dbservice memory.",
+                "body": {"task_type": "dev_general|telegram_handler|verify_node|code_review|release_check", "token_budget": 5000},
+            },
+            "POST /api/context/{project_id}/archive": {
+                "description": "Archive valuable content to long-term memory, clear expired context.",
+            },
+        },
+        "storage": "Redis (24h TTL) + SQLite (durable fallback). Auto-archived by OutboxWorker after 24h inactivity.",
+    },
+    "task_registry": {
+        "title": "Task Registry (任务管理)",
+        "description": "SQLite-backed task lifecycle with dual-field status: execution_status (queued/claimed/running/succeeded/failed/cancelled/timed_out) + notification_status (none/pending/notified).",
+        "api": {
+            "POST /api/task/{project_id}/create": {
+                "description": "Create a new task. DB is source of truth, task file is secondary.",
+                "headers": {"X-Gov-Token": "required"},
+                "body": {"prompt": "...", "type": "task", "related_nodes": ["L1.3"], "priority": 1, "max_attempts": 3},
+                "returns": {"task_id": "task-xxx", "status": "created"},
+            },
+            "POST /api/task/{project_id}/claim": {
+                "description": "Claim next available task (FIFO by priority). Sets worker_id and lease_expires_at.",
+                "body": {"task_id": "task-xxx", "worker_id": "executor-hostname"},
+                "returns": {"task": {"task_id": "...", "prompt": "...", "attempt_num": 1}},
+            },
+            "POST /api/task/{project_id}/complete": {
+                "description": "Mark task completed. Sets execution_status and notification_status=pending.",
+                "body": {"task_id": "task-xxx", "execution_status": "succeeded|failed", "error_message": ""},
+                "note": "Failed tasks auto-retry if attempt_count < max_attempts.",
+            },
+            "POST /api/task/{project_id}/notify": {
+                "description": "Mark task as notified (user has been informed).",
+                "body": {"task_id": "task-xxx"},
+            },
+            "GET /api/task/{project_id}/list": {
+                "description": "List tasks.",
+                "query": "status=running&limit=50",
+            },
+        },
+    },
+    "executor": {
+        "title": "Executor (宿主机任务执行器)",
+        "description": "常驻进程监听 pending/ 目录，claim 并执行 Claude/Codex CLI 任务。集成 Task Registry + Redis 通知。",
+        "flow": {
+            "1_pick": "scan pending/*.json (skip .tmp.json) → oldest first",
+            "2_claim": "move to processing/ + Task Registry claim (DB insert queued→claimed→running)",
+            "3_execute": "run_claude / run_codex / run_pipeline",
+            "4_complete": "Task Registry complete (succeeded/failed) + Redis publish task:completed",
+            "5_notify": "Gateway polls pending notifications → sends Telegram",
+        },
+        "features": {
+            "atomic_write": "Gateway writes .tmp.json → fsync → rename to .json",
+            "startup_recovery": "Scans processing/ for stale tasks (>5min), re-queues them",
+            "heartbeat": "Background thread updates heartbeat_at every 30s",
+            "tool_policy": "Commands checked against auto_allow/needs_approval/always_deny lists",
+        },
+    },
+    "tool_policy": {
+        "title": "Tool Policy (命令安全策略)",
+        "description": "Executor 执行命令前检查安全策略。三级分类。",
+        "levels": {
+            "auto_allow": "git diff, pytest, npm test 等只读/测试命令 → 自动执行",
+            "needs_approval": "git push, docker compose down, npm publish → 需要人工确认",
+            "always_deny": "rm -rf /, shutdown, reboot → 永远拒绝",
+        },
+        "note": "当前为字符串匹配，后续升级为结构化命令能力模型。",
+    },
+    "deployment": {
+        "title": "Deployment (部署流程)",
+        "description": "开发→生产环境切换的自动化检测和部署流程。",
+        "scripts": {
+            "scripts/startup.sh": "一键启动所有服务（Docker + domain pack + executor）",
+            "scripts/pre-deploy-check.sh": "部署前检测（节点状态/coverage/docs/memory/gatekeeper/staging/config/gateway）",
+            "deploy-governance.sh": "零停机部署（自动调 pre-deploy-check → build → staging verify → swap）",
+        },
+        "checks": {
+            "node_status": "所有节点 qa_pass",
+            "coverage": "所有变更文件有对应节点",
+            "docs": "API 文档 >= 10 sections",
+            "memory": "dbservice 记忆 >= 5 entries",
+            "gatekeeper": "release-gate PASS",
+            "config_consistency": "dev/prod 环境变量一致",
+            "staging": "staging 容器 health + smoke test",
+            "gateway_channel": "Telegram 消息通道可达",
+        },
+        "usage": "GOV_COORDINATOR_TOKEN=gov-xxx ./deploy-governance.sh",
+    },
+    "executor_api": {
+        "title": "Executor API (Session 介入接口)",
+        "description": "宿主机 Executor 内嵌 HTTP API (:40100)。Claude Code session 通过 curl 直接监控、介入、调试。",
+        "port": 40100,
+        "endpoints": {
+            "monitoring": {
+                "GET /health": "API 健康检查",
+                "GET /status": "整体状态 (pending/processing/active sessions)",
+                "GET /sessions": "活跃 AI 进程列表",
+                "GET /tasks": "任务列表 (支持 project_id, status 过滤)",
+                "GET /task/{id}": "单任务详情 (含 evidence, validator 日志)",
+                "GET /trace/{id}": "链路追踪详情",
+            },
+            "intervention": {
+                "POST /task/{id}/pause": "暂停运行中的任务",
+                "POST /task/{id}/cancel": "取消任务 (终止 AI 进程)",
+                "POST /task/{id}/retry": "重试失败的任务 (移回 pending)",
+                "POST /cleanup-orphans": "清理僵尸进程和卡住的任务",
+            },
+            "direct_chat": {
+                "POST /coordinator/chat": "直接启动 Coordinator session (绕过 Telegram)",
+                "body": {"message": "...", "project_id": "amingClaw", "chat_id": 0},
+                "note": "同步等待 AI 完成后返回，最多 120s",
+            },
+            "debugging": {
+                "GET /validator/last-result": "最近一次校验结果 (层级/通过/拒绝详情)",
+                "GET /context/{project_id}": "当前上下文组装结果",
+                "GET /ai-session/{id}/output": "AI 原始输出 (stdout/stderr/exit_code)",
+            },
+        },
+        "access": "仅宿主机 localhost:40100 可访问，不经过 nginx，不需要 token",
+        "guide": "详见 docs/executor-api-guide.md",
     },
 }
 
@@ -1105,6 +1629,14 @@ def main():
         print("EventBus: Redis Pub/Sub bridge enabled")
     else:
         print("EventBus: Redis unavailable, in-process only")
+
+    # Start doc generator listener
+    try:
+        from .doc_generator import setup_listener
+        setup_listener()
+        print("DocGenerator: listening for node.created events")
+    except Exception as e:
+        print(f"DocGenerator: failed to start ({e})")
 
     # Start outbox worker for reliable event delivery
     try:

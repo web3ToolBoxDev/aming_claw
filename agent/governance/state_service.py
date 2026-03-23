@@ -25,6 +25,30 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _check_node_coverage(node_id: str, graph, evidence: Evidence) -> None:
+    """Gatekeeper: check that the node's primary files are all covered in the graph.
+
+    If the node has primary files, verify they map back to at least this node.
+    This catches the case where a file was added to a node's primary list
+    but the node itself wasn't properly created/tracked.
+    """
+    node_data = graph.get_node(node_id) if graph else {}
+    primary = node_data.get("primary", [])
+    if not primary:
+        return  # No files to check
+
+    from .coverage_check import check_feature_coverage
+    result = check_feature_coverage(graph, primary)
+
+    uncovered = result.get("uncovered", [])
+    if uncovered:
+        files = [u["file"] for u in uncovered]
+        raise ValidationError(
+            f"Gatekeeper: node {node_id} declares primary files that are not tracked "
+            f"by any graph node: {files}. Fix the acceptance graph first."
+        )
+
+
 def init_node_states(conn: sqlite3.Connection, project_id: str, graph, sync_status: bool = True) -> int:
     """Initialize node_state rows from graph.
 
@@ -240,6 +264,33 @@ def verify_update(
         if gates and target in (VerifyStatus.T2_PASS, VerifyStatus.QA_PASS):
             check_gates_or_raise(node_id, gates, _get_status_fn(conn, project_id))
 
+        # 3.2 Gatekeeper: coverage check (t2_pass and qa_pass)
+        if target in (VerifyStatus.T2_PASS, VerifyStatus.QA_PASS):
+            try:
+                _check_node_coverage(node_id, graph, evidence)
+            except ValidationError:
+                raise
+            except Exception:
+                pass  # Non-critical if checker itself fails
+
+        # 3.5 Artifacts check (only for qa_pass)
+        if target == VerifyStatus.QA_PASS:
+            try:
+                from .artifacts import check_node_artifacts
+                art_result = check_node_artifacts(node_id, graph, project_id)
+                if not art_result["pass"]:
+                    missing = art_result.get("missing", [])
+                    reasons = [m.get("reason", "") for m in missing]
+                    raise ValidationError(
+                        f"Artifacts check failed for {node_id}: {'; '.join(reasons)}"
+                    )
+            except ImportError:
+                pass  # artifacts module not available, skip
+            except ValidationError:
+                raise
+            except Exception:
+                pass  # Non-critical: don't block if checker itself fails
+
         # 4. Mutate state
         new_version = current["version"] + 1
         conn.execute(
@@ -379,6 +430,30 @@ def release_gate(
                 "required": min_status,
             })
 
+    # Gatekeeper pre-release checks
+    gatekeeper_result = None
+    try:
+        from . import gatekeeper
+        gatekeeper_result = gatekeeper.verify_pre_release(
+            conn, project_id,
+            max_age_sec=3600,
+        )
+        if not gatekeeper_result["pass"]:
+            gk_reasons = []
+            for ct, detail in gatekeeper_result.get("checks", {}).items():
+                if not detail.get("pass"):
+                    gk_reasons.append(f"{ct}: {detail.get('reason', 'failed')}")
+            for ct in gatekeeper_result.get("missing", []):
+                gk_reasons.append(f"{ct}: never run — call POST /api/wf/{project_id}/coverage-check first")
+            blockers.append({
+                "node_id": "_gatekeeper",
+                "status": "blocked",
+                "required": "all gatekeeper checks pass",
+                "details": gk_reasons,
+            })
+    except Exception:
+        pass  # Gatekeeper not available, skip
+
     result = {
         "release": len(blockers) == 0,
         "profile": profile,
@@ -387,6 +462,7 @@ def release_gate(
         "total_nodes": len(all_nodes),
         "summary": summary,
         "available_profiles": list(RELEASE_PROFILES.keys()),
+        "gatekeeper": gatekeeper_result,
     }
 
     if blockers:

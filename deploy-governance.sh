@@ -40,11 +40,78 @@ err() { echo -e "${RED}[deploy]${NC} $1"; }
 # --- Pre-flight checks ---
 log "Pre-flight checks..."
 
+NGINX_PORT=40000
+GOV_TOKEN="${GOV_COORDINATOR_TOKEN:-}"
+SKIP_COVERAGE="${SKIP_COVERAGE_CHECK:-}"
+SKIP_PRE_DEPLOY="${SKIP_PRE_DEPLOY_CHECK:-}"
+
 # Verify current service is running
 if curl -sf http://localhost:${PROD_PORT}/api/health > /dev/null 2>&1; then
     log "Current production service healthy on :${PROD_PORT}"
 else
     warn "Production service not running on :${PROD_PORT}, doing fresh deploy"
+fi
+
+# --- Step 0: Full pre-deploy check ---
+if [ "$1" = "--rollback" ]; then
+    log "Rollback mode, skipping pre-deploy check"
+elif [ -n "$SKIP_PRE_DEPLOY" ]; then
+    warn "SKIP_PRE_DEPLOY_CHECK set, skipping (not recommended)"
+elif [ -z "$GOV_TOKEN" ]; then
+    warn "GOV_COORDINATOR_TOKEN not set, skipping pre-deploy check"
+else
+    log "Running full pre-deploy check..."
+    if bash scripts/pre-deploy-check.sh --skip-staging; then
+        log "Pre-deploy check PASSED ✅"
+    else
+        err "Pre-deploy check FAILED ❌"
+        err "Fix issues above before deploying."
+        err "Or set SKIP_PRE_DEPLOY_CHECK=1 to bypass (not recommended)."
+        exit 1
+    fi
+fi
+
+# --- Step 0.5: Coverage check (gatekeeper) ---
+if [ "$1" = "--rollback" ]; then
+    log "Rollback mode, skipping coverage check"
+elif [ -n "$SKIP_COVERAGE" ]; then
+    warn "SKIP_COVERAGE_CHECK set, skipping (not recommended)"
+elif [ -z "$GOV_TOKEN" ]; then
+    warn "GOV_COORDINATOR_TOKEN not set, skipping coverage check"
+    warn "Set it to enable pre-deploy coverage validation"
+else
+    log "Running pre-deploy coverage check..."
+    # Get changed files vs main branch
+    CHANGED_FILES=$(git diff --name-only HEAD~1 2>/dev/null | tr '\n' '","' | sed 's/^/["/' | sed 's/,"$/]/')
+    if [ "$CHANGED_FILES" = '[""]' ] || [ "$CHANGED_FILES" = '["' ]; then
+        CHANGED_FILES='[]'
+    fi
+
+    if [ "$CHANGED_FILES" != "[]" ]; then
+        COVERAGE_RESULT=$(curl -sf -X POST "http://localhost:${NGINX_PORT}/api/wf/amingClaw/coverage-check" \
+            -H "Content-Type: application/json" \
+            -H "X-Gov-Token: ${GOV_TOKEN}" \
+            -d "{\"files\":${CHANGED_FILES}}" 2>/dev/null)
+
+        COVERAGE_PASS=$(echo "$COVERAGE_RESULT" | python -c "import sys,json;print(json.load(sys.stdin).get('pass',False))" 2>/dev/null)
+
+        if [ "$COVERAGE_PASS" = "True" ]; then
+            log "Coverage check passed ✅"
+        else
+            err "Coverage check FAILED ❌"
+            echo "$COVERAGE_RESULT" | python -c "
+import sys,json
+d=json.load(sys.stdin)
+for u in d.get('uncovered',[]):
+    print(f'  Uncovered: {u[\"file\"]} — {u.get(\"suggestion\",\"\")}')
+" 2>/dev/null
+            err "Create acceptance graph nodes for uncovered files before deploying."
+            err "Or set SKIP_COVERAGE_CHECK=1 to bypass (not recommended)."
+            exit 1
+        fi
+    else
+        log "No changed files detected, skipping coverage check"
+    fi
 fi
 
 # --- Step 1: Build new image ---

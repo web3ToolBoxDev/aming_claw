@@ -78,7 +78,11 @@ from task_accept import (
 
 def pick_pending_task() -> Optional[Path]:
     pending_dir = tasks_root() / "pending"
-    items = sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    # Only scan real .json files (not .tmp)
+    items = sorted(
+        (f for f in pending_dir.glob("*.json") if not f.name.endswith(".tmp.json")),
+        key=lambda p: p.stat().st_mtime,
+    )
     return items[0] if items else None
 
 
@@ -177,6 +181,37 @@ def _worker_id() -> str:
     return "executor-{}".format(socket.gethostname())
 
 
+# ── Tool Policy ────────────────────────────────────────────────────────────
+
+TOOL_POLICY = {
+    "auto_allow": [
+        "git diff", "git status", "git log", "git show",
+        "pytest", "python -m pytest", "npm test", "npm run test",
+        "python -m unittest", "ls", "cat", "head", "tail", "wc",
+    ],
+    "needs_approval": [
+        "git push", "git reset", "docker compose down",
+        "npm publish", "pip install", "npm install",
+    ],
+    "always_deny": [
+        "rm -rf /", "rm -rf ~", "format", "mkfs",
+        "shutdown", "reboot",
+    ],
+}
+
+
+def check_tool_policy(command: str) -> str:
+    """Check command against tool policy. Returns 'allow', 'approval', or 'deny'."""
+    cmd_lower = command.lower().strip()
+    for denied in TOOL_POLICY["always_deny"]:
+        if denied in cmd_lower:
+            return "deny"
+    for needs in TOOL_POLICY["needs_approval"]:
+        if needs in cmd_lower:
+            return "approval"
+    return "allow"
+
+
 def _handle_task_failure(task: Dict, processing: Path, chat_id: int, exc: Exception) -> str:
     """Shared error handler for task timeout and general exceptions.
 
@@ -230,6 +265,70 @@ def _handle_task_failure(task: Dict, processing: Path, chat_id: int, exc: Except
     return error_str
 
 
+def _gov_api(method: str, path: str, data: dict = None, token: str = None) -> dict:
+    """Call governance API. Non-blocking, returns {} on failure."""
+    import json as _json
+    gov_url = os.getenv("GOVERNANCE_URL", "http://localhost:40000")
+    url = f"{gov_url}{path}"
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Gov-Token"] = token
+    try:
+        if method == "GET":
+            resp = requests.get(url, headers=headers, timeout=5)
+        else:
+            resp = requests.post(url, headers=headers, data=_json.dumps(data or {}), timeout=5)
+        return resp.json()
+    except Exception:
+        return {}
+
+
+def _redis_notify(event: str, payload: dict) -> None:
+    """Publish task event to Redis. Fire-and-forget."""
+    try:
+        import redis
+        import json as _json
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:40079/0")
+        r = redis.Redis.from_url(redis_url, decode_responses=True, socket_timeout=2)
+        r.publish("task:events", _json.dumps({"event": event, "payload": payload}))
+    except Exception:
+        pass
+
+
+def _registry_claim(task: dict) -> bool:
+    """Claim task in Task Registry. Returns True if successful."""
+    project_id = task.get("project_id", "")
+    token = task.get("_gov_token", os.getenv("GOV_COORDINATOR_TOKEN", ""))
+    if not project_id or not token:
+        return True  # No registry configured, proceed anyway
+    result = _gov_api("POST", f"/api/task/{project_id}/claim",
+        data={"task_id": task["task_id"], "worker_id": _worker_id()},
+        token=token)
+    return result.get("error") is None
+
+
+def _registry_complete(task: dict, execution_status: str, error: str = "") -> None:
+    """Mark task complete in Task Registry."""
+    project_id = task.get("project_id", "")
+    token = task.get("_gov_token", os.getenv("GOV_COORDINATOR_TOKEN", ""))
+    if not project_id or not token:
+        return
+    _gov_api("POST", f"/api/task/{project_id}/complete",
+        data={
+            "task_id": task["task_id"],
+            "execution_status": execution_status,
+            "error_message": error[:500] if error else "",
+        },
+        token=token)
+    # Also notify via Redis
+    _redis_notify("task:completed", {
+        "task_id": task["task_id"],
+        "project_id": project_id,
+        "execution_status": execution_status,
+        "chat_id": task.get("chat_id"),
+    })
+
+
 def process_task(path: Path) -> None:
     task = load_json(path)
     task_id = str(task.get("task_id") or "")
@@ -253,6 +352,10 @@ def process_task(path: Path) -> None:
     task["attempt"] = int(task.get("attempt") or 0) + 1
     task.setdefault("action", get_agent_backend())
     save_json(processing, task)
+
+    # Claim in Task Registry (non-blocking)
+    _registry_claim(task)
+
     update_task_runtime(task, status="processing", stage="processing")
     mark_task_started(task, stage="processing")
 
@@ -293,8 +396,13 @@ def process_task(path: Path) -> None:
 
     try:
         append_task_event(task["task_id"], "executor_run_begin", {"action": task.get("action", "codex")})
-        if task.get("action") == "screenshot":
+        if task.get("action") == "coordinator_chat":
+            result = process_coordinator_chat(task, processing)
+        elif task.get("action") == "screenshot":
             result = process_screenshot(task, processing)
+        elif task.get("action") == "claude" and task.get("type") == "dev_task" and task.get("project_id"):
+            # v6: Dev task goes through v6 pipeline
+            result = process_dev_task_v6(task, processing)
         elif task.get("action") == "claude":
             result = process_claude(task, processing)
         elif task.get("action") == "pipeline":
@@ -337,10 +445,366 @@ def process_task(path: Path) -> None:
         )
 
         mark_task_completion_notified(task["task_id"])
+        # Registry: mark succeeded
+        _registry_complete(task, "succeeded")
+
+        # v6: Auto-trigger coordinator eval for dev/test tasks
+        if task.get("type") in ("dev_task", "test_task") and task.get("project_id"):
+            try:
+                _trigger_coordinator_eval(task, result)
+            except Exception as eval_err:
+                print(f"[executor] coordinator eval trigger failed: {eval_err}")
+
     except (subprocess.TimeoutExpired, Exception) as exc:
         error_msg = _handle_task_failure(task, processing, chat_id, exc)
+        # v6: Classify error for retry strategy
+        try:
+            from task_state_machine import classify_error, get_retry_strategy
+            category = classify_error(str(exc))
+            strategy = get_retry_strategy(category)
+            attempt = int(task.get("attempt", 1))
+            max_attempts = int(task.get("max_attempts", strategy.get("max_retries", 3)))
+            if category.value in ("retryable_model", "retryable_env") and attempt < max_attempts:
+                _registry_complete(task, "failed_retryable", error=str(exc)[:500])
+            else:
+                _registry_complete(task, "failed", error=str(exc)[:500])
+        except ImportError:
+            _registry_complete(task, "failed", error=str(exc)[:500])
     finally:
         _hb_stop.set()
+
+
+def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
+    """Process dev_task through v6 pipeline.
+
+    Flow:
+      1. Git branch: checkout -b dev/task-xxx
+      2. Evidence snapshot (before)
+      3. AILifecycleManager: start dev session
+      4. Evidence collect (after): git diff, test results
+      5. DecisionValidator: check dev output
+      6. Return result (eval triggered separately by _trigger_coordinator_eval)
+    """
+    task_id = task.get("task_id", "")
+    project_id = task.get("project_id", "")
+    prompt = task.get("prompt", "")
+    chat_id = int(task.get("chat_id", 0))
+    token = task.get("_gov_token", os.getenv("GOV_COORDINATOR_TOKEN", ""))
+    branch = task.get("_branch", "")
+
+    try:
+        from ai_lifecycle import AILifecycleManager
+        from evidence_collector import EvidenceCollector
+        from context_assembler import ContextAssembler
+        from ai_output_parser import parse_ai_output
+
+        ai_mgr = AILifecycleManager()
+        evidence = EvidenceCollector()
+        ctx_asm = ContextAssembler()
+
+        # 1. Git branch
+        workspace = str(resolve_workspace())
+        if not branch:
+            branch = f"dev/{task_id}"
+            try:
+                subprocess.run(["git", "checkout", "-b", branch],
+                    cwd=workspace, capture_output=True, timeout=10)
+                print(f"[executor-v6] created branch: {branch}")
+            except Exception as e:
+                print(f"[executor-v6] branch creation failed: {e}")
+                branch = ""
+
+        # 2. Before snapshot
+        before = evidence.collect_before_snapshot()
+
+        # 3. Assemble dev context
+        dev_context = ctx_asm.assemble(
+            project_id=project_id, chat_id=chat_id,
+            role="dev", prompt=prompt,
+        )
+
+        # 4. Start dev AI session
+        session = ai_mgr.create_session(
+            role="dev",
+            prompt=prompt,
+            context=dev_context,
+            project_id=project_id,
+            timeout_sec=300,
+            workspace=workspace,
+        )
+
+        raw = ai_mgr.wait_for_output(session.session_id)
+
+        if raw.get("status") != "completed":
+            raise RuntimeError(f"Dev AI failed: {raw.get('status')} {raw.get('stderr','')[:200]}")
+
+        # 5. Parse dev output
+        dev_output = parse_ai_output(raw.get("stdout", ""), role="dev")
+
+        # 6. Collect real evidence (independent, don't trust AI)
+        real_evidence = evidence.collect_after_dev(before)
+
+        # 7. Compare AI report vs real evidence
+        comparison = evidence.compare_with_ai_report(real_evidence, dev_output)
+        if comparison.get("has_discrepancies"):
+            print(f"[executor-v6] evidence discrepancy: {comparison['discrepancies']}")
+
+        # 8. Build result (use real evidence, not AI self-report)
+        result = {
+            **task,
+            "status": "completed",
+            "completed_at": utc_iso(),
+            "executor": {
+                "action": "dev_task_v6",
+                "branch": branch,
+                "changed_files": real_evidence.changed_files,
+                "new_files": real_evidence.new_files,
+                "test_passed": real_evidence.test_results.get("passed", False),
+                "diff_stat": real_evidence.diff_stat,
+                "ai_summary": dev_output.get("summary", ""),
+                "discrepancies": comparison.get("discrepancies", []),
+            },
+            "_git_checkpoint": before.get("commit", ""),
+        }
+        save_json(processing, result)
+
+        # 9. Notify user
+        if chat_id:
+            summary = dev_output.get("summary", "Dev 完成")
+            files = ", ".join(real_evidence.changed_files[:5])
+            test_ok = "✅" if real_evidence.test_results.get("passed") else "❌"
+            send_text(chat_id,
+                f"Dev 完成 ({branch})\n"
+                f"改动: {files}\n"
+                f"测试: {test_ok}\n"
+                f"摘要: {summary[:200]}")
+
+        return result
+
+    except ImportError as e:
+        # v6 modules not available, fallback to old process_claude
+        print(f"[executor-v6] fallback to old pipeline: {e}")
+        return process_claude(task, processing)
+    except Exception as e:
+        error_msg = str(e)[:500]
+        if chat_id:
+            send_text(chat_id, f"Dev v6 执行失败: {error_msg[:200]}")
+        result = {**task, "status": "failed", "error": error_msg, "completed_at": utc_iso()}
+        save_json(processing, result)
+        return result
+
+
+def _trigger_coordinator_eval(task: Dict, result: Dict) -> None:
+    """Auto-trigger coordinator eval after dev/test task completes.
+
+    v6: Executor code creates eval task. AI doesn't control this flow.
+    """
+    try:
+        from task_orchestrator import TaskOrchestrator
+        orchestrator = TaskOrchestrator()
+        orchestrator.handle_dev_complete(
+            task_id=task["task_id"],
+            project_id=task.get("project_id", ""),
+            token=task.get("_gov_token", os.getenv("GOV_COORDINATOR_TOKEN", "")),
+            chat_id=int(task.get("chat_id", 0)),
+            ai_report={
+                "summary": result.get("acceptance", {}).get("summary", ""),
+                "changed_files": result.get("executor", {}).get("git_changed_files", []),
+                "test_results": {},
+                "_before_snapshot": {"commit": task.get("_git_checkpoint", "HEAD~1")},
+            },
+        )
+    except ImportError:
+        # task_orchestrator not available yet, skip
+        print("[executor] task_orchestrator not available, skipping eval trigger")
+    except Exception as e:
+        print(f"[executor] coordinator eval error: {e}")
+
+
+def process_coordinator_chat(task: Dict, processing: Path) -> Dict:
+    """Process coordinator_chat via TaskOrchestrator (v6.2).
+
+    Routes through:
+      ContextAssembler (对话历史+记忆+状态) →
+      AILifecycleManager (启动 Claude CLI) →
+      DecisionValidator (4层校验) →
+      回复 + 保存对话历史
+    """
+    prompt_text = task.get("prompt", "")
+    project_id = task.get("project_id", "")
+    chat_id = int(task.get("chat_id", 0))
+    token = task.get("_gov_token", os.getenv("GOV_COORDINATOR_TOKEN", ""))
+
+    try:
+        from task_orchestrator import TaskOrchestrator
+        orchestrator = TaskOrchestrator()
+
+        # Use TaskOrchestrator — handles context, validation, reply, history
+        api_result = orchestrator.handle_user_message(
+            chat_id=chat_id,
+            text=prompt_text,
+            project_id=project_id,
+            token=token,
+        )
+
+        reply = api_result.get("reply", "处理完成")
+
+        # Send reply to Telegram via Gateway
+        if chat_id:
+            gov_url = os.getenv("GOVERNANCE_URL", "http://localhost:40000")
+            try:
+                import json as _json
+                requests.post(
+                    f"{gov_url}/gateway/reply",
+                    headers={"Content-Type": "application/json", "X-Gov-Token": token},
+                    data=_json.dumps({"chat_id": chat_id, "text": _escape_telegram(reply[:4000])}),
+                    timeout=10,
+                )
+            except Exception:
+                pass
+
+        result = {
+            **task,
+            "status": "completed",
+            "completed_at": utc_iso(),
+            "executor": {
+                "action": "coordinator_chat",
+                "reply": reply[:1000],
+                "actions_executed": api_result.get("actions_executed", 0),
+                "actions_rejected": api_result.get("actions_rejected", 0),
+            },
+        }
+        save_json(processing, result)
+        return result
+
+    except Exception as e:
+        error_msg = str(e)[:500]
+        if chat_id:
+            send_text(chat_id, f"Coordinator 处理失败: {error_msg[:200]}")
+        result = {**task, "status": "failed", "error": error_msg, "completed_at": utc_iso()}
+        save_json(processing, result)
+        return result
+
+
+def _escape_telegram(text: str) -> str:
+    """Escape MarkdownV2 special chars or strip markdown for plain text."""
+    # Simple approach: strip common markdown formatting for plain text
+    import re
+    # Remove **bold** → bold
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    # Remove `code` → code
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    # Remove _italic_ → italic
+    text = re.sub(r'_(.+?)_', r'\1', text)
+    return text
+
+
+def _recover_stale_tasks() -> int:
+    """Startup recovery: scan processing/ for stale tasks and re-queue or mark failed."""
+    processing_dir = tasks_root() / "processing"
+    if not processing_dir.exists():
+        return 0
+    recovered = 0
+    for f in processing_dir.glob("*.json"):
+        try:
+            task = load_json(f)
+            task_id = task.get("task_id", "")
+            # Check if stale (no heartbeat for > 5 minutes)
+            import datetime
+            started = task.get("started_at", "")
+            if started:
+                try:
+                    ts = datetime.datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ")
+                    age_min = (datetime.datetime.utcnow() - ts).total_seconds() / 60
+                    if age_min < 5:
+                        continue  # Still fresh, might be running
+                except Exception:
+                    pass
+            # Re-queue: move back to pending
+            pending_path = tasks_root() / "pending" / f.name
+            shutil.move(str(f), str(pending_path))
+            print(f"[executor] recovered stale task: {task_id}")
+            recovered += 1
+        except Exception as e:
+            print(f"[executor] recovery error for {f.name}: {e}")
+    return recovered
+
+
+def _register_lease() -> str:
+    """Register executor lease with governance. Returns lease_id."""
+    token = os.getenv("GOV_COORDINATOR_TOKEN", "")
+    if not token:
+        return ""
+    result = _gov_api("POST", "/api/agent/register",
+        data={
+            "project_id": os.getenv("GOV_PROJECT_ID", "amingClaw"),
+            "expected_duration_sec": 86400,
+            "worker_id": _worker_id(),
+            "worker_pid": os.getpid(),
+        },
+        token=token)
+    lease_id = result.get("lease_id", "")
+    if lease_id:
+        print(f"[executor] registered lease: {lease_id}")
+    return lease_id
+
+
+def _heartbeat_lease(lease_id: str, status: str = "idle") -> None:
+    """Renew lease heartbeat."""
+    if not lease_id:
+        return
+    token = os.getenv("GOV_COORDINATOR_TOKEN", "")
+    _gov_api("POST", "/api/agent/heartbeat",
+        data={"lease_id": lease_id, "status": status, "worker_pid": os.getpid()},
+        token=token)
+
+
+def _deregister_lease(lease_id: str) -> None:
+    """Release lease on exit."""
+    if not lease_id:
+        return
+    token = os.getenv("GOV_COORDINATOR_TOKEN", "")
+    _gov_api("POST", "/api/agent/deregister",
+        data={"lease_id": lease_id},
+        token=token)
+    print(f"[executor] deregistered lease: {lease_id}")
+
+
+def _cleanup_orphans() -> int:
+    """Check for orphaned agents and kill their zombie processes."""
+    import signal
+    token = os.getenv("GOV_COORDINATOR_TOKEN", "")
+    if not token:
+        return 0
+
+    result = _gov_api("GET", "/api/agent/orphans", token=token)
+    orphans = result.get("orphans", [])
+    cleaned = 0
+
+    for orphan in orphans:
+        pid = orphan.get("worker_pid")
+        session_id = orphan.get("session_id", "")
+
+        if pid:
+            try:
+                # Check if process is alive
+                os.kill(int(pid), 0)  # Signal 0 = check existence
+                # Process alive but orphaned → kill
+                print(f"[executor] killing orphan process PID={pid} (session={session_id})")
+                os.kill(int(pid), signal.SIGTERM)
+                cleaned += 1
+            except (ProcessLookupError, OSError):
+                # Process already dead
+                pass
+
+    # Cleanup orphan records
+    if orphans:
+        project_id = os.getenv("GOV_PROJECT_ID", "amingClaw")
+        _gov_api("POST", "/api/agent/cleanup",
+            data={"project_id": project_id},
+            token=token)
+
+    return cleaned
 
 
 def run() -> None:
@@ -349,21 +813,67 @@ def run() -> None:
     if lock is None:
         print("[executor] another executor instance is already running; exit")
         return
+
+    # Startup recovery
+    recovered = _recover_stale_tasks()
+    if recovered:
+        print(f"[executor] recovered {recovered} stale tasks")
+
+    # Orphan cleanup
+    cleaned = _cleanup_orphans()
+    if cleaned:
+        print(f"[executor] cleaned {cleaned} orphan processes")
+
+    # Register lease
+    lease_id = _register_lease()
+
     poll_sec = float(os.getenv("EXECUTOR_POLL_SEC", "1"))
-    print("[executor] started (serial mode)")
-    while True:
+    orphan_interval = 60  # Check orphans every 60s
+    last_orphan_check = time.time()
+
+    # Start Executor API server for session intervention
+    try:
+        from executor_api import start_api_server, set_shared_state
+        start_api_server()
+        # Share v6 components with API if available
         try:
-            pending = pick_pending_task()
-            if pending is not None:
-                process_task(pending)
-            else:
-                time.sleep(poll_sec)
-        except KeyboardInterrupt:
-            print("[executor] stopped by keyboard")
-            return
-        except Exception as exc:
-            print("[executor] error:", exc)
-            time.sleep(max(1.0, poll_sec))
+            from task_orchestrator import TaskOrchestrator
+            from ai_lifecycle import AILifecycleManager
+            orch = TaskOrchestrator()
+            set_shared_state(ai_manager=orch.ai_manager, orchestrator=orch)
+            print("[executor] v6 orchestrator initialized")
+        except Exception as e:
+            print(f"[executor] v6 orchestrator not available: {e}")
+    except Exception as e:
+        print(f"[executor] API server failed to start: {e}")
+
+    print("[executor] started (serial mode)")
+    try:
+        while True:
+            try:
+                # Periodic orphan check + lease heartbeat
+                now = time.time()
+                if now - last_orphan_check >= orphan_interval:
+                    _cleanup_orphans()
+                    _heartbeat_lease(lease_id, status="idle")
+                    last_orphan_check = now
+
+                pending = pick_pending_task()
+                if pending is not None:
+                    _heartbeat_lease(lease_id, status="busy")
+                    process_task(pending)
+                    _heartbeat_lease(lease_id, status="idle")
+                else:
+                    time.sleep(poll_sec)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print("[executor] error:", exc)
+                time.sleep(max(1.0, poll_sec))
+    except KeyboardInterrupt:
+        print("[executor] stopped by keyboard")
+    finally:
+        _deregister_lease(lease_id)
 
 
 # ── Parallel mode ────────────────────────────────────────────────────────────
@@ -401,6 +911,20 @@ def run_parallel() -> None:
 
     dispatcher = get_dispatcher(task_processor=process_task_in_workspace)
     dispatcher.start()
+
+    # Start Executor API server for session intervention
+    try:
+        from executor_api import start_api_server, set_shared_state
+        start_api_server()
+        try:
+            from task_orchestrator import TaskOrchestrator
+            orch = TaskOrchestrator()
+            set_shared_state(ai_manager=orch.ai_manager, orchestrator=orch)
+            print("[executor] v6 orchestrator initialized")
+        except Exception as e:
+            print(f"[executor] v6 orchestrator not available: {e}")
+    except Exception as e:
+        print(f"[executor] API server failed to start: {e}")
 
     poll_sec = float(os.getenv("EXECUTOR_POLL_SEC", "1"))
     refresh_interval = float(os.getenv("DISPATCHER_REFRESH_SEC", "30"))
