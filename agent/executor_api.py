@@ -77,6 +77,8 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
         elif path.startswith("/task/") and not path.endswith(("/pause", "/cancel", "/retry")):
             task_id = path.split("/task/")[1]
             self._handle_task_detail(task_id)
+        elif path == "/traces":
+            self._handle_traces(qs)
         elif path.startswith("/trace/"):
             trace_id = path.split("/trace/")[1]
             self._handle_trace(trace_id)
@@ -205,16 +207,69 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
         self._json_response(404, {"error": f"task {task_id} not found in filesystem"})
 
     def _handle_trace(self, trace_id):
-        """GET /trace/{id} — Trace detail."""
-        try:
-            from observability import load_trace
-            trace = load_trace(trace_id)
-            if trace:
-                self._json_response(200, trace)
-            else:
-                self._json_response(404, {"error": f"trace {trace_id} not found"})
-        except ImportError:
-            self._json_response(500, {"error": "observability module not available"})
+        """GET /trace/{id} — Full trace chain from filesystem (processing + results)."""
+        from pathlib import Path
+        tasks_root = Path(os.getenv("SHARED_VOLUME_PATH",
+            os.path.join(os.path.dirname(__file__), "..", "shared-volume"))
+        ) / "codex-tasks"
+
+        for stage in ["processing", "results"]:
+            stage_dir = tasks_root / stage
+            if not stage_dir.exists():
+                continue
+            for filepath in stage_dir.glob("*.json"):
+                try:
+                    with open(filepath) as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
+                # Match by filename (task_id) or explicit trace_id field
+                if filepath.stem == trace_id or data.get("trace_id") == trace_id:
+                    data["_stage"] = stage
+                    # Sort events by timestamp if present
+                    events = data.get("events") or data.get("trace_events") or []
+                    if events:
+                        events.sort(key=lambda e: e.get("ts") or e.get("timestamp") or "")
+                        data["events"] = events
+                    self._json_response(200, data)
+                    return
+
+        self._json_response(404, {"error": f"trace {trace_id} not found"})
+
+    def _handle_traces(self, qs):
+        """GET /traces — List trace summaries from filesystem (processing + results)."""
+        from pathlib import Path
+        tasks_root = Path(os.getenv("SHARED_VOLUME_PATH",
+            os.path.join(os.path.dirname(__file__), "..", "shared-volume"))
+        ) / "codex-tasks"
+
+        project_id_filter = qs.get("project_id", [None])[0]
+        limit = min(int(qs.get("limit", ["20"])[0]), 100)
+
+        summaries = []
+        for stage in ["processing", "results"]:
+            stage_dir = tasks_root / stage
+            if not stage_dir.exists():
+                continue
+            for filepath in stage_dir.glob("*.json"):
+                try:
+                    with open(filepath) as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
+                pid = data.get("project_id", "")
+                if project_id_filter and pid != project_id_filter:
+                    continue
+                summaries.append({
+                    "trace_id": data.get("trace_id") or filepath.stem,
+                    "task_id": data.get("task_id") or filepath.stem,
+                    "status": data.get("status", "unknown"),
+                    "created_at": data.get("created_at", ""),
+                    "project_id": pid,
+                })
+
+        summaries.sort(key=lambda s: s["created_at"] or "", reverse=True)
+        self._json_response(200, {"traces": summaries[:limit], "total": len(summaries)})
 
     # ── L18.3 Intervention Handlers ──
 
