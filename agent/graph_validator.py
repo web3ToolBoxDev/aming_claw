@@ -172,9 +172,9 @@ class GraphValidator:
         node = proposal.get("node", {})
         node_id = node.get("id", "")
 
-        # ID format
-        if not re.match(r"^L\d+\.\d+$", node_id):
-            return False, f"ID format invalid: {node_id}"
+        # ID format: L数字.数字 or kebab-case (e.g., context-store-1)
+        if not node_id or not re.match(r"^(L\d+\.\d+|[a-zA-Z][\w-]+)$", node_id):
+            return False, f"ID format invalid: '{node_id}' (must be L数字.数字 or kebab-case)"
 
         # Uniqueness
         if self.check_node_exists(node_id, project_id):

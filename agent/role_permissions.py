@@ -212,7 +212,8 @@ ROLE_PROMPTS = {
     "estimated_effort": "预估工作量"
   },
   "proposed_nodes": [
-    {"id": "Lx.y", "title": "节点标题", "deps": ["依赖"], "primary": ["agent/governance/xxx.py"], "description": "描述"}
+    {"id": "L22.1", "title": "节点标题", "deps": ["L15.1"], "primary": ["agent/governance/xxx.py"], "description": "描述"}
+  注意: id 必须是 L数字.数字 格式（如 L22.1, L22.2），数字从当前最大层+1开始。或者用 kebab-case（如 context-store-1）
   ],
   "target_files": ["agent/governance/xxx.py", "agent/yyy.py"],
   "actions": [
