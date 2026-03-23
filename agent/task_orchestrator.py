@@ -68,6 +68,7 @@ class TaskOrchestrator:
                 pm_prd = self._run_pm_analysis(text, project_id, chat_id)
                 log.info("PM analysis result: %s", "PRD generated" if pm_prd else "empty/failed")
             except Exception as e:
+                print(f"[PM] PM analysis failed: {e}")
                 log.exception("PM analysis failed: %s", e)
                 pm_prd = None
 
@@ -685,6 +686,7 @@ class TaskOrchestrator:
 
     def _run_pm_analysis(self, text: str, project_id: str, chat_id: int) -> dict:
         """Run PM AI to analyze requirements and generate PRD."""
+        print(f"[PM] Starting PM analysis for: {text[:60]}")
         log.info("Starting PM analysis for: %s", text[:60])
         pm_context = self.context_assembler.assemble(
             project_id=project_id,
