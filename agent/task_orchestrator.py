@@ -507,9 +507,18 @@ class TaskOrchestrator:
                 branch_name = ""
 
         # 3. File second — for Executor consumption
+        # Resolve workspace label for dispatcher routing
+        try:
+            from workspace_registry import resolve_workspace_for_task
+            ws = resolve_workspace_for_task({"project_id": project_id})
+            ws_label = ws.get("label", "") if ws else ""
+        except Exception:
+            ws_label = ""
+
         task_data = {
             "task_id": task_id,
             "project_id": project_id,
+            "target_workspace": ws_label,  # Explicit routing for dispatcher
             "text": action.get("prompt", ""),
             "prompt": action.get("prompt", ""),
             "action": "claude",
