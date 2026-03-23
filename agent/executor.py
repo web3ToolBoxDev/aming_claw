@@ -693,6 +693,100 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
         return result
 
 
+def process_test_task_v6(task: Dict, processing: Path) -> Dict:
+    """Run real tests via subprocess, not AI review."""
+    task_id = task.get("task_id", "")
+    project_id = task.get("project_id", "")
+    chat_id = int(task.get("chat_id", 0))
+    token = task.get("_gov_token", os.getenv("GOV_COORDINATOR_TOKEN", ""))
+    tlog = TaskLogger(task_id)
+    tlog.log_event("test_task_start", {"project_id": project_id})
+    workspace = str(resolve_workspace())
+
+    try:
+        import re as _re
+        tlog.log_event("running_unittest")
+        r = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "agent/tests", "-p", "test_*.py"],
+            cwd=workspace, capture_output=True, text=True, timeout=300)
+        test_output = r.stdout + r.stderr
+        tlog.write_file("test_output.txt", test_output)
+        m = _re.search(r"Ran (\d+) tests?", test_output)
+        ran = int(m.group(1)) if m else 0
+        test_passed = r.returncode == 0 or "OK" in test_output
+        fm = _re.search(r"failures?=(\d+)", test_output)
+        em = _re.search(r"errors?=(\d+)", test_output)
+        failed = int(fm.group(1) if fm else 0) + int(em.group(1) if em else 0)
+        tlog.log_event("unittest_complete", {"ran": ran, "failed": failed, "passed": test_passed})
+
+        result = {**task, "status": "completed" if test_passed else "failed", "completed_at": utc_iso(),
+                  "executor": {"action": "test_task_v6", "ran": ran, "failed": failed, "passed": test_passed}}
+        save_json(processing, result)
+        if chat_id:
+            _gateway_notify(chat_id, f"Test {'PASS' if test_passed else 'FAIL'}: {ran} tests, {failed} failures")
+        return result
+    except Exception as e:
+        result = {**task, "status": "failed", "error": str(e)[:500], "completed_at": utc_iso()}
+        save_json(processing, result)
+        return result
+
+
+def process_qa_task_v6(task: Dict, processing: Path) -> Dict:
+    """QA: run verify_loop + gatekeeper. Code-driven."""
+    task_id = task.get("task_id", "")
+    project_id = task.get("project_id", "")
+    chat_id = int(task.get("chat_id", 0))
+    token = task.get("_gov_token", os.getenv("GOV_COORDINATOR_TOKEN", ""))
+    tlog = TaskLogger(task_id)
+    tlog.log_event("qa_task_start", {"project_id": project_id})
+    workspace = str(resolve_workspace())
+
+    try:
+        tlog.log_event("running_verify_loop")
+        vl = subprocess.run(["bash", "scripts/verify_loop.sh", token, project_id],
+            cwd=workspace, capture_output=True, text=True, timeout=60)
+        tlog.write_file("verify_loop.txt", vl.stdout + vl.stderr)
+        verify_pass = "0 fail" in vl.stdout
+        tlog.log_event("verify_loop_complete", {"passed": verify_pass})
+
+        tlog.log_event("running_gatekeeper")
+        gov_url = os.getenv("GOVERNANCE_URL", "http://localhost:40000")
+        gate = requests.get(f"{gov_url}/api/wf/{project_id}/release-gate",
+            headers={"X-Gov-Token": token}, timeout=15).json()
+        gate_pass = gate.get("release", False) and gate.get("gatekeeper", {}).get("pass", False)
+        tlog.log_event("gatekeeper_complete", {"passed": gate_pass})
+
+        all_pass = verify_pass and gate_pass
+        result = {**task, "status": "completed" if all_pass else "failed", "completed_at": utc_iso(),
+                  "executor": {"action": "qa_task_v6", "verify_pass": verify_pass, "gate_pass": gate_pass}}
+        save_json(processing, result)
+
+        if all_pass:
+            tlog.log_event("triggering_auto_merge")
+            branch = task.get("_branch", "")
+            if not branch:
+                br = subprocess.run(["git", "branch", "--list", "dev/*", "--sort=-committerdate"],
+                    cwd=workspace, capture_output=True, text=True, timeout=5)
+                branches = [b.strip().lstrip("* ") for b in br.stdout.strip().split("\n") if b.strip()]
+                branch = branches[0] if branches else ""
+            if branch:
+                mr = subprocess.run(["bash", "scripts/merge-and-deploy.sh", branch],
+                    cwd=workspace, capture_output=True, text=True, timeout=180,
+                    env={**os.environ, "GOV_COORDINATOR_TOKEN": token})
+                tlog.write_file("merge_output.txt", mr.stdout + mr.stderr)
+                tlog.log_event("auto_merge", {"passed": mr.returncode == 0, "branch": branch})
+                if chat_id:
+                    _gateway_notify(chat_id, f"Auto-merge {'OK' if mr.returncode==0 else 'FAIL'}: {branch}")
+
+        if chat_id:
+            _gateway_notify(chat_id, f"QA {'PASS' if all_pass else 'FAIL'}")
+        return result
+    except Exception as e:
+        result = {**task, "status": "failed", "error": str(e)[:500], "completed_at": utc_iso()}
+        save_json(processing, result)
+        return result
+
+
 def _trigger_coordinator_eval(task: Dict, result: Dict) -> None:
     """Auto-trigger coordinator eval after dev/test task completes.
 
