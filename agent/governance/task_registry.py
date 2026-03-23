@@ -19,8 +19,9 @@ log = logging.getLogger(__name__)
 EXECUTION_STATUSES = {
     "queued", "claimed", "running", "waiting_human", "blocked",
     "succeeded", "failed", "cancelled", "timed_out", "enqueue_failed",
+    "design_mismatch",
 }
-TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
+TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "timed_out", "design_mismatch"}
 
 NOTIFICATION_STATUSES = {"none", "pending", "sent", "read"}
 
@@ -52,6 +53,8 @@ def create_task(
     priority: int = 0,
     max_attempts: int = 3,
     metadata: dict = None,
+    parent_task_id: str = None,
+    retry_round: int = 0,
 ) -> dict:
     """Create a new task."""
     task_id = _new_task_id()
@@ -62,18 +65,20 @@ def create_task(
         """INSERT INTO tasks
            (task_id, project_id, status, execution_status, notification_status,
             type, prompt, related_nodes,
-            created_by, created_at, updated_at, priority, max_attempts, metadata_json)
-           VALUES (?, ?, 'queued', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            created_by, created_at, updated_at, priority, max_attempts, metadata_json,
+            parent_task_id, retry_round)
+           VALUES (?, ?, 'queued', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             task_id, project_id, notify,
             task_type, prompt,
             json.dumps(related_nodes or []),
             created_by, now, now, priority, max_attempts,
             json.dumps(metadata or {}),
+            parent_task_id, retry_round,
         ),
     )
 
-    log.info("Task created: %s (project: %s, type: %s)", task_id, project_id, task_type)
+    log.info("Task created: %s (project: %s, type: %s, retry_round: %d)", task_id, project_id, task_type, retry_round)
     return {
         "task_id": task_id,
         "project_id": project_id,
@@ -212,8 +217,8 @@ def complete_task(
 
     return {
         "task_id": task_id,
-        "status": final_status,
-        "retrying": final_status == "queued",
+        "status": exec_status,
+        "retrying": exec_status == "queued",
         "completed_at": now,
     }
 
@@ -337,3 +342,58 @@ def get_task(conn: sqlite3.Connection, task_id: str) -> dict | None:
     ).fetchall()
     task["attempts"] = [dict(a) for a in attempts]
     return task
+
+
+def escalate_task(conn: sqlite3.Connection, task_id: str) -> str | None:
+    """Escalate a task via QA→Dev retry loop (max 3 rounds).
+
+    - retry_round < 3: increment retry_round, create a child task with parent linkage,
+      return new task_id.
+    - retry_round >= 3: mark task as design_mismatch, log user notification, return None.
+    """
+    row = conn.execute(
+        """SELECT project_id, type, prompt, related_nodes, created_by, priority,
+                  max_attempts, metadata_json, retry_round
+           FROM tasks WHERE task_id = ?""",
+        (task_id,),
+    ).fetchone()
+
+    if not row:
+        from .errors import GovernanceError
+        raise GovernanceError(f"Task not found: {task_id}", 404)
+
+    retry_round = row["retry_round"] or 0
+
+    if retry_round < 3:
+        new_round = retry_round + 1
+        result = create_task(
+            conn,
+            project_id=row["project_id"],
+            prompt=row["prompt"],
+            task_type=row["type"],
+            related_nodes=json.loads(row["related_nodes"] or "[]"),
+            created_by=row["created_by"] or "",
+            priority=row["priority"],
+            max_attempts=row["max_attempts"],
+            metadata=json.loads(row["metadata_json"] or "{}"),
+            parent_task_id=task_id,
+            retry_round=new_round,
+        )
+        log.info(
+            "Escalated task %s → %s (retry_round=%d)",
+            task_id, result["task_id"], new_round,
+        )
+        return result["task_id"]
+    else:
+        now = _utc_iso()
+        conn.execute(
+            """UPDATE tasks SET status = 'design_mismatch', execution_status = 'design_mismatch',
+               updated_at = ? WHERE task_id = ?""",
+            (now, task_id),
+        )
+        log.warning(
+            "Task %s reached max escalation (retry_round=%d) — marked design_mismatch. "
+            "Manual intervention required.",
+            task_id, retry_round,
+        )
+        return None

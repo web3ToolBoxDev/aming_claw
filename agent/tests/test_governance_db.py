@@ -40,7 +40,7 @@ class TestDB(unittest.TestCase):
         from governance.db import get_connection, close_connection
         conn = get_connection("test-project")
         row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-        self.assertEqual(row["value"], "3")
+        self.assertEqual(row["value"], "4")
         close_connection(conn)
 
     def test_wal_mode(self):

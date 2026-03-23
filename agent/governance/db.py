@@ -18,7 +18,7 @@ if _agent_dir not in sys.path:
 from utils import tasks_root
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 -- Node runtime state
@@ -82,7 +82,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     attempt_count INTEGER NOT NULL DEFAULT 0,
     max_attempts  INTEGER NOT NULL DEFAULT 3,
     priority      INTEGER NOT NULL DEFAULT 0,
-    metadata_json TEXT
+    metadata_json TEXT,
+    retry_round   INTEGER NOT NULL DEFAULT 0,
+    parent_task_id TEXT
 );
 -- idx_tasks_status and idx_tasks_assigned created in migration v2
 
@@ -293,7 +295,18 @@ def _run_migrations(conn: sqlite3.Connection, from_version: int, to_version: int
         except sqlite3.OperationalError:
             pass
 
-    MIGRATIONS = {2: _migrate_v1_to_v2, 3: _migrate_v2_to_v3}
+    def _migrate_v3_to_v4(c):
+        """Add retry_round and parent_task_id fields to tasks for QA→Dev escalation."""
+        for col, typedef in [
+            ("retry_round", "INTEGER NOT NULL DEFAULT 0"),
+            ("parent_task_id", "TEXT"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE tasks ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+    MIGRATIONS = {2: _migrate_v1_to_v2, 3: _migrate_v2_to_v3, 4: _migrate_v3_to_v4}
     for version in range(from_version + 1, to_version + 1):
         if version in MIGRATIONS:
             MIGRATIONS[version](conn)
