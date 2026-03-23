@@ -36,6 +36,10 @@ ACTION_TYPES = {
     # QA actions
     # verify_update with qa_pass
 
+    # Memory operations
+    "delete_memory",
+    "propose_memory_cleanup",
+
     # Dangerous
     "run_command",
     "execute_script",
@@ -96,6 +100,7 @@ ROLE_PERMISSIONS = {
             "git_diff",
             "read_file",
             "reply_only",
+            "propose_memory_cleanup",
         },
         "denied": {
             "create_dev_task",
@@ -105,6 +110,7 @@ ROLE_PERMISSIONS = {
             "release_gate",
             "propose_node",
             "verify_update",
+            "delete_memory",   # dev 不能直接删除记忆，只能提议清理
         },
     },
     "tester": {
