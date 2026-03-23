@@ -206,6 +206,7 @@ def _heartbeat_loop(task_id: str, stop_event: threading.Event, interval_sec: flo
 
 
 def _worker_id() -> str:
+    # chain v4
     return "executor-{}".format(socket.gethostname())
 
 
