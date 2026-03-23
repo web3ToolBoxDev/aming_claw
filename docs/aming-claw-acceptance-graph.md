@@ -1657,4 +1657,24 @@ L20.11  PM 日志可观测  [impl:pending] [verify:pending] v6.2
       secondary:[agent/ai_lifecycle.py]
       test:[]
       description: PM session执行时写日志到logs/目录。失败时记录原因。handle_user_message增加PM执行日志方便观察者排查
+
+L20.12  Chain Depth 限制  [impl:pending] [verify:pending] v6.2
+      deps:[L20.2, L20.8]
+      gate_mode: auto
+      verify: L4
+      test_coverage: none
+      primary:[agent/executor.py, agent/task_orchestrator.py]
+      secondary:[]
+      test:[]
+      description: 防止eval→dev无限循环。task文件携带_chain_depth字段。_trigger_coordinator_eval读取depth,>=3则停止不创建新task。_write_task_file传递parent depth+1。_trigger_tester/_trigger_qa同样继承depth
+
+L20.13  记忆删除审核  [impl:pending] [verify:pending] v6.2
+      deps:[L15.3, L17.4]
+      gate_mode: auto
+      verify: L4
+      test_coverage: none
+      primary:[agent/role_permissions.py, agent/task_orchestrator.py]
+      secondary:[agent/memory_write_guard.py]
+      test:[]
+      description: Dev不能直接删除记忆,只能propose_memory_cleanup。Executor拦截delete操作→创建approval→QA审核后执行。amingclaw:arch和pitfall前缀需人工批准
 ```
