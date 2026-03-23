@@ -540,7 +540,26 @@ server.listen(PORT, BIND_HOST, () => {
     getMemory({}).catch(() => {});
     // Initialize knowledge store
     const ksPath = SAVE_PATH ? path.join(SAVE_PATH, 'db') : path.join(__dirname, 'data');
-    knowledgeStore.init(ksPath).catch(err => {
+    knowledgeStore.init(ksPath).then(() => {
+        // Auto-register development domain pack on startup
+        try {
+            const schema = require('./lib/memorySchema');
+            schema.registerDomainPack('development', {
+                types: {
+                    architecture: { durability: 'permanent', conflictPolicy: 'replace', description: 'Architecture decisions' },
+                    pitfall: { durability: 'permanent', conflictPolicy: 'append', description: 'Known pitfalls' },
+                    pattern: { durability: 'permanent', conflictPolicy: 'replace', description: 'Code patterns' },
+                    workaround: { durability: 'durable', conflictPolicy: 'replace', description: 'Workarounds' },
+                    session_summary: { durability: 'durable', conflictPolicy: 'replace', description: 'Session summaries' },
+                    verify_decision: { durability: 'permanent', conflictPolicy: 'append', description: 'Verify decisions' },
+                    decision: { durability: 'permanent', conflictPolicy: 'replace', description: 'Decisions' },
+                }
+            });
+            console.log('[dbservice] Development domain pack auto-registered');
+        } catch (e) {
+            console.error('[dbservice] Auto-register domain pack failed:', e.message);
+        }
+    }).catch(err => {
         console.error('[dbservice] Knowledge store init failed:', err.message);
     });
 });

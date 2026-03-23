@@ -686,10 +686,10 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
         return result
 
     except ImportError as e:
-        # v6 modules import failed — log and fail, don't silently fallback
         error_msg = f"v6 module import failed: {e}"
         print(f"[executor-v6] {error_msg}")
         tlog.log_event("v6_import_error", {"error": str(e)})
+        _cleanup_dev_branch(branch, workspace)
         result = {**task, "status": "failed", "error": error_msg, "completed_at": utc_iso()}
         save_json(processing, result)
         return result
@@ -697,9 +697,22 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
         error_msg = str(e)[:500]
         if chat_id:
             _gateway_notify(chat_id, f"Dev v6 执行失败: {error_msg[:200]}")
+        _cleanup_dev_branch(branch, workspace)
         result = {**task, "status": "failed", "error": error_msg, "completed_at": utc_iso()}
         save_json(processing, result)
         return result
+
+
+def _cleanup_dev_branch(branch: str, workspace: str) -> None:
+    """Cleanup dev branch on failure: checkout main + delete branch."""
+    if not branch or not branch.startswith("dev/"):
+        return
+    try:
+        subprocess.run(["git", "checkout", "main"], cwd=workspace, capture_output=True, timeout=10)
+        subprocess.run(["git", "branch", "-D", branch], cwd=workspace, capture_output=True, timeout=10)
+        print(f"[executor-v6] cleaned up branch: {branch}")
+    except Exception:
+        pass
 
 
 def process_test_task_v6(task: Dict, processing: Path) -> Dict:
@@ -1055,9 +1068,13 @@ def _cleanup_orphans() -> int:
             try:
                 # Check if process is alive
                 os.kill(int(pid), 0)  # Signal 0 = check existence
-                # Process alive but orphaned → kill
+                # Process alive but orphaned → kill (use taskkill on Windows for process tree)
                 print(f"[executor] killing orphan process PID={pid} (session={session_id})")
-                os.kill(int(pid), signal.SIGTERM)
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                        capture_output=True, timeout=10)
+                else:
+                    os.kill(int(pid), signal.SIGTERM)
                 cleaned += 1
             except (ProcessLookupError, OSError):
                 # Process already dead
