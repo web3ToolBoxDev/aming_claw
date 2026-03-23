@@ -1584,3 +1584,49 @@ v6:    Gateway → [Executor 代码] → [AI 结构化输出] → [4层校验 + 
 | 11 | Plan 层 | ✅ P2 #22 | 后置 |
 | 12 | 审批对象 | ✅ P2 #21 | 后置 |
 | 13 | replay/审计链 | ✅ P2 #23 | 后置 |
+
+## 二十、v6.2 实施补充
+
+### 20.1 Git Worktree 隔离（已实施）
+
+Dev AI 不再使用 `git checkout -b` 在主工作目录创建分支，改为 `git worktree add` 在独立目录工作：
+
+```
+主工作目录: C:\Users\z5866\Documents\amingclaw\aming_claw\  (main 分支，观察者操作)
+Worktree:   .worktrees/dev-task-xxx/                         (Dev 分支，AI 操作)
+```
+
+流程：
+1. `git worktree add -b dev/task-xxx .worktrees/dev-task-xxx` — 创建隔离目录
+2. Dev AI 在 worktree 目录内执行所有操作
+3. 完成后 `git worktree remove .worktrees/dev-task-xxx --force` — 清理
+4. 分支保留供 review 和 merge
+
+好处：观察者和 Executor 可并行操作，不会因分支切换导致文件丢失。
+
+### 20.2 Chain Depth 限制（已实施）
+
+防止 Dev→eval→Dev→eval 无限循环。TaskOrchestrator 维护 `_chain_depth` 计数器：
+
+```
+MAX_CHAIN_DEPTH = 4
+
+handle_user_message()   → depth = 1
+_trigger_coordinator_eval() → depth = 2
+handle_test_complete()  → depth = 3
+handle_qa_complete()    → depth = 4
+再次触发 → 拒绝: "chain depth exceeded, stopping"
+```
+
+每次 `handle_user_message()` 从 Gateway 调用时重置为 0。
+
+### 20.3 Trace/Replay API（已实施）
+
+Executor API (:40100) 新增两个只读端点：
+
+| 端点 | 说明 |
+|------|------|
+| `GET /trace/{trace_id}` | 返回完整 trace 链路（从 task 创建到完成的所有事件） |
+| `GET /traces?project_id=amingClaw&limit=20` | 列出最近的 trace，支持按 project_id 过滤 |
+
+数据源：`shared-volume/codex-tasks/processing/` 和 `results/` 的 JSON 文件。

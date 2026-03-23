@@ -159,8 +159,57 @@ curl http://localhost:40000/api/runtime/amingClaw -H "X-Gov-Token: {token}"
 curl http://localhost:40000/api/audit/amingClaw/log?limit=20 -H "X-Gov-Token: {token}"
 ```
 
-## 七、已知问题
+## 七、Executor API (:40100)
 
-1. **dbservice domain pack 不持久化** — 容器重启后丢失，需手动注册。后续应在 Dockerfile 或启动脚本中自动注册。
+Executor 在宿主机运行时暴露 HTTP API，支持监控和介入：
+
+```
+GET  /health              — 健康检查
+GET  /status              — 运行状态 (pending/processing/sessions)
+GET  /sessions            — 活跃 AI sessions
+GET  /tasks               — 任务列表 (支持 ?project_id=&status= 过滤)
+GET  /trace/{trace_id}    — 完整 trace 链路
+GET  /traces              — 最近 trace 列表 (支持 ?project_id=&limit=)
+POST /coordinator/chat    — 直接对话 Coordinator (绕过 Telegram)
+POST /cleanup-orphans     — 清理僵尸 AI 进程
+```
+
+## 八、Git Worktree 工作流
+
+Dev AI 在隔离 worktree 中工作，不影响主工作目录：
+
+```bash
+# Executor 自动执行:
+git worktree add -b dev/task-xxx .worktrees/dev-task-xxx
+# Dev AI 在 .worktrees/dev-task-xxx/ 内操作
+# 完成后:
+git worktree remove .worktrees/dev-task-xxx --force
+# 分支保留: dev/task-xxx (供 review)
+
+# 合并到 main:
+git merge dev/task-xxx --no-ff
+git branch -d dev/task-xxx
+```
+
+## 九、merge-and-deploy 流程
+
+```bash
+bash scripts/merge-and-deploy.sh dev/task-xxx
+
+# 自动执行:
+# 1. git merge dev/task-xxx → main
+# 2. pre-deploy-check.sh (节点/coverage/docs/gatekeeper)
+# 3. docker compose up -d --build
+# 4. restart nginx
+# 5. health check
+# 6. sync governance data: prod → dev
+# 7. restart executor
+# 8. gateway 通知
+```
+
+## 十、已知问题
+
+1. **dbservice domain pack 不持久化** — 容器重启后丢失，startup.sh 中自动注册。
 2. **nginx healthcheck 偶尔 unhealthy** — 重启 nginx 解决。
 3. **Executor 是宿主机进程** — 不在 Docker 里，需要手动管理生命周期。
+4. **观察者和 Executor 并行操作** — 使用 git worktree 隔离，编辑前无需停 Executor。
