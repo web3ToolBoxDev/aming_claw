@@ -577,24 +577,37 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
         ctx_asm = ContextAssembler()
         tlog.log_event("v6_modules_loaded")
 
-        # 1. Git stash + create branch (clean workspace for evidence)
-        workspace = str(resolve_workspace())
-        stashed = False
+        # 1. Git worktree: create isolated directory for dev work
+        main_workspace = str(resolve_workspace())
+        worktree_dir = ""
         if not branch:
             branch = f"dev/{task_id}"
+            worktree_dir = os.path.join(main_workspace, ".worktrees", branch.replace("/", "-"))
             try:
-                stash_r = subprocess.run(
-                    ["git", "stash", "push", "-m", f"auto-stash-{task_id}"],
-                    cwd=workspace, capture_output=True, text=True, timeout=10)
-                stashed = "Saved working directory" in stash_r.stdout
-                if stashed:
-                    tlog.log_event("git_stash", {"stashed": True})
-                subprocess.run(["git", "checkout", "-b", branch],
-                    cwd=workspace, capture_output=True, timeout=10)
-                print(f"[executor-v6] created branch: {branch} (stashed={stashed})")
+                os.makedirs(os.path.dirname(worktree_dir), exist_ok=True)
+                subprocess.run(
+                    ["git", "worktree", "add", "-b", branch, worktree_dir],
+                    cwd=main_workspace, capture_output=True, text=True, timeout=30,
+                    check=True)
+                print(f"[executor-v6] created worktree: {worktree_dir} (branch: {branch})")
+                tlog.log_event("git_worktree_created", {"worktree": worktree_dir, "branch": branch})
+            except subprocess.CalledProcessError as e:
+                print(f"[executor-v6] worktree creation failed: {e.stderr}")
+                # Fallback: try checkout -b in main workspace
+                worktree_dir = ""
+                try:
+                    subprocess.run(["git", "checkout", "-b", branch],
+                        cwd=main_workspace, capture_output=True, timeout=10)
+                    print(f"[executor-v6] fallback to checkout -b: {branch}")
+                except Exception:
+                    branch = ""
             except Exception as e:
-                print(f"[executor-v6] branch creation failed: {e}")
+                print(f"[executor-v6] worktree error: {e}")
+                worktree_dir = ""
                 branch = ""
+
+        # Use worktree dir if available, otherwise main workspace
+        workspace = worktree_dir if worktree_dir else main_workspace
 
         # 2. Before snapshot
         before = evidence.collect_before_snapshot()
@@ -673,14 +686,18 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
                 f"测试: {test_ok}\n"
                 f"摘要: {summary[:200]}")
 
-        # 10. Checkout main + restore stash
+        # 10. Cleanup worktree or checkout main
         try:
-            subprocess.run(["git", "checkout", "main"],
-                cwd=workspace, capture_output=True, timeout=10)
-            if stashed:
-                subprocess.run(["git", "stash", "pop"],
-                    cwd=workspace, capture_output=True, timeout=10)
-                tlog.log_event("git_stash_pop")
+            if worktree_dir and os.path.exists(worktree_dir):
+                # Worktree mode: remove worktree (branch stays for review)
+                subprocess.run(["git", "worktree", "remove", worktree_dir, "--force"],
+                    cwd=main_workspace, capture_output=True, timeout=30)
+                tlog.log_event("git_worktree_removed", {"worktree": worktree_dir})
+                print(f"[executor-v6] worktree removed: {worktree_dir} (branch {branch} kept)")
+            else:
+                # Fallback mode: checkout main
+                subprocess.run(["git", "checkout", "main"],
+                    cwd=main_workspace, capture_output=True, timeout=10)
         except Exception as e:
             tlog.log_event("git_restore_error", {"error": str(e)[:200]})
 
