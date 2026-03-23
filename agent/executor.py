@@ -358,7 +358,12 @@ def _registry_complete(task: dict, execution_status: str, error: str = "") -> No
 
 
 def process_task(path: Path) -> None:
-    task = load_json(path)
+    if not path.exists():
+        return  # Already claimed by another worker
+    try:
+        task = load_json(path)
+    except (FileNotFoundError, PermissionError):
+        return  # Race: another worker grabbed it
     task_id = str(task.get("task_id") or "")
 
     # Idempotency: if already in a terminal state, skip silently
@@ -559,14 +564,21 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
         ctx_asm = ContextAssembler()
         tlog.log_event("v6_modules_loaded")
 
-        # 1. Git branch
+        # 1. Git stash + create branch (clean workspace for evidence)
         workspace = str(resolve_workspace())
+        stashed = False
         if not branch:
             branch = f"dev/{task_id}"
             try:
+                stash_r = subprocess.run(
+                    ["git", "stash", "push", "-m", f"auto-stash-{task_id}"],
+                    cwd=workspace, capture_output=True, text=True, timeout=10)
+                stashed = "Saved working directory" in stash_r.stdout
+                if stashed:
+                    tlog.log_event("git_stash", {"stashed": True})
                 subprocess.run(["git", "checkout", "-b", branch],
                     cwd=workspace, capture_output=True, timeout=10)
-                print(f"[executor-v6] created branch: {branch}")
+                print(f"[executor-v6] created branch: {branch} (stashed={stashed})")
             except Exception as e:
                 print(f"[executor-v6] branch creation failed: {e}")
                 branch = ""
@@ -647,6 +659,17 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
                 f"改动: {files}\n"
                 f"测试: {test_ok}\n"
                 f"摘要: {summary[:200]}")
+
+        # 10. Checkout main + restore stash
+        try:
+            subprocess.run(["git", "checkout", "main"],
+                cwd=workspace, capture_output=True, timeout=10)
+            if stashed:
+                subprocess.run(["git", "stash", "pop"],
+                    cwd=workspace, capture_output=True, timeout=10)
+                tlog.log_event("git_stash_pop")
+        except Exception as e:
+            tlog.log_event("git_restore_error", {"error": str(e)[:200]})
 
         return result
 

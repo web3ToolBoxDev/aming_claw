@@ -155,9 +155,14 @@ class WorkspaceWorker:
             task_id = task.get("task_id", "unknown")
             self._current_task_id = task_id
             try:
+                if not task_path.exists():
+                    print("[worker-{}] task {} already claimed, skip".format(self.ws_id, task_id))
+                    continue
                 print("[worker-{}] processing task: {}".format(self.ws_id, task_id))
                 self.task_processor(task_path, self.workspace)
                 self._tasks_completed += 1
+            except (FileNotFoundError, PermissionError):
+                print("[worker-{}] task {} file gone, skip".format(self.ws_id, task_id))
             except Exception as exc:
                 self._tasks_failed += 1
                 print("[worker-{}] task {} failed: {}".format(self.ws_id, task_id, exc))
