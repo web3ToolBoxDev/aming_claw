@@ -22,7 +22,7 @@ set -e
 
 COMPOSE_FILE="docker-compose.governance.yml"
 SERVICE="governance"
-PROD_PORT=40006
+PROD_PORT=40000
 STAGE_PORT=40007
 HEALTH_RETRIES=10
 HEALTH_DELAY=3

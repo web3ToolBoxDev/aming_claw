@@ -716,7 +716,7 @@ def process_test_task_v6(task: Dict, processing: Path) -> Dict:
         import re as _re
         tlog.log_event("running_unittest")
         r = subprocess.run(
-            [sys.executable, "-m", "unittest", "discover", "-s", "agent/tests", "-p", "test_*.py"],
+            [sys.executable, "-m", "unittest", "discover", "-s", os.path.join(workspace, "agent", "tests"), "-t", workspace, "-p", "test_*.py"],
             cwd=workspace, capture_output=True, text=True, timeout=300)
         test_output = r.stdout + r.stderr
         tlog.write_file("test_output.txt", test_output)
