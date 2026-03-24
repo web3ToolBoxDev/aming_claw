@@ -28,6 +28,9 @@ _orchestrator = None
 _validator_last_result = None
 _context_cache = {}
 
+# L22.3: Observer sessions registry — maps task_id → {token, status, created_at, ...}
+_observer_sessions = {}
+
 
 def set_shared_state(ai_manager=None, orchestrator=None):
     """Called by executor.py to share v6 components."""
@@ -94,6 +97,11 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
             session_id = path.split("/ai-session/")[1].replace("/output", "")
             self._handle_ai_session_output(session_id)
 
+        # ── L22.3: Task Observe ──
+        elif path.startswith("/executor/task/") and path.endswith("/observe"):
+            task_id = path[len("/executor/task/"):-len("/observe")]
+            self._handle_observe_task(task_id)
+
         # ── Health ──
         elif path == "/health":
             self._json_response(200, {
@@ -130,6 +138,11 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
 
         elif path == "/coordinator/chat":
             self._handle_coordinator_chat(body)
+
+        # ── L22.3: Unified Task Submit ──
+
+        elif path == "/executor/task":
+            self._handle_submit_task(body)
 
         else:
             self._json_response(404, {"error": f"not found: {path}"})
@@ -441,6 +454,118 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
             "stderr": session.stderr[:2000] if session.stderr else "",
             "exit_code": session.exit_code,
             "elapsed_sec": round(time.time() - session.started_at, 1),
+        })
+
+
+    # ── L22.3: Task Submit / Observe Handlers ──
+
+    def _handle_submit_task(self, body):
+        """POST /executor/task — Unified API entry point for task submission.
+
+        Generates a task_id and observer_token, registers an observer session,
+        submits the task to task_orchestrator asynchronously, and returns
+        immediately without blocking on execution.
+        """
+        import uuid
+        from datetime import datetime, timezone
+
+        message = body.get("message", "")
+        if not message:
+            self._json_response(400, {"error": "message is required"})
+            return
+
+        source = body.get("source", "api")
+        session_type = body.get("session_type", "task")
+        project_id = body.get("project_id", "amingClaw")
+        chat_id = body.get("chat_id", 0)
+
+        # Generate unique IDs
+        task_id = f"task-api-{uuid.uuid4().hex[:12]}"
+        observer_token = uuid.uuid4().hex
+        observer_url = f"/executor/task/{task_id}/observe"
+
+        # Register observer session (before dispatching so observe can see it immediately)
+        _observer_sessions[task_id] = {
+            "token": observer_token,
+            "status": "accepted",
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source": source,
+            "session_type": session_type,
+            "project_id": project_id,
+        }
+
+        # Build payload for orchestrator
+        payload = {
+            "source": source,
+            "session_type": session_type,
+            "message": message,
+            "project_id": project_id,
+            "chat_id": chat_id,
+        }
+
+        # Dispatch asynchronously — do not block the HTTP response
+        if _orchestrator:
+            import threading as _threading
+            t = _threading.Thread(
+                target=_orchestrator.handle_task_from_api,
+                args=(task_id, payload),
+                daemon=True,
+                name=f"api-task-{task_id[:16]}",
+            )
+            t.start()
+            _observer_sessions[task_id]["status"] = "pending"
+        else:
+            log.warning("POST /executor/task: orchestrator not initialized, task accepted but not dispatched")
+
+        self._json_response(200, {
+            "task_id": task_id,
+            "observer_token": observer_token,
+            "observer_url": observer_url,
+            "status": "accepted",
+        })
+
+    def _handle_observe_task(self, task_id):
+        """GET /executor/task/{task_id}/observe — Query task execution status.
+
+        Combines observer session metadata with filesystem stage information
+        to return the current status of a submitted task.
+        """
+        from pathlib import Path
+
+        session = _observer_sessions.get(task_id)
+        if session is None:
+            self._json_response(404, {"error": f"observer session not found for task {task_id}"})
+            return
+
+        # Probe filesystem stage
+        tasks_root = Path(os.getenv("SHARED_VOLUME_PATH",
+            os.path.join(os.path.dirname(__file__), "..", "shared-volume"))
+        ) / "codex-tasks"
+
+        fs_stage = None
+        for stage in ("pending", "processing", "results"):
+            if (tasks_root / stage / f"{task_id}.json").exists():
+                fs_stage = stage
+                break
+
+        # Map filesystem stage to observable status
+        stage_to_status = {
+            "pending": "queued",
+            "processing": "running",
+            "results": "completed",
+        }
+        status = stage_to_status.get(fs_stage, session.get("status", "accepted"))
+
+        self._json_response(200, {
+            "task_id": task_id,
+            "status": status,
+            "fs_stage": fs_stage,
+            "observer_token": session.get("token"),
+            "observer_url": f"/executor/task/{task_id}/observe",
+            "created_at": session.get("created_at"),
+            "source": session.get("source"),
+            "session_type": session.get("session_type"),
+            "project_id": session.get("project_id"),
         })
 
 
