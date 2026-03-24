@@ -15,10 +15,98 @@ import logging
 import os
 import threading
 import time
+import uuid as _uuid
+from datetime import datetime, timezone as _tz
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 log = logging.getLogger(__name__)
+
+
+class ObserverManager:
+    """In-process Observer session manager.
+
+    All state is stored in class-level dicts so it survives across requests
+    within the same process without any external dependency.
+    """
+
+    _sessions: dict = {}           # session_id -> {task_id, session_type, attached_at}
+    _active_session_id: "str|None" = None
+    _reports: dict = {}            # task_id -> report_dict
+
+    # ── Core session management ──
+
+    @classmethod
+    def attach(cls, task_id: str, session_type: str) -> str:
+        """Create a new observer session and mark it as active."""
+        session_id = _uuid.uuid4().hex
+        cls._sessions[session_id] = {
+            "task_id": task_id,
+            "session_type": session_type,
+            "attached_at": datetime.now(_tz.utc).isoformat(),
+        }
+        cls._active_session_id = session_id
+        return session_id
+
+    @classmethod
+    def detach(cls) -> bool:
+        """Clear the active session pointer (session record is kept for history)."""
+        if cls._active_session_id is None:
+            return False
+        cls._active_session_id = None
+        return True
+
+    @classmethod
+    def status(cls) -> dict:
+        """Return current active-session status including linked task metadata."""
+        if cls._active_session_id is None:
+            return {"active": False, "session_id": None, "session": None}
+        session = cls._sessions.get(cls._active_session_id)
+        return {
+            "active": True,
+            "session_id": cls._active_session_id,
+            "session": session,
+        }
+
+    @classmethod
+    def list_sessions(cls) -> list:
+        """Return all sessions (active and historic) as a list."""
+        return [
+            {"session_id": sid, **data}
+            for sid, data in cls._sessions.items()
+        ]
+
+    # ── Report helpers ──
+
+    @classmethod
+    def get_report(cls, task_id: str) -> "dict|None":
+        """Retrieve a previously generated report for *task_id*."""
+        return cls._reports.get(task_id)
+
+    @classmethod
+    def generate_report(cls, task_id: str, task_data: dict) -> dict:
+        """Build and cache an execution report from *task_data* snapshot."""
+        report = {
+            "task_id": task_id,
+            "generated_at": datetime.now(_tz.utc).isoformat(),
+            "start_time": task_data.get("created_at") or task_data.get("started_at", ""),
+            "end_time": task_data.get("completed_at") or task_data.get("finished_at", ""),
+            "status": task_data.get("status", "unknown"),
+            "result_summary": task_data.get("result") or task_data.get("summary", ""),
+            "source": task_data.get("source", ""),
+            "project_id": task_data.get("project_id", ""),
+        }
+        cls._reports[task_id] = report
+        return report
+
+    # ── Automatic registration ──
+
+    @classmethod
+    def auto_register(cls, task_id: str) -> str:
+        """Auto-attach an observer session when a task is created via API."""
+        session_id = cls.attach(task_id, session_type="auto")
+        cls.generate_report(task_id, {"task_id": task_id, "status": "accepted"})
+        return session_id
 
 PORT = int(os.getenv("EXECUTOR_API_PORT", "40100"))
 
@@ -102,6 +190,15 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
             task_id = path[len("/executor/task/"):-len("/observe")]
             self._handle_observe_task(task_id)
 
+        # ── Observer System ──
+        elif path == "/observer/status":
+            self._handle_observer_status()
+        elif path == "/observer/list":
+            self._handle_observer_list()
+        elif path.startswith("/observer/report/"):
+            task_id = path[len("/observer/report/"):]
+            self._handle_observer_report(task_id)
+
         # ── Health ──
         elif path == "/health":
             self._json_response(200, {
@@ -143,6 +240,14 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
 
         elif path == "/executor/task":
             self._handle_submit_task(body)
+
+        # ── Observer System ──
+        elif path == "/observer/attach":
+            self._handle_observer_attach(body)
+        elif path == "/observer/detach":
+            self._handle_observer_detach()
+        elif path == "/observer/downgrade":
+            self._handle_observer_downgrade()
 
         else:
             self._json_response(404, {"error": f"not found: {path}"})
@@ -484,6 +589,9 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
         observer_token = uuid.uuid4().hex
         observer_url = f"/executor/task/{task_id}/observe"
 
+        # Register ObserverManager auto session for the new task
+        ObserverManager.auto_register(task_id)
+
         # Register observer session (before dispatching so observe can see it immediately)
         _observer_sessions[task_id] = {
             "token": observer_token,
@@ -566,6 +674,120 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
             "source": session.get("source"),
             "session_type": session.get("session_type"),
             "project_id": session.get("project_id"),
+        })
+
+
+    # ── Observer System Handlers ──
+
+    def _handle_observer_attach(self, body):
+        """POST /observer/attach — Create and activate an observer session."""
+        task_id = body.get("task_id", "")
+        session_type = body.get("session_type", "manual")
+        if not task_id:
+            self._json_response(400, {"error": "task_id is required"})
+            return
+        session_id = ObserverManager.attach(task_id, session_type)
+        self._json_response(200, {
+            "session_id": session_id,
+            "task_id": task_id,
+            "session_type": session_type,
+            "active": True,
+        })
+
+    def _handle_observer_detach(self):
+        """POST /observer/detach — Deactivate the current observer session."""
+        ok = ObserverManager.detach()
+        if ok:
+            self._json_response(200, {"detached": True})
+        else:
+            self._json_response(200, {"detached": False, "note": "no active session"})
+
+    def _handle_observer_status(self):
+        """GET /observer/status — Active session status + linked task state."""
+        from pathlib import Path
+
+        status = ObserverManager.status()
+        task_stage = None
+        task_data = None
+
+        # If there is an active session, try to pull task state from filesystem
+        if status.get("active") and status.get("session"):
+            task_id = status["session"].get("task_id", "")
+            if task_id:
+                tasks_root = Path(os.getenv("SHARED_VOLUME_PATH",
+                    os.path.join(os.path.dirname(__file__), "..", "shared-volume"))
+                ) / "codex-tasks"
+                for stage in ("pending", "processing", "results"):
+                    fp = tasks_root / stage / f"{task_id}.json"
+                    if fp.exists():
+                        task_stage = stage
+                        try:
+                            with open(fp) as f:
+                                task_data = json.load(f)
+                        except Exception:
+                            task_data = {}
+                        break
+
+        self._json_response(200, {
+            **status,
+            "task_fs_stage": task_stage,
+            "task_snapshot": task_data,
+        })
+
+    def _handle_observer_report(self, task_id):
+        """GET /observer/report/{task_id} — Execution report for a task."""
+        from pathlib import Path
+
+        report = ObserverManager.get_report(task_id)
+        if report is None:
+            # Try to generate from filesystem data on demand
+            tasks_root = Path(os.getenv("SHARED_VOLUME_PATH",
+                os.path.join(os.path.dirname(__file__), "..", "shared-volume"))
+            ) / "codex-tasks"
+            task_data = None
+            for stage in ("pending", "processing", "results", "archive"):
+                fp = tasks_root / stage / f"{task_id}.json"
+                if fp.exists():
+                    try:
+                        with open(fp) as f:
+                            task_data = json.load(f)
+                        task_data["_stage"] = stage
+                    except Exception:
+                        pass
+                    break
+            if task_data is None:
+                self._json_response(404, {"error": f"no report and no task data found for {task_id}"})
+                return
+            report = ObserverManager.generate_report(task_id, task_data)
+
+        self._json_response(200, report)
+
+    def _handle_observer_list(self):
+        """GET /observer/list — All observer sessions."""
+        sessions = ObserverManager.list_sessions()
+        self._json_response(200, {
+            "sessions": sessions,
+            "total": len(sessions),
+            "active_session_id": ObserverManager._active_session_id,
+        })
+
+    def _handle_observer_downgrade(self):
+        """POST /observer/downgrade — Set active session type to 'manual'."""
+        sid = ObserverManager._active_session_id
+        if sid is None:
+            self._json_response(400, {"error": "no active observer session"})
+            return
+        session = ObserverManager._sessions.get(sid)
+        if session is None:
+            self._json_response(500, {"error": "active session id points to missing session"})
+            return
+        prev_type = session.get("session_type")
+        session["session_type"] = "manual"
+        self._json_response(200, {
+            "downgraded": True,
+            "session_id": sid,
+            "previous_session_type": prev_type,
+            "session_type": "manual",
         })
 
 

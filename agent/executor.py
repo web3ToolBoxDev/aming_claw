@@ -542,6 +542,31 @@ def process_task(path: Path) -> None:
             _registry_complete(task, "failed", error=str(exc)[:500])
     finally:
         _hb_stop.set()
+        # ── Auto-generate execution report on task completion ──
+        try:
+            from executor_api import ObserverManager
+            report = ObserverManager.generate_report(task_id, task)
+            if report:
+                # Persist report to dbservice (best-effort, following project pattern)
+                try:
+                    dbservice_url = os.getenv("DBSERVICE_URL", "http://localhost:40002")
+                    requests.post(
+                        f"{dbservice_url}/knowledge/upsert",
+                        json={
+                            "project_id": task.get("project_id", ""),
+                            "type": "task_report",
+                            "task_id": task_id,
+                            "content": report if isinstance(report, str) else _json.dumps(
+                                report, ensure_ascii=False),
+                        },
+                        timeout=5,
+                    )
+                except Exception:
+                    # dbservice 不可用时写入 task state 的 report 字段
+                    from task_state import save_task_status
+                    save_task_status(task_id, {"report": report})
+        except ImportError:
+            pass  # executor_api 未启动时跳过
 
 
 DEFAULT_WORKSPACE_MAP = {
