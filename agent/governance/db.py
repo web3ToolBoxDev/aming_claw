@@ -168,8 +168,19 @@ def _governance_root() -> Path:
     return Path(tasks_root()) / "state" / "governance"
 
 
+def _normalize_id(pid: str) -> str:
+    """Normalize project ID inline (avoid circular import with project_service)."""
+    import re
+    s = pid.strip()
+    s = re.sub(r'([a-z0-9])([A-Z])', r'\1-\2', s)
+    s = re.sub(r'[\s_]+', '-', s)
+    s = re.sub(r'-+', '-', s)
+    return s.lower().strip('-')
+
+
 def _project_db_path(project_id: str) -> Path:
     """Path to the SQLite database for a specific project."""
+    project_id = _normalize_id(project_id) if project_id else project_id
     project_dir = _governance_root() / project_id
     project_dir.mkdir(parents=True, exist_ok=True)
     return project_dir / "governance.db"

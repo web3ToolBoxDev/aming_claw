@@ -157,7 +157,8 @@ class RequestContext:
         self._conn = None
 
     def get_project_id(self) -> str:
-        return self.path_params.get("project_id", self.body.get("project_id", ""))
+        raw = self.path_params.get("project_id", self.body.get("project_id", ""))
+        return project_service._normalize_project_id(raw) if raw else raw
 
     def require_auth(self, conn) -> dict:
         """Authenticate and return session. Caches result."""
@@ -641,6 +642,25 @@ def handle_node_create(ctx: RequestContext):
             )
         except Exception:
             pass  # History is nice-to-have, don't block node creation
+
+        # P0-2 fix: also add node to in-memory graph + persist graph.json
+        try:
+            from .models import NodeDef
+            graph = project_service.load_project_graph(project_id)
+            node_def = NodeDef(
+                id=display_id,
+                title=title,
+                layer=f"L{parent_layer}",
+                primary=node.get("primary", []),
+            )
+            deps = node.get("deps", [])
+            # Filter deps to only existing graph nodes
+            valid_deps = [d for d in deps if graph.has_node(d)]
+            graph.add_node(node_def, deps=valid_deps)
+            from .db import _governance_root
+            graph.save(_governance_root() / project_id / "graph.json")
+        except Exception:
+            pass  # Graph update is best-effort; DB is source of truth
 
     return {
         "node_id": display_id,

@@ -490,7 +490,12 @@ def process_task(path: Path) -> None:
                         task_id=task["task_id"], project_id=task.get("project_id", ""),
                         token=task.get("_gov_token", ""), chat_id=chat_id,
                         test_report=result.get("executor", {}))
-                # qa_task triggers merge inside process_qa_task_v6 directly
+                elif task_type == "qa_task" and exec_status == "succeeded":
+                    from task_orchestrator import TaskOrchestrator
+                    TaskOrchestrator().handle_qa_complete(
+                        task_id=task["task_id"], project_id=task.get("project_id", ""),
+                        token=task.get("_gov_token", ""), chat_id=chat_id,
+                        qa_report=result.get("executor", {}))
             except Exception as chain_err:
                 print(f"[executor] chain trigger failed: {chain_err}")
                 if chat_id:

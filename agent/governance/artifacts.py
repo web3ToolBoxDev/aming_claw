@@ -20,6 +20,18 @@ log = logging.getLogger(__name__)
 ARTIFACT_CHECKERS = {}
 
 
+def _resolve_workspace(project_id: str) -> str:
+    """Resolve workspace path for a project. Falls back to WORKSPACE_PATH env."""
+    try:
+        from . import project_service
+        proj = project_service.get_project(project_id)
+        if proj and proj.get("workspace_path"):
+            return proj["workspace_path"]
+    except Exception:
+        pass
+    return os.environ.get("WORKSPACE_PATH", "/workspace")
+
+
 def artifact_checker(artifact_type: str):
     """Decorator to register an artifact checker."""
     def decorator(fn):
@@ -63,9 +75,8 @@ def check_test_file(node_id: str, config: dict, graph, project_id: str) -> dict:
         return {"pass": True, "reason": "No tests required"}
 
     missing = []
+    workspace = _resolve_workspace(project_id)
     for tf in test_files:
-        # Check if file exists in workspace
-        workspace = os.environ.get("WORKSPACE_PATH", "/workspace")
         full_path = os.path.join(workspace, tf)
         if not os.path.exists(full_path):
             missing.append(tf)
@@ -78,7 +89,7 @@ def check_test_file(node_id: str, config: dict, graph, project_id: str) -> dict:
 @artifact_checker("changelog")
 def check_changelog(node_id: str, config: dict, graph, project_id: str) -> dict:
     """Check that a changelog entry exists."""
-    workspace = os.environ.get("WORKSPACE_PATH", "/workspace")
+    workspace = _resolve_workspace(project_id)
     changelog_paths = ["CHANGELOG.md", "docs/CHANGELOG.md", "CHANGES.md"]
     for cp in changelog_paths:
         full = os.path.join(workspace, cp)

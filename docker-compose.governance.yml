@@ -24,7 +24,7 @@ services:
     expose:
       - "40006"
     volumes:
-      - governance-data:/app/shared-volume/codex-tasks/state/governance
+      - ./shared-volume/codex-tasks/state/governance:/app/shared-volume/codex-tasks/state/governance
       - .:/workspace:ro
     environment:
       - GOVERNANCE_PORT=40006
@@ -51,7 +51,7 @@ services:
     ports:
       - "40007:40007"
     volumes:
-      - governance-dev-data:/app/shared-volume/codex-tasks/state/governance
+      - ./shared-volume/codex-tasks/state/governance-dev:/app/shared-volume/codex-tasks/state/governance
       - .:/workspace:ro
     environment:
       - GOVERNANCE_PORT=40007
@@ -132,10 +132,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  governance-data:
-    driver: local
-  governance-dev-data:
-    driver: local
   redis-data:
     driver: local
   memory-data:

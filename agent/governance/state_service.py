@@ -240,12 +240,10 @@ def verify_update(
     now = _utc_iso()
 
     for node_id in node_ids:
-        # Verify node exists in graph
-        if not graph.has_node(node_id):
-            raise NodeNotFoundError(node_id)
-
-        # Get current state
+        # Verify node exists in graph or DB (dynamic nodes may only be in DB)
         current = get_node_status(conn, project_id, node_id)
+        if not graph.has_node(node_id) and current is None:
+            raise NodeNotFoundError(node_id)
         if current is None:
             raise NodeNotFoundError(node_id)
 
