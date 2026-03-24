@@ -142,10 +142,14 @@ class TaskOrchestrator:
 
         # 7. Execute approved actions
         executed = 0
+        exec_results = []
         for action in validation.approved_actions:
-            success = self._execute_action(action, project_id, token, chat_id)
-            if success:
+            result = self._execute_action(action, project_id, token, chat_id)
+            exec_results.append(result)
+            if result.get("success"):
                 executed += 1
+            else:
+                log.error("Action failed: %s — %s", result.get("action_type"), result.get("error"))
 
         # 8. Get reply
         reply = ai_decision.get("reply", "")
@@ -391,75 +395,98 @@ class TaskOrchestrator:
             return {"pass": False, "error": str(e)}
 
     def _execute_action(self, action: dict, project_id: str, token: str = "",
-                        chat_id: int = 0) -> bool:
-        """Execute a validated action. Code-controlled."""
+                        chat_id: int = 0) -> dict:
+        """Execute a validated action. Code-controlled.
+
+        Returns:
+            {"success": bool, "action_type": str, "detail": str, "error": str|None}
+            Never silently swallows failures.
+        """
         action_type = action.get("type", "")
         gov_url = os.getenv("GOVERNANCE_URL", "http://localhost:40000")
         t = token or os.getenv("GOV_COORDINATOR_TOKEN", "")
+
+        def _ok(detail: str = "") -> dict:
+            return {"success": True, "action_type": action_type, "detail": detail, "error": None}
+
+        def _fail(error: str) -> dict:
+            log.error("Action %s FAILED: %s", action_type, error)
+            return {"success": False, "action_type": action_type, "detail": "", "error": error}
 
         try:
             import requests
 
             if action_type == "create_dev_task":
-                # Write task file for executor
                 task_id = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
                 self._write_task_file(task_id, action, project_id, t, "dev_task", chat_id)
                 log.info("Created dev task: %s", task_id)
-                return True
+                return _ok(f"task_id={task_id}")
 
             elif action_type == "create_test_task":
                 task_id = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
                 self._write_task_file(task_id, action, project_id, t, "test_task", chat_id)
-                return True
+                return _ok(f"task_id={task_id}")
 
             elif action_type == "query_governance":
                 endpoint = action.get("endpoint", "")
                 if endpoint:
-                    requests.get(f"{gov_url}{endpoint}",
-                               headers={"X-Gov-Token": t}, timeout=5)
-                return True
+                    r = requests.get(f"{gov_url}{endpoint}",
+                                    headers={"X-Gov-Token": t}, timeout=5)
+                    if r.status_code >= 400:
+                        return _fail(f"query {endpoint} returned {r.status_code}")
+                return _ok(f"endpoint={endpoint}")
 
             elif action_type == "update_context":
                 context_update = action if "current_focus" in action else {}
                 if context_update:
-                    requests.post(f"{gov_url}/api/context/{project_id}/save",
+                    r = requests.post(f"{gov_url}/api/context/{project_id}/save",
                         headers={"Content-Type": "application/json", "X-Gov-Token": t},
                         json={"context": context_update}, timeout=5)
-                return True
+                    if r.status_code >= 400:
+                        return _fail(f"context save returned {r.status_code}: {r.text[:100]}")
+                return _ok()
 
             elif action_type == "propose_node":
-                # Already validated by GraphValidator (ID/deps/cycle/path)
                 node = action.get("node", {})
-                node_id = node.get("id", "")
-                # Create node via governance API
-                result = requests.post(
+                parent_layer = node.get("parent_layer") or action.get("parent_layer")
+                title = node.get("title", "")
+
+                # v7.1: System allocates node ID — AI only provides parent_layer + title
+                r = requests.post(
                     f"{gov_url}/api/wf/{project_id}/node-create",
                     headers={"Content-Type": "application/json", "X-Gov-Token": t},
-                    json={"node": node},
+                    json={
+                        "parent_layer": parent_layer,
+                        "title": title,
+                        "node": node,
+                    },
                     timeout=10
                 )
-                if result.status_code < 300:
+                if r.status_code < 300:
+                    result_data = r.json() if r.text else {}
+                    node_id = result_data.get("node_id", "?")
                     log.info("Node created via propose: %s", node_id)
+                    return _ok(f"node_id={node_id}")
                 else:
-                    log.warning("Node creation failed: %s %s", node_id, result.text[:200])
-                return True
+                    return _fail(f"node-create returned {r.status_code}: {r.text[:200]}")
 
             elif action_type == "archive_memory":
                 dbservice_url = os.getenv("DBSERVICE_URL", "http://localhost:40002")
-                requests.post(f"{dbservice_url}/knowledge/upsert",
+                r = requests.post(f"{dbservice_url}/knowledge/upsert",
                     json=action.get("memory", {}), timeout=5)
-                return True
+                if r.status_code >= 400:
+                    return _fail(f"memory upsert returned {r.status_code}")
+                return _ok()
 
             elif action_type == "reply_only":
-                return True
+                return _ok()
 
             else:
-                log.warning("Unknown action type: %s", action_type)
-                return False
+                return _fail(f"Unknown action type: {action_type}")
 
         except Exception as e:
             log.exception("Failed to execute action %s: %s", action_type, e)
-            return False
+            return _fail(str(e))
 
     def _write_task_file(self, task_id: str, action: dict,
                          project_id: str, token: str, task_type: str,

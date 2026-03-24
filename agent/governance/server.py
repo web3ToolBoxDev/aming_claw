@@ -559,6 +559,94 @@ def handle_import_graph(ctx: RequestContext):
     return result
 
 
+@route("POST", "/api/wf/{project_id}/node-create")
+def handle_node_create(ctx: RequestContext):
+    """Create a single node. System allocates display_id.
+
+    AI provides: parent_layer (int) + title + deps + primary
+    System provides: display_id (L{layer}.{next_index})
+
+    Body: {
+        "parent_layer": 22,          // required: which layer
+        "title": "ContextStore",     // required
+        "node": {                    // optional extras
+            "deps": ["L15.1"],
+            "primary": ["agent/context_store.py"],
+            "description": "..."
+        }
+    }
+    """
+    project_id = ctx.get_project_id()
+    parent_layer = ctx.body.get("parent_layer")
+    title = ctx.body.get("title", "")
+    node = ctx.body.get("node", {})
+
+    if not parent_layer and not title:
+        # Fallback: try to read from node.id (legacy)
+        node_id = node.get("id", "")
+        if node_id:
+            parent_layer = int(node_id.split(".")[0][1:]) if "." in node_id else None
+            title = node.get("title", node_id)
+
+    if parent_layer is None:
+        from .errors import ValidationError
+        raise ValidationError("parent_layer is required (e.g., 22 for L22.x)")
+
+    if not title:
+        from .errors import ValidationError
+        raise ValidationError("title is required")
+
+    with DBContext(project_id) as conn:
+        session = ctx.require_auth(conn)
+        if session.get("role") not in ("coordinator", "pm"):
+            from .errors import PermissionDeniedError
+            raise PermissionDeniedError(session.get("role", ""), "node-create",
+                                        {"detail": "Only coordinator or PM can create nodes"})
+
+        # System allocates display_id: find max index in this layer
+        prefix = f"L{parent_layer}."
+        existing = conn.execute(
+            "SELECT node_id FROM node_state WHERE project_id = ? AND node_id LIKE ?",
+            (project_id, f"{prefix}%")
+        ).fetchall()
+
+        max_index = 0
+        for row in existing:
+            try:
+                idx = int(row["node_id"].split(".")[1])
+                max_index = max(max_index, idx)
+            except (ValueError, IndexError):
+                pass
+
+        new_index = max_index + 1
+        display_id = f"L{parent_layer}.{new_index}"
+
+        # Insert node state
+        now = __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())
+        conn.execute(
+            """INSERT OR IGNORE INTO node_state
+               (project_id, node_id, verify_status, build_status, updated_at, version)
+               VALUES (?, ?, 'pending', 'unknown', ?, 1)""",
+            (project_id, display_id, now)
+        )
+
+        # Record in history
+        conn.execute(
+            """INSERT INTO node_history (project_id, node_id, from_status, to_status, changed_by, evidence_json, created_at)
+               VALUES (?, ?, 'none', 'pending', ?, ?, ?)""",
+            (project_id, display_id, session.get("principal_id", "system"),
+             json.dumps({"title": title, "deps": node.get("deps", []), "primary": node.get("primary", [])}),
+             now)
+        )
+
+    return {
+        "node_id": display_id,
+        "parent_layer": parent_layer,
+        "title": title,
+        "created": True,
+    }
+
+
 @route("POST", "/api/wf/{project_id}/verify-update")
 def handle_verify_update(ctx: RequestContext):
     project_id = ctx.get_project_id()

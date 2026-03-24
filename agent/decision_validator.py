@@ -29,32 +29,30 @@ class ValidationError(ValueError):
 
 
 def validate_dev_task_node(node: dict) -> None:
-    """Hard rule #1 — dev_task 类型节点必须携带非空 target_files 列表。
+    """Hard rule #1 — dev_task must have explicit file contract.
 
-    Args:
-        node: 节点描述 dict，至少应包含 ``type`` 字段。
-
-    Raises:
-        ValidationError: 当 node.type == 'dev_task' 且 target_files 缺失或为空时。
-
-    Example::
-
-        node_ok  = {"type": "dev_task", "target_files": ["agent/foo.py"]}
-        node_bad = {"type": "dev_task", "target_files": []}
-        validate_dev_task_node(node_ok)   # OK — no exception
-        validate_dev_task_node(node_bad)  # raises ValidationError
+    Required: target_files (files to modify, must exist)
+    Optional: create_files (new files to create, must NOT exist)
+    Optional: forbidden_files (files NOT allowed to touch)
     """
     if node.get("type") != "dev_task":
-        return  # rule only applies to dev_task nodes
+        return
 
     target_files = node.get("target_files")
-    if not target_files:  # None, missing, or empty list
+    if not target_files and not node.get("create_files"):
         raise ValidationError(
-            "Hard rule #1 violated: dev_task 节点缺少必要的 target_files 字段，"
-            "或 target_files 列表为空。每个 dev_task 节点必须明确指定至少一个目标文件，"
-            "以便后续执行器知道要修改哪些文件。"
-            f" (node={node!r})"
+            "Hard rule #1 violated: dev_task must have target_files or create_files. "
+            "target_files = existing files to modify. "
+            "create_files = new files to create. "
+            "At least one must be non-empty."
+            f" (node keys={list(node.keys())})"
         )
+
+    # Validate paths don't have dangerous patterns
+    all_files = (target_files or []) + (node.get("create_files") or [])
+    for f in all_files:
+        if ".." in f or f.startswith("/") or f.startswith("\\"):
+            raise ValidationError(f"Hard rule #1: unsafe path in file contract: {f}")
 
 
 def validate_session(session: dict) -> None:

@@ -598,8 +598,25 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
         ctx_asm = ContextAssembler()
         tlog.log_event("v6_modules_loaded")
 
-        # 1. Git worktree: create isolated directory for dev work
+        # 0. Enforce clean worktree (P-1.4: prevent experiment pollution)
         main_workspace = resolve_workspace(task)
+        try:
+            status_r = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=main_workspace, capture_output=True, text=True, timeout=10)
+            dirty_files = [l for l in status_r.stdout.strip().split("\n") if l.strip()]
+            if dirty_files:
+                tlog.log_event("workspace_dirty", {"files": dirty_files[:5]})
+                print(f"[executor-v6] WARNING: workspace has {len(dirty_files)} uncommitted files")
+                # Auto-stash to prevent pollution
+                subprocess.run(
+                    ["git", "stash", "push", "-m", f"auto-clean-{task_id}"],
+                    cwd=main_workspace, capture_output=True, text=True, timeout=10)
+                print(f"[executor-v6] auto-stashed dirty files")
+        except Exception as e:
+            print(f"[executor-v6] clean check failed: {e}")
+
+        # 1. Git worktree: create isolated directory for dev work
         worktree_dir = ""
         if not branch:
             branch = f"dev/{task_id}"
