@@ -83,7 +83,25 @@ class AILifecycleManager:
         claude_bin = os.getenv("CLAUDE_BIN", "claude")
         cwd = workspace or os.getenv("CODEX_WORKSPACE", os.getcwd())
 
-        cmd = [claude_bin, "-p", "--dangerously-skip-permissions"]
+        # v7: Write system prompt to file, use --system-prompt-file + -p
+        # This gives Claude full tool access (Write/Edit/Bash) while still
+        # capturing structured output via stdout.
+        import tempfile
+        prompt_file = os.path.join(tempfile.gettempdir(), f"ctx-{session_id}.md")
+        try:
+            with open(prompt_file, "w", encoding="utf-8") as f:
+                f.write(system_prompt)
+            log.info("Prompt file written: %s (%d bytes)", prompt_file, len(system_prompt))
+        except Exception as e:
+            log.error("Failed to write prompt file: %s", e)
+
+        cmd = [
+            claude_bin,
+            "-p",                              # Print mode (structured output)
+            "--dangerously-skip-permissions",   # Skip permission prompts
+            "--system-prompt-file", prompt_file, # Context via file (no stdin truncation)
+            prompt,                             # User message as positional arg
+        ]
 
         # Strip env vars that cause nested Claude issues
         env = {k: v for k, v in os.environ.items()
@@ -93,7 +111,6 @@ class AILifecycleManager:
         try:
             proc = subprocess.Popen(
                 cmd,
-                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -128,11 +145,11 @@ class AILifecycleManager:
         log.info("AI session created: %s (role=%s, pid=%d, timeout=%ds)",
                  session_id, role, proc.pid, timeout_sec)
 
-        # Write prompt to stdin and wait in background thread
+        # Wait for output in background thread (no stdin — prompt is via file + arg)
         def _run():
             try:
                 stdout, stderr = proc.communicate(
-                    input=system_prompt, timeout=timeout_sec
+                    timeout=timeout_sec
                 )
                 session.stdout = stdout or ""
                 session.stderr = stderr or ""
@@ -148,6 +165,13 @@ class AILifecycleManager:
                 session.status = "failed"
                 session.stderr = str(e)
                 log.exception("AI session error: %s", session_id)
+            finally:
+                # Cleanup prompt file
+                try:
+                    if os.path.exists(prompt_file):
+                        os.remove(prompt_file)
+                except Exception:
+                    pass
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
