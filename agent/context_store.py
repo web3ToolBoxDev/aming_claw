@@ -58,6 +58,21 @@ class ContextStore:
                     created_at DATETIME,
                     archived_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
+
+                CREATE TABLE IF NOT EXISTS context_audit (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id  TEXT NOT NULL,
+                    project_id  TEXT,
+                    role        TEXT,
+                    prompt      TEXT,
+                    ai_stdout   TEXT,
+                    status      TEXT,
+                    duration_ms INTEGER,
+                    created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_context_audit_session_id
+                    ON context_audit(session_id);
             """)
 
     # ------------------------------------------------------------------
@@ -124,6 +139,41 @@ class ContextStore:
             self._conn.execute("DELETE FROM context WHERE task_id = ?", (task_id,))
         self._redis_delete(f"ctx:{task_id}")
 
+    def insert_audit(
+        self,
+        session_id: str,
+        project_id: Optional[str],
+        role: Optional[str],
+        prompt: Optional[str],
+        ai_stdout: Optional[str],
+        status: Optional[str],
+        duration_ms: Optional[int],
+    ) -> None:
+        """Insert one audit record into context_audit."""
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO context_audit
+                    (session_id, project_id, role, prompt, ai_stdout, status, duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, project_id, role, prompt, ai_stdout, status, duration_ms),
+            )
+
+    def query_audit_by_session(self, session_id: str) -> list[dict]:
+        """Return all audit records for *session_id*, ordered by created_at ASC."""
+        cursor = self._conn.execute(
+            """
+            SELECT session_id, project_id, role, prompt, ai_stdout,
+                   status, duration_ms, created_at
+            FROM context_audit
+            WHERE session_id = ?
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -143,6 +193,49 @@ class ContextStore:
             self._redis.delete(key)
         except Exception as exc:
             logger.warning("Redis delete failed for key '%s': %s", key, exc)
+
+
+def query_audit_by_session(session_id: str, db_path: Optional[str] = None) -> list:
+    """Module-level helper: query audit records for *session_id*.
+
+    When *db_path* is ``None`` the path is derived from the
+    ``SHARED_VOLUME_PATH`` environment variable (falling back to
+    ``../shared-volume`` relative to this file).  A fresh, short-lived
+    connection is used so callers do not need a pre-existing
+    :class:`ContextStore` instance.
+
+    Returns a list of dicts with keys:
+    ``role``, ``prompt``, ``ai_stdout``, ``status``, ``duration_ms``, ``created_at``.
+    Returns an empty list if no records exist or the DB is not yet initialised.
+    """
+    import os as _os
+    if db_path is None:
+        shared_vol = _os.getenv(
+            "SHARED_VOLUME_PATH",
+            _os.path.join(_os.path.dirname(__file__), "..", "shared-volume"),
+        )
+        db_path = _os.path.join(shared_vol, "context_store.db")
+
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                """
+                SELECT role, prompt, ai_stdout, status, duration_ms, created_at
+                FROM context_audit
+                WHERE session_id = ?
+                ORDER BY created_at ASC
+                """,
+                (session_id,),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+        return rows
+    except Exception as exc:
+        logger.warning("query_audit_by_session('%s') failed: %s", session_id, exc)
+        return []
 
 
 class PromptRenderer:

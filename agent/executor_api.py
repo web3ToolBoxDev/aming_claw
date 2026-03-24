@@ -22,6 +22,11 @@ from urllib.parse import urlparse, parse_qs
 
 log = logging.getLogger(__name__)
 
+try:
+    from context_store import query_audit_by_session as _query_audit_by_session
+except ImportError:  # pragma: no cover — only absent in unit-test stubs
+    _query_audit_by_session = None  # type: ignore[assignment]
+
 
 class ObserverManager:
     """In-process Observer session manager.
@@ -198,6 +203,11 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
         elif path.startswith("/observer/report/"):
             task_id = path[len("/observer/report/"):]
             self._handle_observer_report(task_id)
+
+        # ── Context Audit Trace ──
+        elif path.startswith("/ctx/") and path.endswith("/trace"):
+            session_id = path[len("/ctx/"):-len("/trace")]
+            self._handle_ctx_trace(session_id)
 
         # ── Health ──
         elif path == "/health":
@@ -789,6 +799,40 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
             "previous_session_type": prev_type,
             "session_type": "manual",
         })
+
+
+    # ── Context Audit Trace Handler ──
+
+    def _handle_ctx_trace(self, session_id: str):
+        """GET /ctx/{session_id}/trace — Return audit trace for a session.
+
+        Calls ``context_store.query_audit_by_session`` to fetch all audit
+        records associated with *session_id*.  Always returns HTTP 200; an
+        absent session yields an empty ``trace`` list.
+        """
+        try:
+            if _query_audit_by_session is None:
+                raise RuntimeError("context_store.query_audit_by_session is not available")
+            records = _query_audit_by_session(session_id)
+            # Normalise each record to the documented schema; fill missing keys
+            # with safe defaults so callers can rely on a stable shape.
+            trace = [
+                {
+                    "role":        r.get("role") or "",
+                    "prompt":      r.get("prompt") or "",
+                    "ai_stdout":   r.get("ai_stdout") or "",
+                    "status":      r.get("status") or "",
+                    "duration_ms": r.get("duration_ms") or 0,
+                    "created_at":  r.get("created_at") or "",
+                }
+                for r in records
+            ]
+            self._json_response(200, {"session_id": session_id, "trace": trace})
+        except Exception as exc:
+            log.exception("GET /ctx/%s/trace failed", session_id)
+            self._json_response(500, {
+                "error": f"failed to retrieve trace: {str(exc)[:300]}"
+            })
 
 
 def start_api_server():
