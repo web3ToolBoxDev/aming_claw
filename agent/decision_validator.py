@@ -16,6 +16,102 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
+# ──────────────────────────────────────────────
+# Hard-Rule Validation (code-enforced, AI cannot bypass)
+# ──────────────────────────────────────────────
+
+class ValidationError(ValueError):
+    """Raised when a hard-rule validation fails.
+
+    Subclasses ValueError so callers that only catch ValueError still work.
+    Always carries a descriptive message indicating which field/condition failed.
+    """
+
+
+def validate_dev_task_node(node: dict) -> None:
+    """Hard rule #1 — dev_task 类型节点必须携带非空 target_files 列表。
+
+    Args:
+        node: 节点描述 dict，至少应包含 ``type`` 字段。
+
+    Raises:
+        ValidationError: 当 node.type == 'dev_task' 且 target_files 缺失或为空时。
+
+    Example::
+
+        node_ok  = {"type": "dev_task", "target_files": ["agent/foo.py"]}
+        node_bad = {"type": "dev_task", "target_files": []}
+        validate_dev_task_node(node_ok)   # OK — no exception
+        validate_dev_task_node(node_bad)  # raises ValidationError
+    """
+    if node.get("type") != "dev_task":
+        return  # rule only applies to dev_task nodes
+
+    target_files = node.get("target_files")
+    if not target_files:  # None, missing, or empty list
+        raise ValidationError(
+            "Hard rule #1 violated: dev_task 节点缺少必要的 target_files 字段，"
+            "或 target_files 列表为空。每个 dev_task 节点必须明确指定至少一个目标文件，"
+            "以便后续执行器知道要修改哪些文件。"
+            f" (node={node!r})"
+        )
+
+
+def validate_session(session: dict) -> None:
+    """Hard rule #2 — session 对象必须包含 snapshot 字段。
+
+    Args:
+        session: session 描述 dict。
+
+    Raises:
+        ValidationError: 当 session 缺少 snapshot 字段时。
+
+    Example::
+
+        sess_ok  = {"id": "s1", "snapshot": {"files": [], "ts": 1234567890}}
+        sess_bad = {"id": "s1"}
+        validate_session(sess_ok)   # OK — no exception
+        validate_session(sess_bad)  # raises ValidationError
+    """
+    if "snapshot" not in session or session["snapshot"] is None:
+        raise ValidationError(
+            "Hard rule #2 violated: session 对象缺少必要的 snapshot 字段。"
+            " snapshot 记录了执行前的环境状态快照，是回滚与审计的关键依据，"
+            "必须在 session 初始化时写入。"
+            f" (session keys={list(session.keys())!r})"
+        )
+
+
+def validate_evidence(evidence: dict) -> None:
+    """Hard rule #3 — evidence 对象必须包含 result / timestamp / node_id 三个非空字段。
+
+    Args:
+        evidence: 执行证据 dict。
+
+    Raises:
+        ValidationError: 当三个必填字段中任意一个缺失或为空时。
+
+    Example::
+
+        ev_ok = {"result": "pass", "timestamp": "2026-03-23T10:00:00", "node_id": "L1.3"}
+        ev_bad = {"result": "pass", "timestamp": "2026-03-23T10:00:00"}  # 缺 node_id
+        validate_evidence(ev_ok)   # OK — no exception
+        validate_evidence(ev_bad)  # raises ValidationError
+    """
+    required_fields = ("result", "timestamp", "node_id")
+    missing_or_empty = [
+        f for f in required_fields
+        if not evidence.get(f)  # covers missing key, None, and empty string/list/dict
+    ]
+    if missing_or_empty:
+        raise ValidationError(
+            f"Hard rule #3 violated: evidence 对象缺少或为空的必要字段: {missing_or_empty}。"
+            " evidence 必须同时包含 result（执行结果）、timestamp（执行时间戳）、"
+            "node_id（关联节点 ID）三个字段且均不得为空，以保证可追溯性。"
+            f" (evidence keys present={list(evidence.keys())!r})"
+        )
+
+
 @dataclass
 class LayerResult:
     layer: str
@@ -245,3 +341,121 @@ def build_retry_prompt(ai_output: dict, validation: ValidationResult) -> str:
     lines.append("请重新分析，在权限范围内重新输出决策。")
     lines.append("被拒绝的 action 不要重复输出，换一种合法的方式实现目标。")
     return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────
+# 示例用法 / Usage examples
+# (供编写单元测试时参考)
+# ──────────────────────────────────────────────
+#
+# 快速运行: python agent/decision_validator.py
+#
+# 测试文件建议路径: agent/tests/test_decision_validator_hard_rules.py
+#
+# 示例测试片段:
+#
+#   from decision_validator import ValidationError, validate_dev_task_node, \
+#       validate_session, validate_evidence
+#
+#   # ── Hard rule #1 ──
+#   def test_dev_task_requires_target_files():
+#       import pytest
+#       with pytest.raises(ValidationError, match="target_files"):
+#           validate_dev_task_node({"type": "dev_task", "target_files": []})
+#
+#   def test_dev_task_non_dev_task_skipped():
+#       validate_dev_task_node({"type": "qa_task"})  # 不应抛出异常
+#
+#   # ── Hard rule #2 ──
+#   def test_session_requires_snapshot():
+#       import pytest
+#       with pytest.raises(ValidationError, match="snapshot"):
+#           validate_session({"id": "s1"})
+#
+#   def test_session_snapshot_none_raises():
+#       import pytest
+#       with pytest.raises(ValidationError):
+#           validate_session({"id": "s1", "snapshot": None})
+#
+#   # ── Hard rule #3 ──
+#   def test_evidence_requires_all_fields():
+#       import pytest
+#       with pytest.raises(ValidationError, match="node_id"):
+#           validate_evidence({"result": "pass", "timestamp": "2026-01-01T00:00:00"})
+#
+#   def test_evidence_empty_field_raises():
+#       import pytest
+#       with pytest.raises(ValidationError, match="result"):
+#           validate_evidence({"result": "", "timestamp": "2026-01-01T00:00:00", "node_id": "L1.3"})
+#
+#   def test_evidence_all_fields_ok():
+#       validate_evidence({"result": "pass", "timestamp": "2026-01-01T00:00:00", "node_id": "L1.3"})
+
+
+if __name__ == "__main__":
+    import traceback
+
+    print("=" * 60)
+    print("decision_validator — Hard Rules 自检示例")
+    print("=" * 60)
+
+    cases = [
+        # (描述, callable)
+        (
+            "[#1 PASS] dev_task with target_files",
+            lambda: validate_dev_task_node({"type": "dev_task", "target_files": ["agent/foo.py"]}),
+        ),
+        (
+            "[#1 FAIL] dev_task with empty target_files",
+            lambda: validate_dev_task_node({"type": "dev_task", "target_files": []}),
+        ),
+        (
+            "[#1 PASS] non-dev_task node skipped",
+            lambda: validate_dev_task_node({"type": "qa_task"}),
+        ),
+        (
+            "[#2 PASS] session with snapshot",
+            lambda: validate_session({"id": "s1", "snapshot": {"ts": 1234567890}}),
+        ),
+        (
+            "[#2 FAIL] session missing snapshot",
+            lambda: validate_session({"id": "s1"}),
+        ),
+        (
+            "[#2 FAIL] session snapshot is None",
+            lambda: validate_session({"id": "s1", "snapshot": None}),
+        ),
+        (
+            "[#3 PASS] evidence with all required fields",
+            lambda: validate_evidence(
+                {"result": "pass", "timestamp": "2026-03-23T10:00:00", "node_id": "L1.3"}
+            ),
+        ),
+        (
+            "[#3 FAIL] evidence missing node_id",
+            lambda: validate_evidence(
+                {"result": "pass", "timestamp": "2026-03-23T10:00:00"}
+            ),
+        ),
+        (
+            "[#3 FAIL] evidence empty result",
+            lambda: validate_evidence(
+                {"result": "", "timestamp": "2026-03-23T10:00:00", "node_id": "L1.3"}
+            ),
+        ),
+    ]
+
+    for desc, fn in cases:
+        try:
+            fn()
+            print(f"  OK  {desc}")
+        except ValidationError as exc:
+            # Expected failures should show as "BLOCKED" not tracebacks
+            print(f"  BLOCKED  {desc}")
+            print(f"           → {exc}")
+        except Exception:
+            print(f"  ERROR  {desc}")
+            traceback.print_exc()
+
+    print("=" * 60)
+    print("自检完成。BLOCKED 行表示校验正确拦截了非法输入。")
