@@ -178,6 +178,8 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
         elif path.startswith("/trace/"):
             trace_id = path.split("/trace/")[1]
             self._handle_trace(trace_id)
+        elif path == "/ctx/list":
+            self._handle_ctx_list()
 
         # ── Debugging (L18.5) ──
 
@@ -823,6 +825,25 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
             "session_type": "manual",
         })
 
+
+    # ── Context List Handler ──
+
+    def _handle_ctx_list(self):
+        """GET /ctx/list — List all context sessions from audit."""
+        try:
+            if _query_audit_by_session:
+                # Get recent sessions from context_store audit
+                sessions = _query_audit_by_session(limit=50)
+                self._json_response(200, {"sessions": sessions})
+            else:
+                # Fallback: list from observer sessions
+                sessions = [
+                    {"task_id": tid, **info}
+                    for tid, info in _observer_sessions.items()
+                ]
+                self._json_response(200, {"sessions": sessions})
+        except Exception as e:
+            self._json_response(200, {"sessions": [], "note": str(e)[:200]})
 
     # ── Context Audit Trace Handler ──
 

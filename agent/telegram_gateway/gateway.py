@@ -529,6 +529,13 @@ HELP_TEXT = """Aming Claw Gateway
 绑定后直接发送文本将转发给 Coordinator。"""
 
 
+# Telegram command whitelist (Gap 7)
+ALLOWED_COMMANDS = {"/help", "/start", "/menu", "/bind", "/unbind",
+                    "/status", "/projects", "/health"}
+BLOCKED_COMMANDS = {"/force-merge", "/kill", "/coord-end", "/deploy",
+                    "/rm", "/reset", "/drop"}
+
+
 def handle_message(chat_id: int, text: str, msg: dict = None) -> None:
     """Route incoming message."""
     if not text:
@@ -537,6 +544,11 @@ def handle_message(chat_id: int, text: str, msg: dict = None) -> None:
     parts = text.strip().split(maxsplit=1)
     cmd = parts[0].lower()
     args = parts[1] if len(parts) > 1 else ""
+
+    # Gap 7: Command whitelist enforcement
+    if cmd.startswith("/") and cmd in BLOCKED_COMMANDS:
+        send_text(chat_id, f"命令 {cmd} 被安全策略阻止。")
+        return
 
     if cmd in ("/help", "/start"):
         send_text(chat_id, HELP_TEXT)

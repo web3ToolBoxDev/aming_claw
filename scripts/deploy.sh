@@ -82,6 +82,30 @@ if [ "$MODE" = "--rollback" ]; then
 fi
 
 # ══════════════════════════════════════════════
+# 活跃 Task 检查（防止中断其他项目）
+# ══════════════════════════════════════════════
+step "活跃 Task 检查"
+PROCESSING_DIR="shared-volume/codex-tasks/processing"
+if [ -d "$PROCESSING_DIR" ]; then
+    ACTIVE_COUNT=$(ls "$PROCESSING_DIR"/*.json 2>/dev/null | wc -l)
+    if [ "$ACTIVE_COUNT" -gt 0 ]; then
+        warn "发现 $ACTIVE_COUNT 个活跃 task:"
+        for f in "$PROCESSING_DIR"/*.json; do
+            TASK_ID=$(python3 -c "import json;print(json.load(open('$f')).get('task_id','?'))" 2>/dev/null || echo "?")
+            PROJ=$(python3 -c "import json;print(json.load(open('$f')).get('project_id','?'))" 2>/dev/null || echo "?")
+            warn "  $TASK_ID ($PROJ)"
+        done
+        if [ "$MODE" != "--force" ]; then
+            die "有活跃 task 运行中。使用 --force 强制部署，或等 task 完成。"
+        else
+            warn "⚠️  --force 模式: 忽略活跃 task 继续部署"
+        fi
+    else
+        log "✅ 无活跃 task"
+    fi
+fi
+
+# ══════════════════════════════════════════════
 # 质量门禁（仅在设置 GOV_COORDINATOR_TOKEN 时）
 # ══════════════════════════════════════════════
 if [ -n "$COORD" ] && [ "$MODE" != "--restart-only" ]; then
