@@ -247,6 +247,134 @@ def check_tool_policy(command: str) -> str:
     return "allow"
 
 
+# ---------------------------------------------------------------------------
+# Gate session — isolated subprocess for acceptance review
+# ---------------------------------------------------------------------------
+
+#: Only these payload keys are forwarded to the gate subprocess.
+_GATE_PAYLOAD_ALLOWED_KEYS: frozenset = frozenset({
+    "acceptance_screenshot",
+    "logs",
+    "original_instruction",
+})
+
+#: Explicit env vars allowed to pass into the gate child process.
+#: Anything not in this set is blocked (no parent secrets leak).
+_GATE_ENV_PASSTHROUGH: frozenset = frozenset({
+    "PATH",
+    "PYTHONPATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "COMSPEC",
+})
+
+
+def spawn_gate_session(task_id: str, payload: dict) -> dict:
+    """Spawn an isolated gate-review subprocess.
+
+    Each call generates a fresh UUID4 session_id.  The payload is sanitised
+    (only ``_GATE_PAYLOAD_ALLOWED_KEYS`` are forwarded) and written to a
+    temporary file whose path is passed via ``GATE_PAYLOAD_FILE``.
+
+    The child process receives a minimal env containing only
+    ``_GATE_ENV_PASSTHROUGH`` keys plus the gate-specific variables
+    ``GATE_SESSION_ID``, ``GATE_TASK_ID``, and ``GATE_PAYLOAD_FILE``.
+    ``shell=False`` is enforced for Windows security.
+
+    Returns:
+        dict with keys: session_id, task_id, status, elapsed_ms.
+        ``status`` is one of: "completed", "failed", "timeout", "error".
+    """
+    import uuid
+    import json as _json_gs
+    import tempfile
+    import time as _time_gs
+
+    session_id = str(uuid.uuid4())
+    timeout_sec = int(os.getenv("GATE_SESSION_TIMEOUT_SEC", "120"))
+    start = _time_gs.monotonic()
+    payload_path: Optional[str] = None
+
+    try:
+        # Sanitise: strip forbidden keys
+        clean_payload = {k: v for k, v in payload.items() if k in _GATE_PAYLOAD_ALLOWED_KEYS}
+
+        # Write payload to temp file
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as tf:
+            payload_path = tf.name
+            _json_gs.dump(clean_payload, tf, ensure_ascii=False)
+
+        # Build isolated child env (no arbitrary parent vars)
+        child_env: dict = {}
+        for key in _GATE_ENV_PASSTHROUGH:
+            val = os.environ.get(key)
+            if val is not None:
+                child_env[key] = val
+        child_env["GATE_SESSION_ID"] = session_id
+        child_env["GATE_TASK_ID"] = task_id
+        child_env["GATE_PAYLOAD_FILE"] = payload_path
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "gate_runner"],
+            capture_output=True,
+            text=True,
+            env=child_env,
+            timeout=timeout_sec,
+            shell=False,
+        )
+
+        elapsed_ms = int((_time_gs.monotonic() - start) * 1000)
+
+        if proc.returncode != 0:
+            return {
+                "session_id": session_id,
+                "task_id": task_id,
+                "status": "failed",
+                "elapsed_ms": elapsed_ms,
+            }
+
+        try:
+            output = _json_gs.loads(proc.stdout.strip())
+        except Exception:
+            output = {}
+
+        return {
+            "session_id": session_id,
+            "task_id": task_id,
+            "status": output.get("status", "completed"),
+            "elapsed_ms": elapsed_ms,
+        }
+
+    except subprocess.TimeoutExpired:
+        return {
+            "session_id": session_id,
+            "task_id": task_id,
+            "status": "timeout",
+            "elapsed_ms": timeout_sec * 1000,
+        }
+    except Exception:
+        elapsed_ms = int((_time_gs.monotonic() - start) * 1000)
+        return {
+            "session_id": session_id,
+            "task_id": task_id,
+            "status": "error",
+            "elapsed_ms": elapsed_ms,
+        }
+    finally:
+        if payload_path:
+            try:
+                os.unlink(payload_path)
+            except Exception:
+                pass
+
+
 def _handle_task_failure(task: Dict, processing: Path, chat_id: int, exc: Exception) -> str:
     """Shared error handler for task timeout and general exceptions.
 

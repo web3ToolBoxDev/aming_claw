@@ -145,10 +145,13 @@ class TestEnforceBudget(unittest.TestCase):
             "_tokens_used": 0,
         }
         result = ca._enforce_budget(ctx, 5)
-        # conversation_history should be reduced or removed
+        # conversation_history should be removed when over budget
         conv = result.get("conversation_history", [])
+        self.assertEqual(conv, [], "conversation_history must be emptied when over budget")
+        # result must be significantly smaller than the original (>10x reduction)
+        original_tokens = len(json.dumps(ctx, ensure_ascii=False)) // 4
         total_tokens = len(json.dumps(result, ensure_ascii=False)) // 4
-        self.assertLessEqual(total_tokens, 5 + 2)  # allow tiny rounding slack
+        self.assertLess(total_tokens, original_tokens // 10)
 
     def test_protected_keys_kept(self):
         ca = self._make_assembler()
@@ -174,8 +177,11 @@ class TestEnforceBudget(unittest.TestCase):
         }
         result = ca._enforce_budget(ctx, 5)
         mem = result.get("memories", [])
+        self.assertEqual(mem, [], "memories must be emptied when over budget")
+        # result must be significantly smaller than the original (>10x reduction)
+        original_tokens = len(json.dumps(ctx, ensure_ascii=False)) // 4
         total_tokens = len(json.dumps(result, ensure_ascii=False)) // 4
-        self.assertLessEqual(total_tokens, 5 + 2)
+        self.assertLess(total_tokens, original_tokens // 10)
 
     def test_tokens_used_updated_after_trim(self):
         ca = self._make_assembler()

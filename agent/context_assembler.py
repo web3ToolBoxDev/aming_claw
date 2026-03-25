@@ -230,8 +230,16 @@ class ContextAssembler:
                     truncated = section_str[:keep_chars] + "\n...(truncated)"
                     context[key] = {"_truncated": truncated}
 
-        # Update _tokens_used to reflect post-trim state
-        context["_tokens_used"] = _total_tokens()
+        # Update _tokens_used to reflect post-trim state.
+        # Use an iterative fixed-point approach so that setting _tokens_used
+        # does not produce a stale value when the digit count changes.
+        context["_tokens_used"] = 0
+        for _ in range(5):
+            new_val = len(json.dumps(context, ensure_ascii=False)) // 4
+            if context["_tokens_used"] == new_val:
+                break
+            context["_tokens_used"] = new_val
+
         return context
 
     def _fetch_hard_context(self, project_id: str, role: str,
