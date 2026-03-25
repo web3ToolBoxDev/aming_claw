@@ -1230,11 +1230,68 @@ def process_qa_task_v6(task: Dict, processing: Path) -> Dict:
                         write_manager_signal("graceful_restart", {"task_id": task_id, "branch": branch}, chat_id or 0)
                     except Exception as sig_err:
                         print(f"[executor] Failed to write manager_signal: {sig_err}")
+
+                    # --- Deploy chain (non-blocking) ---
+                    try:
+                        from deploy_chain import run_deploy  # noqa: PLC0415
+                        # Prefer changed_files from executor result, fall back to git diff vs main
+                        changed_files: list = (
+                            task.get("executor", {}).get("changed_files")
+                            or task.get("_changed_files")
+                            or []
+                        )
+                        if not changed_files:
+                            try:
+                                gd = subprocess.run(
+                                    ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
+                                    cwd=workspace, capture_output=True, text=True, timeout=10,
+                                )
+                                changed_files = [f for f in gd.stdout.strip().splitlines() if f]
+                            except Exception as gd_err:
+                                tlog.log_event("deploy_chain_git_diff_failed", {"error": str(gd_err)[:200]})
+
+                        tlog.log_event("deploy_chain_starting", {"changed_files": changed_files, "branch": branch})
+
+                        def _run_deploy_bg(files: list, cid: int) -> None:
+                            try:
+                                deploy_result = run_deploy(files, cid)
+                                tlog.log_event("deploy_chain_complete", {"result": deploy_result})
+                                if cid:
+                                    services = deploy_result.get("services_restarted", []) if isinstance(deploy_result, dict) else []
+                                    svc_label = ", ".join(services) if services else "none"
+                                    _gateway_notify(cid, f"🚀 Deploy complete — services restarted: {svc_label}")
+                            except Exception as dep_err:
+                                tlog.log_event("deploy_chain_error", {"error": str(dep_err)[:300]})
+                                if cid:
+                                    _gateway_notify(cid, f"⚠️ Deploy chain error: {str(dep_err)[:200]}")
+
+                        threading.Thread(
+                            target=_run_deploy_bg,
+                            args=(changed_files, chat_id),
+                            daemon=True,
+                            name=f"deploy-{task_id}",
+                        ).start()
+                    except ImportError:
+                        tlog.log_event("deploy_chain_unavailable", {"reason": "deploy_chain module not found"})
+
                 if chat_id:
                     if mr.returncode == 0 and skip_deploy:
                         _gateway_notify(chat_id, f"✅ Merged to main (deploy not required for this task)")
+                    elif mr.returncode == 0:
+                        # Identify which changed files will trigger service restarts for the notification
+                        _notify_files = (
+                            task.get("executor", {}).get("changed_files")
+                            or task.get("_changed_files")
+                            or []
+                        )
+                        files_label = ", ".join(_notify_files[:5]) if _notify_files else "unknown"
+                        _gateway_notify(
+                            chat_id,
+                            f"✅ Auto-merge OK: {branch} — deploying changed files: {files_label}"
+                            + (" …" if len(_notify_files) > 5 else ""),
+                        )
                     else:
-                        _gateway_notify(chat_id, f"Auto-merge {'OK' if mr.returncode==0 else 'FAIL'}: {branch}")
+                        _gateway_notify(chat_id, f"Auto-merge FAIL: {branch}")
 
         if chat_id:
             status_label = {"completed": "PASS", "passed_with_fallback": "PASS (fallback)", "failed": "FAIL"}
