@@ -140,6 +140,7 @@ def load_json(path: Path) -> Dict:
 
 
 def telegram_token() -> str:
+    """Return the Telegram bot token from environment variables."""
     token = os.getenv("TELEGRAM_BOT_TOKEN_CODEX", "").strip()
     if not token:
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
