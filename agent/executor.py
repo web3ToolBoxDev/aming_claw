@@ -792,6 +792,7 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
                 "diff_stat": real_evidence.diff_stat,
                 "ai_summary": dev_output.get("summary", ""),
                 "discrepancies": comparison.get("discrepancies", []),
+                "evidence": real_evidence.to_dict() if hasattr(real_evidence, 'to_dict') else {},
             },
             "_git_checkpoint": before.get("commit", ""),
         }

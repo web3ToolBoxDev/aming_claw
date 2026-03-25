@@ -185,24 +185,40 @@ class TaskOrchestrator:
             6. Reply to user
             7. Archive
         """
-        # 1. Collect evidence
-        before = ai_report.get("_before_snapshot", {"commit": "HEAD~1"})
-        try:
-            evidence = self.evidence_collector.collect_after_dev(before)
-            log.info("handle_dev_complete evidence: changed=%s",
-                     evidence.changed_files if hasattr(evidence, 'changed_files') else 'N/A')
-        except Exception as e:
-            log.warning("Evidence collection failed in eval: %s, using ai_report fallback", e)
-            # Create a minimal evidence-like object from ai_report
-            class _FakeEvidence:
-                def __init__(self, files):
-                    self.changed_files = files
-                    self.new_files = []
-                    self.test_results = {"passed": True}
-                    self.diff_stat = ""
+        # 1. Use pre-collected evidence from executor (already collected in worktree)
+        pre_evidence = ai_report.get("_evidence", {})
+        if pre_evidence and pre_evidence.get("changed_files"):
+            # Executor already collected evidence in the correct worktree
+            class _PreEvidence:
+                def __init__(self, d):
+                    self.changed_files = d.get("changed_files", [])
+                    self.new_files = d.get("new_files", [])
+                    self.deleted_files = d.get("deleted_files", [])
+                    self.test_results = d.get("test_results", {})
+                    self.diff_stat = d.get("diff_stat", "")
                 def to_dict(self):
-                    return {"changed_files": self.changed_files, "test_results": self.test_results}
-            evidence = _FakeEvidence(ai_report.get("changed_files", []))
+                    return {"changed_files": self.changed_files, "new_files": self.new_files,
+                            "test_results": self.test_results, "diff_stat": self.diff_stat}
+            evidence = _PreEvidence(pre_evidence)
+            log.info("handle_dev_complete using executor evidence: changed=%s", evidence.changed_files)
+        else:
+            # Fallback: re-collect (may use wrong workspace if not in worktree)
+            before = ai_report.get("_before_snapshot", {"commit": "HEAD~1"})
+            try:
+                evidence = self.evidence_collector.collect_after_dev(before)
+                log.info("handle_dev_complete re-collected evidence: changed=%s",
+                         evidence.changed_files if hasattr(evidence, 'changed_files') else 'N/A')
+            except Exception as e:
+                log.warning("Evidence collection failed: %s, using ai_report fallback", e)
+                class _FakeEvidence:
+                    def __init__(self, files):
+                        self.changed_files = files
+                        self.new_files = []
+                        self.test_results = {"passed": True}
+                        self.diff_stat = ""
+                    def to_dict(self):
+                        return {"changed_files": self.changed_files, "test_results": self.test_results}
+                evidence = _FakeEvidence(ai_report.get("changed_files", []))
 
         # 2. Compare
         comparison = self.evidence_collector.compare_with_ai_report(evidence, ai_report)
