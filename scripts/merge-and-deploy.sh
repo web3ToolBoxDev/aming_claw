@@ -51,10 +51,25 @@ if [ "$DRY_RUN" = "--dry-run" ]; then
     exit 0
 fi
 
-# 3. Merge
-log "Merging ${BRANCH} → main..."
-git checkout main 2>/dev/null
-git merge "${BRANCH}" --no-ff -m "Merge ${BRANCH}: approved by human review" 2>&1
+# 3. Rebase dev branch onto latest main (avoid merge conflicts from checkpoint drift)
+log "Rebasing ${BRANCH} onto main..."
+git checkout "${BRANCH}" 2>/dev/null
+if ! git rebase main 2>&1; then
+    err "Rebase failed — conflicts detected"
+    git rebase --abort 2>/dev/null
+    # Fallback: try merge directly (may produce merge commit)
+    warn "Falling back to direct merge..."
+    git checkout main 2>/dev/null
+    if ! git merge "${BRANCH}" --no-ff -m "Merge ${BRANCH}: auto-chain approved" 2>&1; then
+        err "Merge also failed — manual resolution needed"
+        git merge --abort 2>/dev/null
+        exit 1
+    fi
+else
+    # Rebase succeeded, now fast-forward merge
+    git checkout main 2>/dev/null
+    git merge "${BRANCH}" --no-ff -m "Merge ${BRANCH}: auto-chain approved" 2>&1
+fi
 
 # 4. Pre-deploy check
 if [ -n "$COORD" ]; then
