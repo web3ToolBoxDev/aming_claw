@@ -41,6 +41,40 @@ curl -X POST http://localhost:40100/coordinator/chat \
 | `/task/{id}/cancel` | 取消任务 | 无 |
 | `/task/{id}/retry` | 重试失败的任务 | 无 |
 | `/cleanup-orphans` | 清理僵尸进程和卡住的任务 | 无 |
+| `/tasks/create` | Idempotent task file creation (used by Orchestrator) | JSON task object |
+
+### POST /tasks/create — Idempotency Guarantees
+
+Before creating a new task file, the endpoint checks all three active stages in order:
+
+1. `pending/` — task file already waiting to be picked up
+2. `processing/` — task is currently being executed
+3. `results/` — task has already completed (pending acceptance)
+
+If a match is found in **any** of these stages, the endpoint returns the existing task with `"status": "exists"` instead of creating a duplicate. Only if no match is found does it write a new task file to `pending/`.
+
+**Request schema:**
+
+```json
+{
+  "task_id": "task-abc123",          // required, must be unique per logical task
+  "project_id": "aming-claw",        // required
+  "role": "dev",                     // required: dev | tester | qa | merge
+  "description": "Implement X",      // required
+  "target_files": ["agent/foo.py"],  // optional
+  "context": {}                      // optional, extra context passed to AI
+}
+```
+
+**Response schema:**
+
+```json
+// New task created:
+{"status": "created", "task_id": "task-abc123", "stage": "pending"}
+
+// Task already exists:
+{"status": "exists",  "task_id": "task-abc123", "stage": "processing"}
+```
 
 ### 直接对话 (POST)
 
@@ -200,10 +234,78 @@ dbservice (:40002)   → 记忆层
 Redis (:40079)       → 缓存
 ```
 
+## QA Status Types
+
+Tasks processed by the QA role can finish with one of three status values:
+
+| Status | Meaning |
+|---|---|
+| `completed` | QA passed cleanly; all checks green. |
+| `failed` | QA found blocking issues; task is marked failed and may trigger a retry budget check. |
+| `passed_with_fallback` | QA passed, but one or more non-critical checks were skipped or substituted with a fallback strategy. This typically happens when an optional validation tool is unavailable (e.g., coverage reporter not installed) or a secondary lint rule is suppressed. The task proceeds to Merge, but the audit log records the fallback reason. |
+
+Orchestrator downstream logic should treat `passed_with_fallback` the same as `completed` for routing purposes, but flag it for human review if the audit log shows repeated fallbacks on the same check.
+
+## Auto-Chain Pipeline
+
+After a Dev task completes successfully, the Executor automatically chains into the full validation pipeline without manual intervention. Each stage is logged to the audit trail.
+
+### Pipeline Stages
+
+```
+Dev  ──→  Checkpoint Gate  ──→  Tester  ──→  QA  ──→  Merge
+ │              │                  │          │          │
+ └─ audit       └─ audit           └─ audit   └─ audit   └─ audit
+```
+
+| Stage | Role | Purpose |
+|---|---|---|
+| **Dev** | `dev` | Implements the task (code changes, file edits). |
+| **Checkpoint Gate** | internal | Validates that Dev output meets minimum quality bar before proceeding (e.g., syntax check, required files present). Aborts chain if gate fails. |
+| **Tester** | `tester` | Runs automated tests; writes results to the task result file. |
+| **QA** | `qa` | Reviews test results and code diff; emits `completed`, `failed`, or `passed_with_fallback`. |
+| **Merge** | `merge` | Merges the dev worktree branch into `main` and cleans up the worktree. |
+
+Each stage transition is recorded as an entry in `pipeline_audit.jsonl` with a timestamp, stage name, outcome, and any notes.
+
+### Pipeline State Files
+
+The pipeline stores its state in the task's working directory under `shared-volume/codex-tasks/state/`:
+
+| File | Purpose |
+|---|---|
+| `pipeline_idempotency.json` | Records which pipeline stages have already been submitted for a given `task_id`. Prevents the Orchestrator from re-submitting a stage that is already pending/processing/completed. |
+| `pipeline_retry_budget.json` | Tracks how many retry attempts remain for each stage. Each stage starts with a configured budget (default 2). When a stage fails and is retried, the budget decrements. At 0, the pipeline halts and marks the task `failed`. |
+| `pipeline_audit.jsonl` | Append-only log of every stage transition. Each line is a JSON object: `{ts, task_id, stage, outcome, notes}`. Used for post-mortem analysis and human review of `passed_with_fallback` cases. |
+
+```bash
+# Example: inspect pipeline audit for a task
+cat shared-volume/codex-tasks/state/pipeline_audit.jsonl | grep "task-abc123"
+
+# Example: check remaining retry budget
+cat shared-volume/codex-tasks/state/pipeline_retry_budget.json
+```
+
+## Spin Loop Prevention: `_skipped_tasks`
+
+The Executor's main processing loop maintains an in-memory set called `_skipped_tasks`. When a task is evaluated but cannot be processed in the current loop iteration (e.g., its workspace is busy, its dependencies are unmet, or it has been retried too many times within a short window), its `task_id` is added to `_skipped_tasks`.
+
+On each subsequent loop pass, tasks present in `_skipped_tasks` are **not re-evaluated** until the set is cleared (which happens at the start of each full scan cycle). This prevents a single problematic task from consuming 100% of loop iterations and starving other tasks.
+
+```
+loop iteration N:
+  for task in pending_tasks:
+    if task.id in _skipped_tasks → skip
+    else → try to process
+      if cannot process now → _skipped_tasks.add(task.id)
+
+end of full scan cycle → _skipped_tasks.clear()
+```
+
 ## 注意事项
 
 - Executor API 只在宿主机上可访问（localhost:40100）
 - 不经过 nginx，不需要 governance token
 - `/coordinator/chat` 是同步的，会等 AI 完成后返回（最多 120s）
 - `/task/{id}/cancel` 会终止 AI 进程，谨慎使用
-- `/cleanup-orphans` 会 kill 所有超时进程
+- `/cleanup-orphans` 会 kill 所有超时进程（仅限 `_EXECUTOR_SPAWNED_PIDS` 中追踪的进程，不会误杀用户 Claude session）

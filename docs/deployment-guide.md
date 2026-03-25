@@ -238,6 +238,29 @@ GET  /trace/{trace_id}    — 完整 trace 链路
 GET  /traces              — 最近 trace 列表 (支持 ?project_id=&limit=)
 POST /coordinator/chat    — 直接对话 Coordinator (绕过 Telegram)
 POST /cleanup-orphans     — 清理僵尸 AI 进程
+POST /tasks/create        — 幂等创建任务文件 (由 Orchestrator 调用)
+```
+
+### POST /tasks/create — Idempotent Task Creation
+
+Used by the Orchestrator to create task files without duplicating existing work. Before writing a new task file, the endpoint checks whether a task with the same `task_id` already exists in `pending/`, `processing/`, or `results/`. If found, it returns the existing task rather than creating a duplicate.
+
+```bash
+curl -X POST http://localhost:40100/tasks/create \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_id": "task-abc123",
+    "project_id": "aming-claw",
+    "role": "dev",
+    "description": "Implement feature X",
+    "target_files": ["agent/foo.py"]
+  }'
+
+# Response (new task):
+# {"status": "created", "task_id": "task-abc123", "stage": "pending"}
+
+# Response (already exists):
+# {"status": "exists", "task_id": "task-abc123", "stage": "processing"}
 ```
 
 ## 八、Git Worktree 工作流
@@ -279,3 +302,49 @@ bash scripts/merge-and-deploy.sh dev/task-xxx
 2. **nginx healthcheck 偶尔 unhealthy** — 重启 nginx 解决。
 3. **Executor 是宿主机进程** — 不在 Docker 里，需要手动管理生命周期。
 4. **观察者和 Executor 并行操作** — 使用 git worktree 隔离，编辑前无需停 Executor。
+
+## 十一、Executor Safety & Reliability Mechanisms
+
+### Orphan Cleanup Safety: `_EXECUTOR_SPAWNED_PIDS`
+
+The Executor tracks every AI subprocess it spawns in an in-memory set `_EXECUTOR_SPAWNED_PIDS`. When `/cleanup-orphans` is called (or the built-in timeout sweep runs), **only PIDs present in this set are eligible for termination**. This prevents the cleanup logic from accidentally killing unrelated processes — including any user-owned Claude Code sessions running in the same terminal.
+
+```
+_EXECUTOR_SPAWNED_PIDS = {pid_1, pid_2, ...}   # populated on subprocess.Popen()
+                                                 # removed on process exit
+# cleanup-orphans only kills: process.pid IN _EXECUTOR_SPAWNED_PIDS
+```
+
+### Startup Reconcile: `_reconcile_stale_claimed()`
+
+On every Executor startup, `_reconcile_stale_claimed()` is called before the main task loop begins. It scans the governance DB for tasks that are still in `claimed` state from a previous run (e.g., after a crash or forced restart) and resets them to `pending`, preventing those tasks from being permanently stuck.
+
+```python
+# Called once at startup, before processing loop:
+_reconcile_stale_claimed()
+# Effect: governance DB tasks in state=claimed → state=pending
+```
+
+### Branch Pollution Fix: Checkout `main` After Task Completion
+
+After every task completes (success or failure), the Executor explicitly runs `git checkout main` inside the task's working directory. This prevents the repository from being left on a feature branch (`dev/task-xxx`) between tasks, which could pollute subsequent git operations or cause worktree conflicts.
+
+```
+Task finishes → git worktree remove .worktrees/dev-task-xxx --force
+             → git checkout main   # always, regardless of outcome
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `AI_SESSION_TIMEOUT` | `600` (seconds) | Maximum wall-clock time allowed for a single AI session. After this, the session is killed and the task is retried or failed. |
+| `EXECUTOR_API_URL` | `http://localhost:40100` | Base URL for the Executor HTTP API. Used by Orchestrator and other internal callers to reach the Executor. Override when running Executor on a non-default port. |
+
+```bash
+# Example: extend timeout for large refactor tasks
+export AI_SESSION_TIMEOUT=1200
+
+# Example: Executor running on alternate port
+export EXECUTOR_API_URL=http://localhost:40200
+```
