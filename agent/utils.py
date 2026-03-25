@@ -73,6 +73,22 @@ def tasks_root() -> Path:
 
 
 def task_file(stage: str, task_id: str) -> Path:
+    """Return the Path to a task's JSON file within a given lifecycle stage.
+
+    Constructs the full filesystem path by combining the tasks root directory,
+    the specified stage subdirectory, and the task's filename (``<task_id>.json``).
+
+    Args:
+        stage (str): The lifecycle stage subdirectory name (e.g. ``"pending"``,
+            ``"processing"``, ``"results"``, ``"logs"``, ``"archive"``).
+        task_id (str): The unique task identifier (e.g. ``"task-1711234567890-a1b2c3"``).
+
+    Returns:
+        Path: Absolute path of the form
+            ``<tasks_root>/<stage>/<task_id>.json``.
+            The file is not guaranteed to exist; the caller is responsible for
+            reading or writing it.
+    """
     return tasks_root() / stage / (task_id + ".json")
 
 
