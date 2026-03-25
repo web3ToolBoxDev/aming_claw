@@ -209,51 +209,46 @@ class TaskOrchestrator:
         if comparison["has_discrepancies"]:
             log.warning("Dev report discrepancies: %s", comparison["discrepancies"])
 
-        # 3. Eval context
-        eval_context = self.context_assembler.assemble(
-            project_id=project_id,
-            chat_id=chat_id,
-            role="coordinator",
-            prompt="评估 dev 任务结果",
-            extra={
-                "dev_task_id": task_id,
-                "evidence": evidence.to_dict(),
-                "ai_report": ai_report,
-                "discrepancies": comparison.get("discrepancies", []),
-            },
+        # 4. Auto-chain: checkpoint gatekeeper replaces coordinator eval
+        evidence_dict = evidence.to_dict()
+        evidence_dict["discrepancies"] = comparison.get("discrepancies", [])
+        gate = self._run_checkpoint_gatekeeper(
+            {"task_id": task_id, "project_id": project_id}, evidence_dict
         )
 
-        # 4. Code-driven eval (AI eval is optional enhancement)
-        has_changes = bool(evidence.changed_files) if hasattr(evidence, 'changed_files') else False
-        critical_discrepancies = [d for d in comparison.get("discrepancies", [])
-                                  if d.get("issue") not in ("test_count_mismatch",)]
-        auto_approve = has_changes and not critical_discrepancies
-
-        eval_decision = {}
-        eval_status = ""
-
-        if auto_approve:
-            eval_status = "approved"
-            reply = f"Dev {task_id} 自动评估通过: {len(evidence.changed_files)} files changed"
+        if gate.passed:
+            key = f"{task_id}:test"
+            if not self._check_idempotent(key):
+                parent_chain_depth = int(ai_report.get("_chain_depth", 0))
+                self._trigger_tester(task_id, project_id, token, chat_id, evidence,
+                                     parent_chain_depth=parent_chain_depth)
+                self._record_idempotent(key)
+            self._log_stage_transition(task_id, "dev", "test", "gate_passed")
+            reply = f"Dev {task_id} checkpoint 通过，Tester 已启动"
             eval_decision = {"status": "approved", "reply": reply}
-            log.info("Eval auto-approved: %s (%d files)", task_id, len(evidence.changed_files))
         else:
-            # Try AI eval (optional, failure = manual review needed)
-            try:
-                eval_session = self.ai_manager.create_session(
-                    role="coordinator",
-                    prompt="Dev 任务完成，请评估结果并决定下一步",
-                    context=eval_context,
-                    project_id=project_id,
-                )
-                eval_output = self.ai_manager.wait_for_output(eval_session.session_id)
-                eval_decision = self._parse(eval_output.get("stdout", ""), role="coordinator")
-                eval_status = eval_decision.get("status", "")
-                reply = eval_decision.get("reply", f"任务 {task_id} 评估完成")
-            except Exception as e:
-                log.warning("AI eval failed, marking for manual review: %s", e)
-                eval_status = "needs_review"
-                reply = f"Dev {task_id} 需要人工审查 (AI eval 失败: {str(e)[:100]})"
+            has_budget = self._consume_retry(task_id)
+            if has_budget:
+                retry_id = f"task-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+                retry_action = {
+                    "prompt": (
+                        f"{ai_report.get('prompt', '请修复代码')}\n\n"
+                        f"[Checkpoint Gate 未通过，原因: {gate.reason}，请修复后重试]"
+                    ),
+                    "target_files": ai_report.get("target_files", []),
+                    "related_nodes": ai_report.get("related_nodes", []),
+                }
+                self._write_task_file(retry_id, retry_action, project_id, token,
+                                      "dev_task", chat_id)
+                self._log_stage_transition(task_id, "dev", "retry", gate.reason)
+                reply = (f"Dev {task_id} checkpoint 未通过 ({gate.reason})，"
+                         f"已创建重试任务 {retry_id[-8:]}")
+                eval_decision = {"status": "retry", "reply": reply}
+            else:
+                self._write_failure_memory(task_id, "checkpoint_gate", gate.reason)
+                self._log_stage_transition(task_id, "dev", "blocked", gate.reason)
+                reply = (f"Dev {task_id} checkpoint 未通过且超出重试次数，"
+                         f"需人工审查: {gate.reason}")
                 eval_decision = {"status": "needs_review", "reply": reply}
 
         # 5. Reply
@@ -262,13 +257,33 @@ class TaskOrchestrator:
         # 6. Archive
         self._auto_archive(project_id, task_id, evidence, eval_decision)
 
-        # 7. Auto-trigger Tester if approved
-        parent_chain_depth = int(ai_report.get("_chain_depth", 0))
-        if eval_status in ("approved", "pass", "success"):
-            self._trigger_tester(task_id, project_id, token, chat_id, evidence,
-                                 parent_chain_depth=parent_chain_depth)
-
         return {"reply": reply, "evidence": evidence.to_dict()}
+
+    def _run_checkpoint_gatekeeper(self, task: dict, evidence_dict: dict):
+        """Code-driven checkpoint gate: replaces coordinator AI eval.
+
+        Returns an object with:
+            .passed  bool   — True if changes present and no critical discrepancies
+            .reason  str    — human-readable reason (empty string when passed)
+        """
+        class _GateResult:
+            __slots__ = ("passed", "reason")
+            def __init__(self, passed: bool, reason: str):
+                self.passed = passed
+                self.reason = reason
+
+        changed_files = evidence_dict.get("changed_files", [])
+        has_changes = bool(changed_files)
+        discrepancies = evidence_dict.get("discrepancies", [])
+        critical = [d for d in discrepancies
+                    if d.get("issue") not in ("test_count_mismatch",)]
+
+        if not has_changes:
+            return _GateResult(False, "no changed files detected")
+        if critical:
+            reasons = "; ".join(d.get("issue", "unknown") for d in critical)
+            return _GateResult(False, f"critical discrepancies: {reasons}")
+        return _GateResult(True, "")
 
     def _trigger_tester(self, parent_task_id: str, project_id: str,
                         token: str, chat_id: int, evidence,
@@ -315,10 +330,16 @@ class TaskOrchestrator:
             except Exception:
                 log.exception("Failed to verify-update t2_pass")
 
-        # 2. Auto-trigger QA
-        self._trigger_qa(task_id, project_id, token, chat_id, test_report)
+        # 2. Auto-trigger QA (idempotent)
+        key = f"{task_id}:qa"
+        triggered_qa = False
+        if not self._check_idempotent(key):
+            self._trigger_qa(task_id, project_id, token, chat_id, test_report)
+            self._record_idempotent(key)
+            triggered_qa = True
+        self._log_stage_transition(task_id, "test", "qa", "test_passed")
 
-        return {"status": "test_passed", "triggered_qa": True}
+        return {"status": "test_passed", "triggered_qa": triggered_qa}
 
     def _trigger_qa(self, parent_task_id: str, project_id: str,
                     token: str, chat_id: int, test_report: dict) -> None:
@@ -360,8 +381,13 @@ class TaskOrchestrator:
             except Exception:
                 log.exception("Failed to verify-update qa_pass")
 
-        # 2. Trigger Gatekeeper
-        gate_result = self._trigger_gatekeeper(project_id, token, chat_id)
+        # 2. Trigger Gatekeeper (idempotent)
+        key = f"{task_id}:gate"
+        gate_result = {}
+        if not self._check_idempotent(key):
+            gate_result = self._trigger_gatekeeper(project_id, token, chat_id)
+            self._record_idempotent(key)
+        self._log_stage_transition(task_id, "qa", "gatekeeper", "qa_passed")
 
         return {"status": "qa_passed", "gatekeeper": gate_result}
 
