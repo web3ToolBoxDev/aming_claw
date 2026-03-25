@@ -10,6 +10,7 @@ Schema per workspace entry:
     "id":             "ws-<hex>",
     "path":           "/absolute/path/to/repo",
     "label":          "my-project",
+    "project_id":     "my-project",           # normalized kebab-case (optional)
     "active":         true,
     "max_concurrent": 1,
     "is_default":     false,
@@ -25,7 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from i18n import t
-from utils import load_json, save_json, tasks_root, utc_iso
+from utils import load_json, normalize_project_id, save_json, tasks_root, utc_iso
 
 
 def _paths_equal(a: Path, b: Path) -> bool:
@@ -108,10 +109,23 @@ def find_workspace_by_path(path: Path) -> Optional[Dict]:
     return None
 
 
+def find_workspace_by_project_id(project_id: str) -> Optional[Dict]:
+    """Find workspace by normalized project_id match."""
+    normalized = normalize_project_id(project_id)
+    if not normalized:
+        return None
+    for ws in _load_registry()["workspaces"]:
+        ws_pid = ws.get("project_id", "")
+        if ws_pid and normalize_project_id(ws_pid) == normalized:
+            return ws
+    return None
+
+
 def add_workspace(
     path: Path,
     *,
     label: str = "",
+    project_id: str = "",
     max_concurrent: int = 1,
     is_default: bool = False,
     created_by: int = 0,
@@ -135,6 +149,7 @@ def add_workspace(
         "id": ws_id,
         "path": str(resolved),
         "label": label,
+        "project_id": normalize_project_id(project_id) if project_id else "",
         "active": True,
         "max_concurrent": max(1, int(max_concurrent)),
         "is_default": bool(is_default),
@@ -172,7 +187,7 @@ def update_workspace(ws_id: str, **fields) -> Optional[Dict]:
     for ws in reg["workspaces"]:
         if ws["id"] != ws_id:
             continue
-        allowed = {"label", "active", "max_concurrent", "is_default", "path"}
+        allowed = {"label", "active", "max_concurrent", "is_default", "path", "project_id"}
         for k, v in fields.items():
             if k in allowed:
                 ws[k] = v
@@ -209,8 +224,9 @@ def resolve_workspace_for_task(task: Dict) -> Optional[Dict]:
     Priority:
       1. task["target_workspace_id"] → exact id match
       2. task["target_workspace"] → label match
-      3. @workspace:<label> prefix in task text
-      4. default workspace
+      3. task["project_id"] → normalized project_id match
+      4. @workspace:<label> prefix in task text
+      5. default workspace
     """
     # Explicit workspace id
     ws_id = task.get("target_workspace_id", "").strip()
@@ -223,6 +239,13 @@ def resolve_workspace_for_task(task: Dict) -> Optional[Dict]:
     ws_label = task.get("target_workspace", "").strip()
     if ws_label:
         ws = find_workspace_by_label(ws_label)
+        if ws and ws.get("active", True):
+            return ws
+
+    # Project ID match (normalized)
+    project_id = task.get("project_id", "").strip()
+    if project_id:
+        ws = find_workspace_by_project_id(project_id)
         if ws and ws.get("active", True):
             return ws
 
@@ -241,8 +264,35 @@ def resolve_workspace_for_task(task: Dict) -> Optional[Dict]:
 
 # ── Migration helper ─────────────────────────────────────────────────────────
 
+def migrate_project_ids() -> int:
+    """Auto-populate project_id on registry entries that lack it.
+
+    For each entry without project_id, normalizes its label to derive one.
+    Idempotent — safe to call multiple times.
+
+    Returns number of entries updated.
+    """
+    reg = _load_registry()
+    updated = 0
+    for ws in reg["workspaces"]:
+        if ws.get("project_id"):
+            continue  # Already has project_id
+        label = ws.get("label", "")
+        if label:
+            ws["project_id"] = normalize_project_id(label)
+            ws["updated_at"] = utc_iso()
+            updated += 1
+    if updated:
+        _save_registry(reg)
+    return updated
+
+
 def ensure_current_workspace_registered() -> Optional[Dict]:
-    """当前活跃工作目录若不在注册表中，自动注册。"""
+    """当前活跃工作目录若不在注册表中，自动注册。
+    Also runs project_id migration on existing entries."""
+    # Migrate legacy entries that lack project_id
+    migrate_project_ids()
+
     from workspace import resolve_active_workspace
     current = resolve_active_workspace()
     if not current.exists():
@@ -256,6 +306,19 @@ def ensure_current_workspace_registered() -> Optional[Dict]:
         ws_path = Path(ws["path"]).resolve()
         if _paths_equal(current_resolved, ws_path):
             return None  # 已注册，跳过
+
+    # Skip if current path is a subdirectory of an already-registered workspace
+    # (e.g., agent/ is inside aming_claw/ — registering it would cause routing conflicts)
+    for ws in existing:
+        ws_path = Path(ws["path"]).resolve()
+        current_str = str(current_resolved).lower().replace("\\", "/")
+        ws_str = str(ws_path).lower().replace("\\", "/")
+        if current_str.startswith(ws_str + "/"):
+            return None  # Subdirectory of existing workspace, skip
+
+    # Also skip if current path has no .git (not a project root)
+    if not (current_resolved / ".git").is_dir():
+        return None
 
     # 未注册，执行注册；注册表为空时设为默认
     is_first = len(existing) == 0

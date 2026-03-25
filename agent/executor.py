@@ -37,6 +37,11 @@ from git_rollback import (
     pre_task_checkpoint,
     get_workspace_git_status,
 )
+
+# Track PIDs spawned by THIS executor instance.
+# Only these PIDs are eligible for orphan cleanup.
+# NEVER kill arbitrary claude.exe processes — they may be user Claude Code sessions.
+_EXECUTOR_SPAWNED_PIDS: set = set()
 from task_state import (
     append_task_event,
     load_task_status,
@@ -575,24 +580,53 @@ def process_task(path: Path) -> None:
             pass  # executor_api 未启动时跳过
 
 
-DEFAULT_WORKSPACE_MAP = {
-    "amingClaw": "C:/Users/z5866/Documents/amingclaw/aming_claw",
-    "toolboxClient": "C:/Users/z5866/Documents/Toolbox/toolBoxClient",
-}
-
-
 def resolve_workspace(task: dict) -> str:
     """Resolve the main workspace path for a task.
 
     Priority:
       1. task['_workspace'] if present
-      2. DEFAULT_WORKSPACE_MAP[task['project_id']] if project_id is known
-      3. DEFAULT_WORKSPACE_MAP['amingClaw'] as fallback
+      2. Workspace registry (by project_id, label, or default)
+      3. Active workspace from environment
     """
     if task.get("_workspace"):
         return task["_workspace"]
-    project_id = task.get("project_id", "")
-    return DEFAULT_WORKSPACE_MAP.get(project_id, DEFAULT_WORKSPACE_MAP["amingClaw"])
+    from workspace_registry import resolve_workspace_for_task
+    ws = resolve_workspace_for_task(task)
+    if ws:
+        return ws["path"]
+    from workspace import resolve_active_workspace
+    return str(resolve_active_workspace())
+
+
+def _preflight_check(task: dict, workspace: str) -> list:
+    """Validate task context matches resolved workspace before AI session.
+
+    Returns list of error strings. Empty list = all checks pass.
+    """
+    errors = []
+
+    # 1. target_files exist in workspace
+    for tf in task.get("target_files", []):
+        full = os.path.join(workspace, tf)
+        if not os.path.exists(full):
+            errors.append(f"target_file not found: {tf} (in {workspace})")
+
+    # 2. project_id matches workspace registry entry
+    try:
+        from workspace_registry import find_workspace_by_project_id
+        ws = find_workspace_by_project_id(task.get("project_id", ""))
+        if ws and os.path.normpath(ws["path"]) != os.path.normpath(workspace):
+            errors.append(
+                f"workspace mismatch: registry={ws['path']}, resolved={workspace}"
+            )
+    except ImportError:
+        pass
+
+    # 3. Workspace has .git (is a valid repo)
+    if not os.path.isdir(os.path.join(workspace, ".git")):
+        errors.append(f"no .git in workspace: {workspace}")
+
+    return errors
 
 
 def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
@@ -629,8 +663,14 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
         ctx_asm = ContextAssembler()
         tlog.log_event("v6_modules_loaded")
 
-        # 0. Enforce clean worktree (P-1.4: prevent experiment pollution)
+        # 0. Resolve workspace and pre-flight validation
         main_workspace = resolve_workspace(task)
+        preflight_errors = _preflight_check(task, main_workspace)
+        if preflight_errors:
+            tlog.log_event("preflight_failed", {"errors": preflight_errors})
+            for err in preflight_errors:
+                print(f"[executor-v6] preflight: {err}")
+            # Non-fatal: log warnings but continue (target_files may be created by AI)
         try:
             status_r = subprocess.run(
                 ["git", "status", "--porcelain"],
@@ -688,10 +728,12 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
         # 2. Before snapshot
         before = evidence.collect_before_snapshot()
 
-        # 3. Assemble dev context
+        # 3. Assemble dev context (with workspace + target_files for prompt injection)
         dev_context = ctx_asm.assemble(
             project_id=project_id, chat_id=chat_id,
             role="dev", prompt=prompt,
+            workspace=workspace,
+            target_files=task.get("target_files", []),
         )
 
         # 4. Start dev AI session
@@ -709,6 +751,9 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
         tlog.write_file("stdout.txt", raw.get("stdout", ""))
         if raw.get("stderr"):
             tlog.write_file("stderr.txt", raw.get("stderr", ""))
+
+        # Audit: write result to Redis Stream for full round-trip tracking
+        ai_mgr.audit_result(session.session_id, project_id, raw)
 
         if raw.get("status") != "completed":
             tlog.log_event("ai_session_failed", {"status": raw.get("status")})
@@ -1270,45 +1315,39 @@ def _cleanup_orphans() -> int:
         except Exception as e:
             print(f"[executor] orphan API check failed: {e}")
 
-    # Strategy 2: Scan for zombie claude.exe processes
-    # Only kill claude.exe processes that have been running > 10 minutes
-    # and are NOT the current executor's own process
-    if sys.platform == "win32":
-        try:
-            my_pid = os.getpid()
-            r = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq claude.exe", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=10)
-            for line in r.stdout.strip().split("\n"):
-                if not line.strip() or "claude.exe" not in line.lower():
-                    continue
-                parts = line.replace('"', '').split(",")
-                if len(parts) >= 2:
-                    try:
-                        pid = int(parts[1].strip())
-                        if pid == my_pid:
-                            continue
-                        # Check if this PID is tracked in any active processing task
-                        processing_dir = tasks_root() / "processing"
-                        tracked = False
-                        if processing_dir.exists():
-                            for f in processing_dir.glob("*.json"):
-                                try:
-                                    t = load_json(f)
-                                    if int(t.get("worker_pid", 0)) == pid:
-                                        tracked = True
-                                        break
-                                except Exception:
-                                    pass
-                        if not tracked:
-                            print(f"[executor] killing untracked claude.exe PID={pid}")
-                            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                                capture_output=True, timeout=10)
-                            cleaned += 1
-                    except (ValueError, ProcessLookupError):
-                        pass
-        except Exception as e:
-            print(f"[executor] zombie scan failed: {e}")
+    # Strategy 2: Only kill claude.exe processes that the executor SPAWNED.
+    # NEVER kill arbitrary claude.exe processes — they may be user sessions
+    # (e.g., Claude Code CLI) that are unrelated to the executor.
+    if sys.platform == "win32" and _EXECUTOR_SPAWNED_PIDS:
+        stale_pids = set()
+        processing_dir = tasks_root() / "processing"
+        tracked_pids = set()
+        if processing_dir.exists():
+            for f in processing_dir.glob("*.json"):
+                try:
+                    t = load_json(f)
+                    wp = t.get("worker_pid", 0)
+                    if wp:
+                        tracked_pids.add(int(wp))
+                except Exception:
+                    pass
+        for pid in list(_EXECUTOR_SPAWNED_PIDS):
+            if pid in tracked_pids:
+                continue
+            try:
+                os.kill(pid, 0)  # Check alive
+                stale_pids.add(pid)
+            except (ProcessLookupError, OSError):
+                _EXECUTOR_SPAWNED_PIDS.discard(pid)
+        for pid in stale_pids:
+            try:
+                print(f"[executor] killing executor-spawned orphan PID={pid}")
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=10)
+                _EXECUTOR_SPAWNED_PIDS.discard(pid)
+                cleaned += 1
+            except Exception:
+                pass
 
     return cleaned
 
@@ -1417,6 +1456,16 @@ def run_parallel() -> None:
         print("[executor] no workspaces registered, falling back to serial mode")
         run()
         return
+
+    # Startup recovery: re-queue stale tasks from processing/
+    recovered = _recover_stale_tasks()
+    if recovered:
+        print(f"[executor] recovered {recovered} stale tasks")
+
+    # Orphan cleanup
+    cleaned = _cleanup_orphans()
+    if cleaned:
+        print(f"[executor] cleaned {cleaned} orphan processes")
 
     dispatcher = get_dispatcher(task_processor=process_task_in_workspace)
     dispatcher.start()

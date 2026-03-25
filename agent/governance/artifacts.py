@@ -21,7 +21,14 @@ ARTIFACT_CHECKERS = {}
 
 
 def _resolve_workspace(project_id: str) -> str:
-    """Resolve workspace path for a project. Falls back to WORKSPACE_PATH env."""
+    """Resolve workspace path for a project.
+
+    Priority:
+      1. Governance project record (workspace_path field)
+      2. Workspace registry (by normalized project_id)
+      3. WORKSPACE_PATH env var fallback
+    """
+    # 1. Governance project record
     try:
         from . import project_service
         proj = project_service.get_project(project_id)
@@ -29,6 +36,15 @@ def _resolve_workspace(project_id: str) -> str:
             return proj["workspace_path"]
     except Exception:
         pass
+    # 2. Workspace registry
+    try:
+        from workspace_registry import find_workspace_by_project_id
+        ws = find_workspace_by_project_id(project_id)
+        if ws:
+            return ws["path"]
+    except Exception:
+        pass
+    # 3. Env fallback
     return os.environ.get("WORKSPACE_PATH", "/workspace")
 
 

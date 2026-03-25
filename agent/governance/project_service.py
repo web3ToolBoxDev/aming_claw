@@ -61,17 +61,22 @@ def _save_projects(data: dict):
 
 def _normalize_project_id(raw: str) -> str:
     """Normalize project ID to lowercase kebab-case.
-    toolBoxClient → toolbox-client
-    My App → my-app
-    aming_claw → aming-claw
+    Delegates to shared utility in utils.py.
     """
+    # Import from shared utils to avoid duplication.
+    # Uses try/except for Docker context where utils may not be on path.
+    try:
+        from utils import normalize_project_id
+        return normalize_project_id(raw)
+    except ImportError:
+        pass
+    # Fallback: inline logic (same as utils.normalize_project_id)
     import re
     s = raw.strip()
-    # camelCase → kebab-case: insert hyphen before uppercase
+    if not s:
+        return ""
     s = re.sub(r'([a-z0-9])([A-Z])', r'\1-\2', s)
-    # spaces and underscores → hyphens
     s = re.sub(r'[\s_]+', '-', s)
-    # collapse multiple hyphens
     s = re.sub(r'-+', '-', s)
     return s.lower().strip('-')
 

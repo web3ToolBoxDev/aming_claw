@@ -215,6 +215,12 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
         elif path == "/kpi":
             self._handle_kpi()
 
+        # ── Workspace Registry ──
+        elif path == "/workspaces":
+            self._handle_workspaces()
+        elif path.startswith("/workspaces/resolve"):
+            self._handle_workspace_resolve(qs)
+
         # ── Health ──
         elif path == "/health":
             self._json_response(200, {
@@ -1175,6 +1181,31 @@ class ExecutorAPIHandler(BaseHTTPRequestHandler):
 
 
     # ── KPI Handler ──
+
+    def _handle_workspaces(self):
+        """GET /workspaces — List all registered workspaces with project_id."""
+        try:
+            from workspace_registry import list_workspaces
+            workspaces = list_workspaces(include_inactive=True)
+            self._json_response(200, {"workspaces": workspaces, "count": len(workspaces)})
+        except Exception as e:
+            self._json_response(500, {"error": str(e)})
+
+    def _handle_workspace_resolve(self, qs):
+        """GET /workspaces/resolve?project_id=X — Resolve workspace for a project."""
+        project_id = qs.get("project_id", [""])[0]
+        if not project_id:
+            self._json_response(400, {"error": "project_id query param required"})
+            return
+        try:
+            from workspace_registry import find_workspace_by_project_id
+            ws = find_workspace_by_project_id(project_id)
+            if ws:
+                self._json_response(200, {"workspace": ws, "matched_by": "project_id"})
+            else:
+                self._json_response(404, {"error": f"no workspace for project_id={project_id}"})
+        except Exception as e:
+            self._json_response(500, {"error": str(e)})
 
     def _handle_kpi(self):
         """GET /kpi — Aggregate KPI metrics from archive/ and results/ task files.

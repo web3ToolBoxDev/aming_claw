@@ -86,7 +86,8 @@ class ContextAssembler:
         self._db_url = dbservice_url or os.getenv("DBSERVICE_URL", "http://localhost:40002")
 
     def assemble(self, project_id: str, chat_id: int, role: str,
-                 prompt: str = "", extra: dict = None) -> dict:
+                 prompt: str = "", extra: dict = None,
+                 workspace: str = "", target_files: list = None) -> dict:
         """Assemble context for an AI session.
 
         Args:
@@ -95,6 +96,8 @@ class ContextAssembler:
             role: coordinator / dev / tester / qa / pm
             prompt: The user message or task prompt
             extra: Additional context (e.g., dev_result for eval)
+            workspace: Resolved workspace path (for dev role git context)
+            target_files: List of target file paths (for dev role)
 
         Returns:
             Context dict ready for injection into system prompt.
@@ -158,8 +161,14 @@ class ContextAssembler:
         if "git_context" in budget and budget["git_context"] > 0:
             remaining = budget["total_max"] - used_tokens
             if remaining > 0:
-                git = self._fetch_git_context()
+                git = self._fetch_git_context(workspace=workspace)
                 context["git_status"] = git
+
+        # Inject workspace and target_files for dev role prompt building
+        if workspace:
+            context["workspace"] = workspace
+        if target_files:
+            context["target_files"] = target_files
 
         context["_token_budget"] = total_budget
         context["_tokens_used"] = used_tokens
@@ -297,10 +306,11 @@ class ContextAssembler:
         except Exception:
             return {}
 
-    def _fetch_git_context(self) -> dict:
+    def _fetch_git_context(self, workspace: str = "") -> dict:
         """Fetch git status for dev context."""
         import subprocess
-        workspace = os.getenv("CODEX_WORKSPACE", os.getcwd())
+        if not workspace:
+            workspace = os.getenv("CODEX_WORKSPACE", os.getcwd())
         try:
             status = subprocess.run(
                 ["git", "status", "--short"],

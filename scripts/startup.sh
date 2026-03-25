@@ -58,6 +58,27 @@ else
 fi
 cd ..
 
+# 5.5 Verify workspace registry (project_id routing)
+log "Verifying workspace registry..."
+sleep 2  # Wait for executor API to start
+WS_COUNT=$(curl -sf http://localhost:40100/workspaces 2>/dev/null | python -c "import sys,json;print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "0")
+if [ "$WS_COUNT" -gt "0" ]; then
+    log "Workspace registry: $WS_COUNT workspace(s) registered"
+    # Show workspace-to-project mappings
+    curl -sf http://localhost:40100/workspaces 2>/dev/null | python -c "
+import sys,json
+data=json.load(sys.stdin)
+for ws in data.get('workspaces',[]):
+    pid=ws.get('project_id','(none)')
+    label=ws.get('label','?')
+    path=ws.get('path','?')
+    print(f'  {label} → project_id={pid} → {path}')
+" 2>/dev/null || true
+else
+    err "WARNING: No workspaces registered. Tasks may route to wrong workspace."
+    err "Register workspaces manually or check executor startup logs."
+fi
+
 # 6. Final status
 echo ""
 log "=========================================="

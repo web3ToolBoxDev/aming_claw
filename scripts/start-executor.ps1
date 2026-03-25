@@ -138,7 +138,34 @@ if (-not $depsReady) {
 
 Write-Host "Starting agent executor..."
 try {
-    & $PYTHON .\agent\executor.py
+    # Start executor in background job so we can verify workspace registry
+    $execJob = Start-Job -ScriptBlock {
+        param($py, $wd)
+        Set-Location $wd
+        & $py .\agent\executor.py
+    } -ArgumentList $PYTHON, (Get-Location).Path
+
+    # Wait for executor API to start
+    Start-Sleep -Seconds 3
+
+    # Verify workspace registry (project_id routing)
+    try {
+        $wsResp = Invoke-RestMethod -Uri "http://localhost:40100/workspaces" -TimeoutSec 5 -ErrorAction SilentlyContinue
+        if ($wsResp.count -gt 0) {
+            Write-Host "Workspace registry: $($wsResp.count) workspace(s) registered"
+            foreach ($ws in $wsResp.workspaces) {
+                $pid = if ($ws.project_id) { $ws.project_id } else { "(none)" }
+                Write-Host "  $($ws.label) -> project_id=$pid -> $($ws.path)"
+            }
+        } else {
+            Write-Warning "No workspaces registered. Tasks may route to wrong workspace."
+        }
+    } catch {
+        Write-Host "(workspace check skipped - executor API not yet ready)"
+    }
+
+    # Wait for executor to finish
+    $execJob | Receive-Job -Wait -AutoRemoveJob
 }
 finally {
     if ($mutex -ne $null) {

@@ -283,8 +283,10 @@ class TestEnsureCurrentWorkspaceRegistered(unittest.TestCase):
         os.environ["SHARED_VOLUME_PATH"] = self.tmp.name
         self.current_dir = Path(self.tmp.name) / "current-project"
         self.current_dir.mkdir()
+        (self.current_dir / ".git").mkdir()  # Must have .git to be registered
         self.other_dir = Path(self.tmp.name) / "toolbox"
         self.other_dir.mkdir()
+        (self.other_dir / ".git").mkdir()  # Must have .git to be registered
         clear_thread_workspace()
 
     def tearDown(self):
@@ -323,6 +325,7 @@ class TestEnsureCurrentWorkspaceRegistered(unittest.TestCase):
         add_workspace(self.other_dir, label="toolbox", is_default=True)
         extra = Path(self.tmp.name) / "extra"
         extra.mkdir()
+        (extra / ".git").mkdir()  # Must have .git
         add_workspace(extra, label="extra")
         set_thread_workspace(self.current_dir)
         result = ensure_current_workspace_registered()
@@ -337,6 +340,25 @@ class TestEnsureCurrentWorkspaceRegistered(unittest.TestCase):
         result = ensure_current_workspace_registered()
         self.assertIsNone(result)
         self.assertEqual(len(list_workspaces()), 0)
+
+    def test_subdirectory_skips(self):
+        """Subdirectory of registered workspace should NOT be registered."""
+        add_workspace(self.current_dir, label="project")
+        subdir = self.current_dir / "agent"
+        subdir.mkdir()
+        (subdir / ".git").mkdir()  # Even with .git, subdirectory should be blocked
+        set_thread_workspace(subdir)
+        result = ensure_current_workspace_registered()
+        self.assertIsNone(result)
+        self.assertEqual(len(list_workspaces()), 1)
+
+    def test_no_git_skips(self):
+        """Directory without .git should NOT be registered."""
+        no_git_dir = Path(self.tmp.name) / "no-git-project"
+        no_git_dir.mkdir()
+        set_thread_workspace(no_git_dir)
+        result = ensure_current_workspace_registered()
+        self.assertIsNone(result)
 
     def test_integration_extra_workspace_then_ensure(self):
         """集成测试: 有额外工作区 + 当前目录未注册 → list_workspaces 返回2个"""
@@ -438,6 +460,175 @@ class TestFuzzyWorkspaceAddFlow(unittest.TestCase):
         results = find_git_workspace_candidates("frontend")
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].name, "frontend-app")
+
+
+from utils import normalize_project_id  # noqa: E402
+from workspace_registry import find_workspace_by_project_id, migrate_project_ids  # noqa: E402
+
+
+class TestNormalizeProjectId(unittest.TestCase):
+    """Tests for utils.normalize_project_id."""
+
+    def test_camel_case(self):
+        self.assertEqual(normalize_project_id("amingClaw"), "aming-claw")
+        self.assertEqual(normalize_project_id("toolBoxClient"), "tool-box-client")
+
+    def test_underscore(self):
+        self.assertEqual(normalize_project_id("aming_claw"), "aming-claw")
+
+    def test_already_kebab(self):
+        self.assertEqual(normalize_project_id("aming-claw"), "aming-claw")
+
+    def test_spaces(self):
+        self.assertEqual(normalize_project_id("My App"), "my-app")
+
+    def test_empty(self):
+        self.assertEqual(normalize_project_id(""), "")
+        self.assertEqual(normalize_project_id("  "), "")
+
+    def test_all_variants_match(self):
+        """amingClaw, aming_claw, aming-claw all normalize to same value."""
+        expected = "aming-claw"
+        self.assertEqual(normalize_project_id("amingClaw"), expected)
+        self.assertEqual(normalize_project_id("aming_claw"), expected)
+        self.assertEqual(normalize_project_id("aming-claw"), expected)
+
+
+class TestFindWorkspaceByProjectId(unittest.TestCase):
+    """Tests for workspace_registry.find_workspace_by_project_id."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["SHARED_VOLUME_PATH"] = self.tmp.name
+        self.ws_path = Path(self.tmp.name) / "project"
+        self.ws_path.mkdir()
+
+    def tearDown(self):
+        os.environ.pop("SHARED_VOLUME_PATH", None)
+        self.tmp.cleanup()
+
+    def test_exact_match(self):
+        add_workspace(self.ws_path, label="aming", project_id="aming-claw")
+        ws = find_workspace_by_project_id("aming-claw")
+        self.assertIsNotNone(ws)
+        self.assertEqual(ws["project_id"], "aming-claw")
+
+    def test_normalized_match(self):
+        """amingClaw should find workspace with project_id aming-claw."""
+        add_workspace(self.ws_path, label="aming", project_id="aming-claw")
+        ws = find_workspace_by_project_id("amingClaw")
+        self.assertIsNotNone(ws)
+
+    def test_no_match(self):
+        add_workspace(self.ws_path, label="aming", project_id="aming-claw")
+        ws = find_workspace_by_project_id("unknown-project")
+        self.assertIsNone(ws)
+
+
+class TestProjectIdInResolveWorkspaceForTask(unittest.TestCase):
+    """Tests for project_id priority in resolve_workspace_for_task."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["SHARED_VOLUME_PATH"] = self.tmp.name
+        self.ws_a = Path(self.tmp.name) / "project-a"
+        self.ws_a.mkdir()
+        self.ws_b = Path(self.tmp.name) / "project-b"
+        self.ws_b.mkdir()
+
+    def tearDown(self):
+        os.environ.pop("SHARED_VOLUME_PATH", None)
+        self.tmp.cleanup()
+
+    def test_project_id_routes_correctly(self):
+        """Task with project_id should resolve to matching workspace."""
+        add_workspace(self.ws_a, label="toolbox", project_id="toolbox-client")
+        add_workspace(self.ws_b, label="aming", project_id="aming-claw")
+        task = {"project_id": "amingClaw", "text": "fix bug"}
+        resolved = resolve_workspace_for_task(task)
+        self.assertEqual(resolved["project_id"], "aming-claw")
+
+    def test_label_beats_project_id(self):
+        """Explicit target_workspace label should take priority over project_id."""
+        add_workspace(self.ws_a, label="toolbox", project_id="toolbox-client")
+        add_workspace(self.ws_b, label="aming", project_id="aming-claw")
+        task = {"target_workspace": "toolbox", "project_id": "amingClaw", "text": "fix"}
+        resolved = resolve_workspace_for_task(task)
+        self.assertEqual(resolved["label"], "toolbox")
+
+    def test_project_id_fallback_to_default(self):
+        """Unknown project_id falls back to default workspace."""
+        ws = add_workspace(self.ws_a, label="default", is_default=True)
+        task = {"project_id": "unknown", "text": "test"}
+        resolved = resolve_workspace_for_task(task)
+        self.assertEqual(resolved["id"], ws["id"])
+
+    def test_case_variants_all_resolve(self):
+        """aming_claw, aming-claw, amingClaw all resolve to same workspace."""
+        add_workspace(self.ws_a, label="aming", project_id="aming-claw")
+        for variant in ["aming_claw", "aming-claw", "amingClaw"]:
+            task = {"project_id": variant, "text": "test"}
+            resolved = resolve_workspace_for_task(task)
+            self.assertIsNotNone(resolved, f"Failed for variant: {variant}")
+            self.assertEqual(resolved["project_id"], "aming-claw")
+
+
+class TestMigrateProjectIds(unittest.TestCase):
+    """Tests for workspace_registry.migrate_project_ids."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["SHARED_VOLUME_PATH"] = self.tmp.name
+        self.ws_path = Path(self.tmp.name) / "toolBoxClient"
+        self.ws_path.mkdir()
+
+    def tearDown(self):
+        os.environ.pop("SHARED_VOLUME_PATH", None)
+        self.tmp.cleanup()
+
+    def test_populates_missing_project_id(self):
+        add_workspace(self.ws_path, label="toolBoxClient")
+        ws_before = find_workspace_by_label("toolBoxClient")
+        self.assertEqual(ws_before.get("project_id", ""), "")
+        updated = migrate_project_ids()
+        self.assertEqual(updated, 1)
+        ws_after = find_workspace_by_label("toolBoxClient")
+        self.assertEqual(ws_after["project_id"], "tool-box-client")
+
+    def test_idempotent(self):
+        add_workspace(self.ws_path, label="toolBoxClient")
+        migrate_project_ids()
+        updated = migrate_project_ids()
+        self.assertEqual(updated, 0)
+
+    def test_preserves_existing_project_id(self):
+        add_workspace(self.ws_path, label="toolbox", project_id="my-custom-id")
+        updated = migrate_project_ids()
+        self.assertEqual(updated, 0)
+        ws = find_workspace_by_label("toolbox")
+        self.assertEqual(ws["project_id"], "my-custom-id")
+
+
+class TestAddWorkspaceWithProjectId(unittest.TestCase):
+    """Tests for add_workspace with project_id parameter."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["SHARED_VOLUME_PATH"] = self.tmp.name
+        self.ws_path = Path(self.tmp.name) / "project"
+        self.ws_path.mkdir()
+
+    def tearDown(self):
+        os.environ.pop("SHARED_VOLUME_PATH", None)
+        self.tmp.cleanup()
+
+    def test_stores_normalized_project_id(self):
+        ws = add_workspace(self.ws_path, label="test", project_id="amingClaw")
+        self.assertEqual(ws["project_id"], "aming-claw")
+
+    def test_empty_project_id(self):
+        ws = add_workspace(self.ws_path, label="test")
+        self.assertEqual(ws["project_id"], "")
 
 
 if __name__ == "__main__":

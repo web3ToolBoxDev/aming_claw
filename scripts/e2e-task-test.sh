@@ -42,8 +42,33 @@ echo "  Task ID: ${TASK_ID}"
 echo "=========================================="
 echo ""
 
+# ── 0. Workspace Routing Check ──
+echo "Workspace Routing:"
+
+# Verify workspace registry has project_id mappings
+WS_RESP=$(curl -sf "http://localhost:40100/workspaces" 2>/dev/null)
+WS_COUNT=$(echo "$WS_RESP" | python -c "import sys,json;print(json.load(sys.stdin).get('count',0))" 2>/dev/null || echo "0")
+
+if [ "$WS_COUNT" -gt "0" ]; then
+    pass "Workspace registry: $WS_COUNT workspace(s) registered"
+else
+    fail "No workspaces registered - tasks will route to wrong workspace"
+fi
+
+# Verify project_id resolves correctly
+RESOLVE_RESP=$(curl -sf "http://localhost:40100/workspaces/resolve?project_id=${PROJECT}" 2>/dev/null)
+RESOLVED_PATH=$(echo "$RESOLVE_RESP" | python -c "import sys,json;print(json.load(sys.stdin).get('workspace',{}).get('path',''))" 2>/dev/null || echo "")
+
+if [ -n "$RESOLVED_PATH" ] && [ -d "$RESOLVED_PATH" ]; then
+    pass "project_id=$PROJECT resolves to: $RESOLVED_PATH"
+else
+    fail "project_id=$PROJECT does not resolve to a valid workspace"
+fi
+
+echo ""
+
 # ── 1. Volume Mount Check ──
-echo "📂 Volume Mount:"
+echo "Volume Mount:"
 
 # Write file from Gateway container
 docker exec aming_claw-telegram-gateway-1 sh -c "echo test > /app/shared-volume/codex-tasks/pending/e2e-mount-check.txt" 2>/dev/null

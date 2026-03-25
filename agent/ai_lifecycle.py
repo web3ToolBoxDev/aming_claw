@@ -79,6 +79,9 @@ class AILifecycleManager:
         # Build system prompt from context
         system_prompt = self._build_system_prompt(role, prompt, context, project_id)
 
+        # Audit: write prompt to Redis Stream for full round-trip tracking
+        self._audit_prompt(session_id, role, project_id, workspace or "", prompt, system_prompt)
+
         # Determine CLI binary and args
         claude_bin = os.getenv("CLAUDE_BIN", "claude")
         cwd = workspace or os.getenv("CODEX_WORKSPACE", os.getcwd())
@@ -151,6 +154,13 @@ class AILifecycleManager:
 
         log.info("AI session created: %s (role=%s, pid=%d, timeout=%ds)",
                  session_id, role, proc.pid, timeout_sec)
+
+        # Register PID for safe orphan cleanup (executor only kills its own spawns)
+        try:
+            from executor import _EXECUTOR_SPAWNED_PIDS
+            _EXECUTOR_SPAWNED_PIDS.add(proc.pid)
+        except ImportError:
+            pass  # Not running inside executor context
 
         # Wait for output in background thread (no stdin — prompt is via file + arg)
         def _run():
@@ -268,10 +278,69 @@ class AILifecycleManager:
 
         context_str = json.dumps(context, ensure_ascii=False, indent=2) if context else "{}"
 
+        # Dev role: inject workspace and target_files so AI knows where to work
+        workspace_info = ""
+        if role == "dev":
+            ws = context.get("workspace", "")
+            tf = context.get("target_files", [])
+            if ws:
+                workspace_info = f"工作目录: {ws}\n"
+            if tf:
+                workspace_info += f"目标文件: {', '.join(tf)}\n"
+
         return (
             f"{role_prompt}\n\n"
-            f"项目: {project_id}\n\n"
+            f"项目: {project_id}\n"
+            f"{workspace_info}\n"
             f"当前上下文:\n{context_str}\n\n"
             f"用户消息: {prompt}\n\n"
             "请按照指定 JSON 格式输出你的决策。"
         )
+
+    @staticmethod
+    def _audit_prompt(session_id: str, role: str, project_id: str,
+                      workspace: str, prompt: str, system_prompt: str):
+        """Write AI prompt to Redis Stream for audit trail."""
+        try:
+            from governance.redis_client import get_redis
+            r = get_redis()
+            if not r:
+                return
+            stream_key = f"ai:prompt:{session_id}"
+            r.xadd(stream_key, {
+                "type": "prompt",
+                "session_id": session_id,
+                "role": role,
+                "project_id": project_id,
+                "workspace": workspace,
+                "prompt_length": str(len(prompt)),
+                "system_prompt_length": str(len(system_prompt)),
+                "user_prompt": prompt[:5000],  # Truncate for Redis memory
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }, maxlen=5000)
+        except Exception as e:
+            log.debug("Redis audit write failed (non-fatal): %s", e)
+
+    @staticmethod
+    def audit_result(session_id: str, project_id: str, result: dict):
+        """Write AI result to Redis Stream for full round-trip audit."""
+        try:
+            from governance.redis_client import get_redis
+            r = get_redis()
+            if not r:
+                return
+            stream_key = f"ai:prompt:{session_id}"
+            r.xadd(stream_key, {
+                "type": "result",
+                "session_id": session_id,
+                "project_id": project_id,
+                "status": result.get("status", "unknown"),
+                "exit_code": str(result.get("exit_code", -1)),
+                "elapsed_sec": str(result.get("elapsed_sec", 0)),
+                "stdout_length": str(len(result.get("stdout", ""))),
+                "stdout": result.get("stdout", "")[:10000],
+                "stderr": result.get("stderr", "")[:2000],
+                "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }, maxlen=5000)
+        except Exception as e:
+            log.debug("Redis audit result write failed (non-fatal): %s", e)

@@ -30,6 +30,8 @@ curl -X POST http://localhost:40100/coordinator/chat \
 | `/tasks?project_id=X&status=Y` | 任务列表 | `{tasks: [...], count}` |
 | `/task/{task_id}` | 单任务详情 | 任务 JSON + `_stage` + `_file` |
 | `/trace/{trace_id}` | 链路追踪 | `{trace_id, entries: [...]}` |
+| `/workspaces` | 工作区注册表 | `{workspaces: [...], count}` |
+| `/workspaces/resolve?project_id=X` | 按项目ID解析工作区 | `{workspace, matched_by}` |
 
 ### 介入 (POST)
 
@@ -53,6 +55,55 @@ curl -X POST http://localhost:40100/coordinator/chat \
 | `/validator/last-result` | 最近一次校验结果 | `{approved, rejected, layers[], needs_retry}` |
 | `/context/{project_id}` | 当前上下文组装结果 | `{project_id, context: {...}}` |
 | `/ai-session/{id}/output` | AI 原始输出 | `{stdout, stderr, exit_code, elapsed_sec}` |
+
+## 工作区路由
+
+任务通过 `project_id` 自动路由到正确的工作区。路由优先级：
+
+1. `target_workspace_id` — 精确 ID 匹配
+2. `target_workspace` — 标签匹配
+3. **`project_id`** — 归一化项目 ID 匹配（推荐）
+4. `@workspace:<label>` 前缀
+5. 默认工作区（fallback）
+
+### project_id 归一化规则
+
+所有变体自动统一为 kebab-case：
+
+| 输入 | 归一化结果 |
+|------|-----------|
+| `amingClaw` | `aming-claw` |
+| `aming_claw` | `aming-claw` |
+| `toolBoxClient` | `tool-box-client` |
+
+### 查询工作区
+
+```bash
+# 列出所有注册的工作区
+curl http://localhost:40100/workspaces
+
+# 查询某项目对应的工作区
+curl "http://localhost:40100/workspaces/resolve?project_id=amingClaw"
+# → {"workspace": {"id":"ws-xxx", "path":"C:/...", "project_id":"aming-claw"}, "matched_by":"project_id"}
+```
+
+### 注册工作区
+
+工作区在 Executor 启动时自动注册当前目录。也可通过 `workspace_registry.add_workspace()` 手动注册：
+
+```python
+from workspace_registry import add_workspace
+add_workspace(Path("/path/to/repo"), label="my-project", project_id="my-project")
+```
+
+### Redis Stream 审计
+
+每次 AI session 的 prompt（输入）和 result（输出）会写入 Redis Stream `ai:prompt:{session_id}`，用于审计和调试：
+
+```bash
+# 查看某 session 的完整 prompt+result
+redis-cli -p 40079 XRANGE ai:prompt:ai-dev-xxx - +
+```
 
 ## 使用场景
 

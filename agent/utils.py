@@ -1,11 +1,36 @@
+# AI write test - executor tools verification
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import requests
+
+
+# ── Project ID normalization ─────────────────────────────────────────────────
+
+def normalize_project_id(raw: str) -> str:
+    """Normalize project ID to lowercase kebab-case.
+
+    Examples:
+        toolBoxClient → toolbox-client
+        My App        → my-app
+        aming_claw    → aming-claw
+        amingClaw     → aming-claw
+    """
+    s = raw.strip()
+    if not s:
+        return ""
+    # camelCase → kebab-case: insert hyphen before uppercase
+    s = re.sub(r'([a-z0-9])([A-Z])', r'\1-\2', s)
+    # spaces and underscores → hyphens
+    s = re.sub(r'[\s_]+', '-', s)
+    # collapse multiple hyphens
+    s = re.sub(r'-+', '-', s)
+    return s.lower().strip('-')
 
 
 def utc_ts_ms() -> int:

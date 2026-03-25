@@ -85,6 +85,67 @@ docker compose -f docker-compose.governance.yml up -d --build telegram-gateway
   □ git commit
 ```
 
+## 工作区路由配置
+
+Executor 通过 **workspace_registry** 将任务路由到正确的项目目录。每个工作区可绑定一个 `project_id`。
+
+### project_id 归一化
+
+所有 project_id 变体自动归一化为 kebab-case：
+
+| 输入 | 归一化 |
+|------|--------|
+| `amingClaw` | `aming-claw` |
+| `aming_claw` | `aming-claw` |
+| `toolBoxClient` | `tool-box-client` |
+
+### 自动注册
+
+Executor 启动时自动注册当前工作目录，并对已有条目补全 `project_id`（从 label 归一化）。
+
+### 手动注册额外工作区
+
+如果需要管理多个项目（如 toolBoxClient + amingClaw），在 Executor 启动后注册：
+
+```bash
+# 查看当前注册表
+curl http://localhost:40100/workspaces
+
+# 查询某项目对应的工作区
+curl "http://localhost:40100/workspaces/resolve?project_id=amingClaw"
+```
+
+或通过 Python：
+
+```python
+cd agent
+python -c "
+from pathlib import Path
+from workspace_registry import add_workspace
+add_workspace(Path('C:/Users/z5866/Documents/Toolbox/toolBoxClient'),
+              label='toolBoxClient', project_id='toolbox-client')
+"
+```
+
+### 路由优先级
+
+任务路由到工作区的优先级：
+
+1. `target_workspace_id` — 精确 ID
+2. `target_workspace` — 标签匹配
+3. **`project_id`** — 归一化项目 ID（推荐）
+4. `@workspace:<label>` 前缀
+5. 默认工作区 fallback
+
+### Redis Stream 审计
+
+每次 AI session 的 prompt + result 记录在 Redis Stream：
+
+```bash
+# 查看某 session 的完整审计
+redis-cli -p 40079 XRANGE ai:prompt:ai-dev-xxx - +
+```
+
 ## 三、重启恢复清单
 
 电脑重启后需要恢复的步骤：
@@ -109,10 +170,15 @@ curl -s -X POST http://localhost:40002/knowledge/register-pack \
 # 5. 启动宿主机 Executor
 cd agent && python -m executor &
 
-# 6. 验证
+# 6. 验证工作区注册
+curl -s http://localhost:40100/workspaces
+# 确认 project_id 已正确映射
+
+# 7. 验证服务
 curl -s http://localhost:40000/api/health     # governance
 curl -s http://localhost:40002/health          # dbservice
 curl -s http://localhost:40000/nginx-health    # nginx
+curl -s http://localhost:40100/health          # executor
 ```
 
 ## 四、数据持久化
