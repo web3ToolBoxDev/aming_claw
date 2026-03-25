@@ -18,8 +18,16 @@ err() { echo -e "${RED}[merge]${NC} $1"; }
 warn() { echo -e "${YELLOW}[merge]${NC} $1"; }
 
 BRANCH="${1:-}"
-DRY_RUN="${2:-}"
+FLAG2="${2:-}"
 COORD="${GOV_COORDINATOR_TOKEN:-}"
+DRY_RUN=""
+SKIP_DEPLOY=""
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run)    DRY_RUN="true" ;;
+        --skip-deploy) SKIP_DEPLOY="true" ;;
+    esac
+done
 
 if [ -z "$BRANCH" ]; then
     echo "Usage: $0 <branch-name> [--dry-run]"
@@ -46,7 +54,7 @@ echo ""
 log "Changed files:"
 echo "$CHANGED_FILES"
 
-if [ "$DRY_RUN" = "--dry-run" ]; then
+if [ "$DRY_RUN" = "true" ]; then
     log "Dry run complete. No changes made."
     exit 0
 fi
@@ -71,7 +79,16 @@ else
     git merge "${BRANCH}" --no-ff -m "Merge ${BRANCH}: auto-chain approved" 2>&1
 fi
 
-# 4. Pre-deploy check
+# 4. Skip deploy if requested (auto-chain tasks without governance nodes)
+if [ "$SKIP_DEPLOY" = "true" ]; then
+    log "Merge complete (deploy skipped per --skip-deploy)"
+    log "Branch: ${BRANCH} → main"
+    # Cleanup branch
+    git branch -d "${BRANCH}" 2>/dev/null || true
+    exit 0
+fi
+
+# 4b. Pre-deploy check
 if [ -n "$COORD" ]; then
     log "Running pre-deploy check..."
     if bash scripts/pre-deploy-check.sh --skip-staging; then

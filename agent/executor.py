@@ -1150,7 +1150,12 @@ def process_qa_task_v6(task: Dict, processing: Path) -> Dict:
                 branches = [b.strip().lstrip("* ") for b in br.stdout.strip().split("\n") if b.strip()]
                 branch = branches[0] if branches else ""
             if branch:
-                mr = subprocess.run(["bash", "scripts/merge-and-deploy.sh", branch],
+                # When verification says no governance nodes, skip deploy checks
+                verification = task.get("_verification", {})
+                merge_args = ["bash", "scripts/merge-and-deploy.sh", branch]
+                if not verification.get("governance_nodes", True):
+                    merge_args.append("--skip-deploy")
+                mr = subprocess.run(merge_args,
                     cwd=workspace, capture_output=True, text=True, timeout=180,
                     env={**os.environ, "GOV_COORDINATOR_TOKEN": token})
                 tlog.write_file("merge_output.txt", mr.stdout + mr.stderr)
