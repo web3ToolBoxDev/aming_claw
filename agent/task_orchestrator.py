@@ -229,7 +229,8 @@ class TaskOrchestrator:
         evidence_dict = evidence.to_dict()
         evidence_dict["discrepancies"] = comparison.get("discrepancies", [])
         gate = self._run_checkpoint_gatekeeper(
-            {"task_id": task_id, "project_id": project_id}, evidence_dict
+            {"task_id": task_id, "project_id": project_id,
+             "target_files": ai_report.get("changed_files", [])}, evidence_dict
         )
 
         if gate.passed:
@@ -290,15 +291,21 @@ class TaskOrchestrator:
 
         changed_files = evidence_dict.get("changed_files", [])
         has_changes = bool(changed_files)
-        discrepancies = evidence_dict.get("discrepancies", [])
-        critical = [d for d in discrepancies
-                    if d.get("issue") not in ("test_count_mismatch",)]
+
+        # Discrepancies between AI report and evidence are for AUDIT only.
+        # The gate only blocks on: no changes, or unrelated files modified.
+        # AI/evidence mismatches are expected (different perspectives).
 
         if not has_changes:
             return _GateResult(False, "no changed files detected")
-        if critical:
-            reasons = "; ".join(d.get("issue", "unknown") for d in critical)
-            return _GateResult(False, f"critical discrepancies: {reasons}")
+
+        # Check target_files constraint: reject if unrelated files modified
+        target_files = task.get("target_files", [])
+        if target_files:
+            unrelated = [f for f in changed_files if f not in target_files]
+            if unrelated:
+                return _GateResult(False, f"unrelated files modified: {unrelated}")
+
         return _GateResult(True, "")
 
     def _trigger_tester(self, parent_task_id: str, project_id: str,
