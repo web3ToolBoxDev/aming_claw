@@ -97,10 +97,11 @@ class AILifecycleManager:
         except Exception as e:
             log.error("Failed to write prompt file: %s", e)
 
-        # AI tools: read-only only. Write/Edit/Bash are denied.
-        # AI must output structured JSON describing changes,
-        # Executor code applies them via /file/* API with path validation.
-        allowed_tools = "Read,Grep,Glob"
+        # AI tools: Read + Write + Edit for code changes in worktree.
+        # Worktree isolation ensures AI can only modify its own branch,
+        # not main workspace. Governance chain (gatekeeper → test → QA)
+        # verifies changes before merge.
+        allowed_tools = "Read,Grep,Glob,Write,Edit,Bash"
 
         cmd = [
             claude_bin,
