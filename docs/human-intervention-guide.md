@@ -143,3 +143,96 @@ AI 通过 Telegram 通知人类:
 人工验收:
   UI 交互 → Telegram 行为 → 安全功能
 ```
+
+---
+
+## 5. Observer SOP
+
+### Observer Role
+
+The Observer's job is to **monitor the automated flow**, not to drive it. The Observer watches task progression, executor health, and verify-update cycles. Direct intervention is only warranted when a **self-bootstrap paradox** is confirmed — i.e., the system cannot fix itself because the fix requires the same broken component that needs fixing.
+
+> **Default stance:** hands off. Let the executor and dev-AI sessions work autonomously. Step in only after the 5 Whys analysis (see below) indicates the system is structurally blocked.
+
+---
+
+### When to Go Manual: 5 Whys Analysis
+
+Before deciding to intervene, apply the **5 Whys** technique. You must trace at least **3 causal layers** before concluding that manual intervention is required.
+
+**Example:**
+1. Why is the node stuck in `testing`? → verify-update keeps returning `t2_fail`.
+2. Why does verify-update fail? → coverage-check exits non-zero.
+3. Why does coverage-check fail? → The test file imports a module that is missing from the worktree.
+4. *(optional)* Why is the module missing? → A prior commit deleted it without updating the import.
+5. *(optional)* Why wasn't this caught automatically? → The executor's orphan-cleanup removed the branch before the dev session could push.
+
+If at layer 3 you can confirm a **self-bootstrap paradox** (the executor cannot run the fix because the fix must be applied to the executor itself, or the worktree is irrecoverably dirty), proceed to the 10-step SOP below.
+
+---
+
+### 10-Step Manual Fix SOP
+
+| Step | Action | Command / Detail |
+|------|--------|-----------------|
+| 1 | **Stop executor** | `.\scripts\start-executor.ps1 -Takeover` then kill, or send SIGTERM to the executor PID |
+| 2 | **Git clean** | `git -C <worktree> clean -fdx` — remove all untracked and generated files |
+| 3 | **Declare reason** | Write a one-line reason in `shared-volume/codex-tasks/logs/manual-intervention-<date>.log` explaining the paradox found at step N of 5 Whys |
+| 4 | **Edit** | Apply the minimum fix directly (use Write/Edit tools in the dev AI session — worktree isolation grants write access) |
+| 5 | **Coverage-check** | `python -m pytest --cov=agent agent/tests/ -q` — must pass with no regression |
+| 6 | **verify-update** | Call the verify-update API with evidence; confirm `t2_pass` returned |
+| 7 | **verify_loop** | Confirm the node transitions out of `testing` into `t2_pass`; watch the loop for one full cycle |
+| 8 | **Commit** | `git commit -m "manual-fix: <reason> (observer-intervened)"` in the worktree |
+| 9 | **Write memory** | Update `MEMORY.md` or the dbservice domain pack with the root cause and the fix applied |
+| 10 | **Start executor** | `.\scripts\start-executor.ps1` (Windows) or `bash scripts/startup.sh` (Linux/macOS) — **from a terminal, not from inside a Claude session** |
+
+---
+
+### Prohibited Actions
+
+| ❌ Do NOT | Reason |
+|-----------|--------|
+| Start the executor from inside an active Claude/dev-AI session | Creates a child process owned by the session; killed when the session exits, leaving tasks orphaned |
+| `curl` verify-update directly without evidence | Bypasses the evidence-validation gate; produces a false `t2_pass` that corrupts the audit trail |
+| Skip E2E verification | E2E is the only proof that the full pipeline works end-to-end; skipping it hides regressions |
+| Run `git reset --hard` on the main branch without declaring reason | Destroys history; use a worktree branch instead |
+| Merge fixes while executor is running | Race condition between executor task-claims and your edits |
+
+---
+
+### Observer API
+
+The Observer exposes a lightweight HTTP API for attaching/detaching monitoring sessions and querying status.
+
+```
+POST /observer/attach
+  Body: { "session_id": "<your-session-id>", "scope": "all" | "node:<id>" }
+  Response: { "ok": true, "token": "<observe-token>" }
+
+POST /observer/detach
+  Body: { "token": "<observe-token>" }
+  Response: { "ok": true }
+
+GET  /observer/status
+  Headers: Authorization: Bearer <observe-token>
+  Response: {
+    "executor_pid": 12345,
+    "active_tasks": 3,
+    "stale_claimed": 0,
+    "orphan_count": 0,
+    "last_heartbeat": "2026-03-25T10:00:00Z"
+  }
+```
+
+> Tokens are session-scoped and expire when you call `/observer/detach` or when the executor restarts.
+
+---
+
+### Write/Edit Access in Dev AI Sessions
+
+Dev AI sessions now run inside **worktree isolation** — each session receives a dedicated git worktree with its own branch. This means:
+
+- The `Write` and `Edit` tools have full write access within the worktree directory.
+- Changes are **isolated** from `main` until explicitly committed and merged.
+- The Observer can inspect, diff, or reset a worktree without affecting other sessions.
+- After manual intervention, always commit on the worktree branch and open a PR (or fast-forward merge) — never push directly to `main` from a manual session.

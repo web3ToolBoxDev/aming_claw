@@ -11,6 +11,46 @@ NC='\033[0m'
 log() { echo -e "${GREEN}[startup]${NC} $1"; }
 err() { echo -e "${RED}[startup]${NC} $1"; }
 
+# ---------------------------------------------------------------------------
+# Environment Variable Reference
+# ---------------------------------------------------------------------------
+# The following variables can be set in .env or exported in the calling shell
+# before running this script.  Defaults are shown where applicable.
+#
+#   AI_SESSION_TIMEOUT   (default: 600 seconds)
+#     Maximum wall-clock time (in seconds) that a single AI backend session
+#     may run before the executor forcibly terminates it.  Increase this for
+#     complex refactors that legitimately need more than 10 minutes.
+#     Example:  export AI_SESSION_TIMEOUT=1200
+#
+#   EXECUTOR_API_URL     (default: http://localhost:40100)
+#     Base URL that the executor exposes for its REST API.  Override if you
+#     run multiple executor instances on different ports, or if you route
+#     through a reverse proxy.
+#     Example:  export EXECUTOR_API_URL=http://localhost:40200
+#
+#   EXECUTOR_SINGLETON_PORT  (default: 39101)
+#     TCP port used as a mutex lock to prevent duplicate executor instances.
+#
+#   SHARED_VOLUME_PATH   (default: <repo-root>/shared-volume)
+#     Root directory for task stages (pending / processing / results / etc.).
+#
+#   CODEX_WORKSPACE      (default: <repo-root>)
+#     Primary workspace directory passed to the Codex backend.
+#
+#   CODEX_SEARCH_WORKSPACE  (default: <CODEX_WORKSPACE>/search-workspace)
+#     Secondary workspace used for read-only search operations.
+#
+# Startup behaviour note:
+#   On every startup the executor now runs two reconciliation routines:
+#     - _reconcile_stale_claimed() : re-queues tasks that were claimed but
+#       never completed (e.g. after a crash).  Safe to run at any time.
+#     - _cleanup_orphans()          : kills child processes whose PIDs were
+#       spawned by THIS executor instance but are no longer tracked.
+#       It only kills PIDs recorded in the executor's own spawn table —
+#       it will NOT kill unrelated processes.
+# ---------------------------------------------------------------------------
+
 # 1. Start Docker services
 log "Starting Docker services..."
 docker compose -f docker-compose.governance.yml up -d
