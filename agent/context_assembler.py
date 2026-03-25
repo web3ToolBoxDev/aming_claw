@@ -189,7 +189,11 @@ class ContextAssembler:
           3. runtime                (medium)
           4. git_status             (medium-high)
           5. project_status         (highest — never removed)
+
+        Works on a deep copy of context so the original dict is never mutated.
         """
+        import copy
+        context = copy.deepcopy(context)
         # Keys not in trim_order (e.g. project_status, _token_budget) are protected.
         trim_order = ["conversation_history", "memories", "runtime", "git_status"]
 
