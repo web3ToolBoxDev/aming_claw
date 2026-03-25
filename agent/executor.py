@@ -562,7 +562,12 @@ def process_task(path: Path) -> None:
             pass
         return
 
-    processing = move_task(path, "processing")
+    # If already in processing/ (parallel mode moves before dispatch),
+    # don't re-move; otherwise move from pending/ to processing/
+    if "processing" in str(path.parent):
+        processing = path
+    else:
+        processing = move_task(path, "processing")
     task = load_json(processing)
     task["status"] = "processing"
     task["started_at"] = utc_iso()
@@ -1861,8 +1866,15 @@ def run_parallel() -> None:
                         # Already tried, queue was full — don't spin, wait
                         time.sleep(poll_sec)
                         continue
-                    if not dispatcher.dispatch(pending):
-                        # Queue full — remember and skip on next poll
+                    # Move to processing/ BEFORE dispatching to prevent
+                    # the main loop from re-picking and duplicating the task.
+                    processing_path = move_task(pending, "processing")
+                    if not dispatcher.dispatch(processing_path):
+                        # Queue full — move back to pending for later retry
+                        try:
+                            move_task(processing_path, "pending")
+                        except Exception:
+                            pass
                         _skipped_tasks.add(task_id)
                         print(f"[executor] dispatch failed for {task_id}, will retry later")
                         time.sleep(poll_sec)

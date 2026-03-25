@@ -168,7 +168,10 @@ class WorkspaceWorker:
                 print("[worker-{}] task {} failed: {}".format(self.ws_id, task_id, exc))
             finally:
                 self._current_task_id = None
-                self.task_queue.task_done()
+                try:
+                    self.task_queue.task_done()
+                except ValueError:
+                    pass  # task_done called more times than put
 
 
 # ── Parallel Dispatcher ──────────────────────────────────────────────────────
