@@ -109,6 +109,26 @@ def new_task_id() -> str:
 
 
 def save_json(path: Path, obj: Dict) -> None:
+    """Serialize *obj* to JSON and write it atomically to *path*.
+
+    Args:
+        path (Path): Destination file path.  The file does not need to exist
+            beforehand, but all ancestor directories will be created
+            automatically (equivalent to ``mkdir -p``).
+        obj (Dict): A JSON-serialisable dictionary to persist.  The output is
+            formatted with 2-space indentation and ``ensure_ascii=False`` so
+            that non-ASCII characters are stored verbatim.
+
+    Notable behaviour:
+        * **Parent-directory creation** – ``path.parent`` is created
+          (including any missing intermediate directories) before writing,
+          so callers never need to pre-create the directory tree.
+        * **Atomic write** – the data is first written to a sibling temporary
+          file (``<path>.tmp``), then renamed over the destination via
+          ``os.replace``.  This guarantees that readers never observe a
+          partially-written file: the destination is either the old version or
+          the fully-written new version, never a mix of the two.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
