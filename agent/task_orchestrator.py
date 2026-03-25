@@ -620,11 +620,23 @@ class TaskOrchestrator:
             "_chain_depth": chain_depth,
             "created_at": created_at,
         }
-        # Copy verification config from action (set by PM) into task metadata
+        # Copy verification config from action (set by PM) into task metadata.
+        # If PM didn't set it (e.g. coordinator created task directly),
+        # use a sensible default based on task characteristics.
         if "verification" in action:
             task_data["_verification"] = action["verification"]
         elif "_verification" in action:
             task_data["_verification"] = action["_verification"]
+        else:
+            # Default: code_only tasks skip governance checks (no nodes to verify)
+            task_data["_verification"] = {
+                "governance_nodes": False,
+                "verify_loop": False,
+                "release_gate": False,
+                "test_required": True,
+                "qa_scope": "code_only",
+                "doc_update": False,
+            }
 
         # Write pending file via Executor API (correct path, idempotent).
         # Fallback to direct file write if API unavailable.
