@@ -742,7 +742,7 @@ def process_dev_task_v6(task: Dict, processing: Path) -> Dict:
             prompt=prompt,
             context=dev_context,
             project_id=project_id,
-            timeout_sec=300,
+            timeout_sec=int(os.getenv("AI_SESSION_TIMEOUT", "600")),
             workspace=workspace,
         )
 
