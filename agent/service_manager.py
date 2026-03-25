@@ -23,9 +23,10 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 # Ensure common/agent_config are importable from this directory
 sys.path.insert(0, str(Path(__file__).parent))
@@ -34,6 +35,13 @@ from utils import load_json, save_json, tasks_root, utc_iso  # noqa: E402
 
 POLL_SEC = float(os.getenv("MANAGER_POLL_SEC", "5"))
 MANAGER_SINGLETON_PORT = int(os.getenv("MANAGER_SINGLETON_PORT", "39103"))
+
+# Reload constants
+RELOAD_WAIT_TIMEOUT_SEC = int(os.getenv("RELOAD_WAIT_TIMEOUT_SEC", "120"))
+RELOAD_POLL_SEC = float(os.getenv("RELOAD_POLL_SEC", "2"))
+
+# Module-level start time for uptime tracking
+_START_TIME: float = time.time()
 
 
 # ── File paths ────────────────────────────────────────────────────────────────
@@ -119,6 +127,117 @@ def write_status(services: Dict[str, str]) -> None:
         })
     except Exception as exc:
         print("[manager] write_status error: {}".format(exc))
+
+
+# ── Active / queued task counters ────────────────────────────────────────────
+
+def _count_active_tasks() -> int:
+    """Return number of tasks currently in 'processing' state via task_state."""
+    try:
+        import task_state  # imported lazily to avoid circular deps at module load
+        active_list = task_state.list_active_tasks()
+        return sum(
+            1 for t in active_list
+            if (t.get("status") or "") == "processing"
+        )
+    except Exception:
+        return 0
+
+
+def _count_queued_tasks() -> int:
+    """Return total number of tasks queued across all workspaces."""
+    try:
+        import workspace_queue  # imported lazily
+        data = load_json(tasks_root() / "state" / "workspace_task_queue.json")
+        if not isinstance(data, dict):
+            return 0
+        queues: Dict[str, List] = data.get("queues") or {}
+        return sum(len(v) for v in queues.values() if isinstance(v, list))
+    except Exception:
+        return 0
+
+
+# ── New public API ─────────────────────────────────────────────────────────────
+
+def status() -> Dict:
+    """Return structured status dict with pid, uptime, active/queued task counts.
+
+    Returns:
+        {
+            "pid":      <int>,
+            "uptime_sec": <float>,
+            "active_tasks": <int>,   # tasks currently processing
+            "queued_tasks": <int>,   # tasks waiting in workspace queue
+            "services": {...},       # coordinator/executor/manager process status
+        }
+    """
+    return {
+        "pid": os.getpid(),
+        "uptime_sec": round(time.time() - _START_TIME, 1),
+        "active_tasks": _count_active_tasks(),
+        "queued_tasks": _count_queued_tasks(),
+        "services": get_service_status(),
+    }
+
+
+def reload(callback: Optional[Callable[[bool, str], None]] = None) -> bool:
+    """Gracefully restart the executor process without losing the task queue.
+
+    Algorithm:
+      1. Poll active_tasks until it reaches 0 (timeout: RELOAD_WAIT_TIMEOUT_SEC).
+      2. When active == 0, call run_restart() to restart all services.
+      3. Invoke optional callback(success: bool, message: str) when done.
+
+    Args:
+        callback: Optional callable(success, message) called after reload.
+                  Runs on the same thread that calls reload().
+
+    Returns:
+        True if restart succeeded, False on timeout or restart failure.
+    """
+    deadline = time.time() + RELOAD_WAIT_TIMEOUT_SEC
+
+    # Wait for active tasks to drain
+    while True:
+        active = _count_active_tasks()
+        if active == 0:
+            break
+        if time.time() >= deadline:
+            msg = "[manager] reload: timed out waiting for {} active task(s) to finish".format(active)
+            print(msg)
+            if callback is not None:
+                try:
+                    callback(False, msg)
+                except Exception as cb_exc:
+                    print("[manager] reload callback error: {}".format(cb_exc))
+            return False
+        print("[manager] reload: waiting for {} active task(s)…".format(active))
+        time.sleep(RELOAD_POLL_SEC)
+
+    print("[manager] reload: no active tasks — restarting services")
+    ok = run_restart()
+    msg = "[manager] reload: restart {}".format("succeeded" if ok else "failed")
+    print(msg)
+
+    if callback is not None:
+        try:
+            callback(ok, msg)
+        except Exception as cb_exc:
+            print("[manager] reload callback error: {}".format(cb_exc))
+
+    return ok
+
+
+def reload_async(
+    callback: Optional[Callable[[bool, str], None]] = None
+) -> threading.Thread:
+    """Non-blocking variant of reload(); runs in a daemon thread.
+
+    Returns the Thread object so the caller can join() if needed.
+    """
+    t = threading.Thread(target=reload, kwargs={"callback": callback}, daemon=True)
+    t.start()
+    return t
 
 
 # ── Service restart helpers ───────────────────────────────────────────────────
