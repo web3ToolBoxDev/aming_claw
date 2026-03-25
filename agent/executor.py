@@ -680,7 +680,8 @@ def process_task(path: Path) -> None:
                     TaskOrchestrator().handle_qa_complete(
                         task_id=task["task_id"], project_id=task.get("project_id", ""),
                         token=task.get("_gov_token", ""), chat_id=chat_id,
-                        qa_report=result.get("executor", {}))
+                        qa_report=result.get("executor", {}),
+                        verification=task.get("_verification", {}))
             except Exception as chain_err:
                 print(f"[executor] task {task_id} chain trigger ({task_type}) failed: {chain_err}")
                 if chat_id:
@@ -1211,6 +1212,12 @@ def process_qa_task_v6(task: Dict, processing: Path) -> Dict:
                     env={**os.environ, "GOV_COORDINATOR_TOKEN": token})
                 tlog.write_file("merge_output.txt", mr.stdout + mr.stderr)
                 tlog.log_event("auto_merge", {"passed": mr.returncode == 0, "branch": branch})
+                if mr.returncode == 0:
+                    try:
+                        from bot_commands import write_manager_signal
+                        write_manager_signal("graceful_restart", {"task_id": task_id, "branch": branch}, chat_id or 0)
+                    except Exception as sig_err:
+                        print(f"[executor] Failed to write manager_signal: {sig_err}")
                 if chat_id:
                     _gateway_notify(chat_id, f"Auto-merge {'OK' if mr.returncode==0 else 'FAIL'}: {branch}")
 

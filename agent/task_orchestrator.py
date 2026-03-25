@@ -418,7 +418,8 @@ class TaskOrchestrator:
         self._gateway_reply(chat_id, f"QA 已启动 ({task_id[-8:]})", token)
 
     def handle_qa_complete(self, task_id: str, project_id: str,
-                           token: str, chat_id: int, qa_report: dict) -> dict:
+                           token: str, chat_id: int, qa_report: dict,
+                           verification: dict = None) -> dict:
         """Handle QA completion: verify-update qa_pass, then trigger Gatekeeper."""
         log.info("QA complete: %s", task_id)
 
@@ -444,11 +445,18 @@ class TaskOrchestrator:
             except Exception:
                 log.exception("Failed to verify-update qa_pass")
 
-        # 2. Trigger Gatekeeper (idempotent)
+        # 2. Conditionally trigger Gatekeeper based on release_gate
+        verification = verification or {}
+        release_gate = verification.get("release_gate", True)
+
         key = f"{task_id}:gate"
         gate_result = {}
         if not self._check_idempotent(key):
-            gate_result = self._trigger_gatekeeper(project_id, token, chat_id)
+            if release_gate:
+                gate_result = self._trigger_gatekeeper(project_id, token, chat_id)
+            else:
+                self._gateway_reply(chat_id, "✅ Merged to main (deploy not required for this task)", token)
+                gate_result = {"skipped": True, "reason": "release_gate_false"}
             self._record_idempotent(key)
         self._log_stage_transition(task_id, "qa", "gatekeeper", "qa_passed")
 
