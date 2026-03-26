@@ -251,18 +251,17 @@ def handle_project_register(ctx: RequestContext):
     # Register in governance
     project_id = config.project_id
     try:
-        with DBContext(project_id) as conn:
-            # Init project if not exists
-            if not existing:
-                project_service.init_project(conn, project_id)
-            # Store config
-            project_service.update_project_meta(conn, project_id, {
-                "workspace_path": str(ws),
-                "language": config.language,
-                "config_hash": str(hash(str(config))),
-            })
+        if not existing:
+            project_service.init_project(
+                project_id=project_id,
+                password="auto-registered",
+                project_name=config.project_id,
+                workspace_path=str(ws),
+            )
     except Exception as e:
-        return 500, {"error": f"registration failed: {e}"}
+        # May already exist with different password — that's OK
+        if "already exists" not in str(e).lower():
+            return 500, {"error": f"registration failed: {e}"}
 
     # Register workspace
     try:
