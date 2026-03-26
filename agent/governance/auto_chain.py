@@ -37,12 +37,42 @@ def on_task_completed(conn, project_id, task_id, task_type, status, result, meta
     if task_type not in CHAIN:
         return None
 
+    # Auto-enrich: derive related_nodes from changed_files via impact API
+    if not metadata.get("related_nodes"):
+        changed = result.get("changed_files", metadata.get("changed_files", []))
+        if changed:
+            try:
+                from .impact_analyzer import analyze_impact
+                import os
+                state_root = os.path.join(
+                    os.environ.get("SHARED_VOLUME_PATH",
+                                   os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "shared-volume")),
+                    "codex-tasks", "state", "governance", project_id)
+                graph_path = os.path.join(state_root, "graph.json")
+                if os.path.exists(graph_path):
+                    from .graph import AcceptanceGraph
+                    graph = AcceptanceGraph()
+                    graph.load(graph_path)
+                    impact = analyze_impact(graph, changed)
+                    nodes = [n["node_id"] for n in impact.get("affected_nodes", [])]
+                    if nodes:
+                        metadata["related_nodes"] = nodes
+                        log.info("auto_chain: enriched related_nodes from changed_files: %s", nodes)
+            except Exception as e:
+                log.warning("auto_chain: related_nodes enrichment failed: %s", e)
+
     depth = metadata.get("chain_depth", 0)
     if depth >= MAX_CHAIN_DEPTH:
         log.warning("auto_chain: max depth %d reached for task %s, stopping", depth, task_id)
         return {"chain_stopped": True, "reason": f"max_chain_depth={MAX_CHAIN_DEPTH}"}
 
     gate_fn_name, next_type, builder_name = CHAIN[task_type]
+
+    # Auto-update nodes based on stage completion
+    if task_type == "dev" and metadata.get("related_nodes"):
+        _try_verify_update(conn, project_id, metadata, "testing", "dev",
+                           {"type": "dev_complete", "producer": "auto-chain",
+                            "task_id": task_id})
 
     # Run gate check
     gate_fn = _GATES[gate_fn_name]
@@ -134,11 +164,11 @@ def _gate_checkpoint(conn, project_id, result, metadata):
     if expected_docs:
         missing_docs = expected_docs - doc_files_changed
         if missing_docs:
-            # Warn but don't block — set metadata.doc_update_required=true to enforce
-            if metadata.get("doc_update_required", False):
-                return False, f"Doc update required but not changed: {sorted(missing_docs)}"
+            # Block by default — set metadata.skip_doc_check=true to bypass
+            if metadata.get("skip_doc_check", False):
+                log.warning("checkpoint_gate: docs may need update (skipped): %s", sorted(missing_docs))
             else:
-                log.warning("checkpoint_gate: docs may need update: %s", sorted(missing_docs))
+                return False, f"Related docs not updated: {sorted(missing_docs)}. Add them to changed_files or set skip_doc_check=true."
     return True, "ok"
 
 
