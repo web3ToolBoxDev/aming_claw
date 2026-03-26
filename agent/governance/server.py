@@ -85,11 +85,14 @@ class GovernanceHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         return {k: v[0] if len(v) == 1 else v for k, v in parse_qs(parsed.query).items()}
 
-    def _respond(self, code: int, body: dict):
+    def _respond(self, code: int, body: dict, extra_headers: dict | None = None):
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -111,12 +114,16 @@ class GovernanceHandler(BaseHTTPRequestHandler):
                 idem_key=self.headers.get("Idempotency-Key", ""),
             )
             result = handler(ctx)
-            if isinstance(result, tuple):
+            if isinstance(result, tuple) and len(result) == 3:
+                code, body, extra_headers = result
+            elif isinstance(result, tuple):
                 code, body = result
+                extra_headers = None
             else:
                 code, body = 200, result
+                extra_headers = None
             body["request_id"] = request_id
-            self._respond(code, body)
+            self._respond(code, body, extra_headers)
         except GovernanceError as e:
             body = e.to_dict()
             body["request_id"] = request_id
@@ -317,7 +324,14 @@ def handle_list_sessions(ctx: RequestContext):
 
 @route("POST", "/api/token/refresh")
 def handle_token_refresh(ctx: RequestContext):
-    """DEPRECATED (v5): Exchange refresh_token for access_token. Use project_token directly."""
+    """DEPRECATED (v5): Exchange refresh_token for access_token. Use project_token directly.
+    Removal timeline: deprecated since v5, scheduled for removal in v8.
+    """
+    # Deprecation headers: deprecated since v5, removal planned for v8
+    _deprecation_headers = {
+        "X-Deprecated-Since": "v5",
+        "X-Removal-Date": "v8",
+    }
     refresh_token = ctx.body.get("refresh_token", "")
     if not refresh_token:
         from .errors import ValidationError
@@ -341,14 +355,15 @@ def handle_token_refresh(ctx: RequestContext):
             try:
                 with DBContext(p["project_id"]) as conn:
                     result = token_service.issue_access_token(conn, refresh_token)
-                    return result
+                    return 200, result, _deprecation_headers
             except Exception:
                 continue
         from .errors import AuthError
         raise AuthError("Invalid refresh token")
 
     with DBContext(project_id) as conn:
-        return token_service.issue_access_token(conn, refresh_token)
+        result = token_service.issue_access_token(conn, refresh_token)
+    return 200, result, _deprecation_headers
 
 
 @route("POST", "/api/token/revoke")
@@ -372,7 +387,14 @@ def handle_token_revoke(ctx: RequestContext):
 
 @route("POST", "/api/token/rotate")
 def handle_token_rotate(ctx: RequestContext):
-    """DEPRECATED (v5): Use revoke + re-init instead."""
+    """DEPRECATED (v5): Use revoke + re-init instead.
+    Removal timeline: deprecated since v5, scheduled for removal in v8.
+    """
+    # Deprecation headers: deprecated since v5, removal planned for v8
+    _deprecation_headers = {
+        "X-Deprecated-Since": "v5",
+        "X-Removal-Date": "v8",
+    }
     refresh_token = ctx.body.get("refresh_token", "")
     if not refresh_token:
         from .errors import ValidationError
@@ -382,7 +404,8 @@ def handle_token_rotate(ctx: RequestContext):
     for p in project_service.list_projects():
         try:
             with DBContext(p["project_id"]) as conn:
-                return token_service.rotate_refresh_token(conn, refresh_token)
+                result = token_service.rotate_refresh_token(conn, refresh_token)
+                return 200, result, _deprecation_headers
         except Exception:
             continue
     from .errors import AuthError
@@ -1507,8 +1530,8 @@ _DOCS = {
             "POST /api/role/assign": "coordinator 分配 agent_token",
         },
         "deprecated": [
-            "POST /api/token/refresh — 不再需要，project_token 不过期",
-            "POST /api/token/rotate — 简化为 revoke + 重新 init",
+            "POST /api/token/refresh — 不再需要，project_token 不过期 [deprecated: v5, removal: v8]",
+            "POST /api/token/rotate — 简化为 revoke + 重新 init [deprecated: v5, removal: v8]",
             "access_token (gat-*) — 不再使用",
         ],
         "security": [
