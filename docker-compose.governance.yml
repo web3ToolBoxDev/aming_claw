@@ -26,6 +26,7 @@ services:
     volumes:
       - ./shared-volume/codex-tasks/state/governance:/app/shared-volume/codex-tasks/state/governance
       - .:/workspace:ro
+      - C:/Users/z5866/Documents/Yings_work:/projects/yings-work:ro
     environment:
       - GOVERNANCE_PORT=40006
       - REDIS_URL=redis://redis:6379/0
