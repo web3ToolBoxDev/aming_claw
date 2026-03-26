@@ -207,13 +207,44 @@ def _project_db_path(project_id: str) -> Path:
 
 
 def get_connection(project_id: str) -> sqlite3.Connection:
-    """Get a SQLite connection for a project, creating/migrating if needed.
+    """Get a SQLite connection for a project, creating/migrating schema if needed.
 
-    Returns a connection with:
-      - WAL mode for concurrent readers
-      - Foreign keys enabled
-      - Row factory for dict-like access
-    """
+    Returns:
+        sqlite3.Connection: An open, fully-configured connection to the
+        per-project governance database.
+
+    Connection configuration applied on every call:
+
+    WAL mode (PRAGMA journal_mode=WAL):
+        Enables Write-Ahead Logging, which allows concurrent readers to proceed
+        without being blocked by an active writer.  This is important because
+        multiple agents may query the database simultaneously while a write
+        transaction is in progress.
+
+    Foreign-key enforcement (PRAGMA foreign_keys=ON):
+        SQLite does not enforce foreign-key constraints by default; this PRAGMA
+        activates referential-integrity checks for the lifetime of the
+        connection (e.g. task_attempts.task_id → tasks.task_id).
+
+    Busy timeout (PRAGMA busy_timeout=5000):
+        Instructs SQLite to wait up to 5 000 ms before raising
+        ``OperationalError: database is locked`` when another connection holds
+        an exclusive lock.  This prevents spurious failures under brief write
+        contention.
+
+    Row factory (sqlite3.Row):
+        Sets ``conn.row_factory = sqlite3.Row`` so that every fetched row
+        supports both index-based and column-name-based access
+        (``row["column_name"]`` as well as ``row[0]``).
+
+    Auto-schema migration (_ensure_schema):
+        ``_ensure_schema(conn)`` is called on every new connection.  It runs
+        the full ``SCHEMA_SQL`` block (``CREATE TABLE IF NOT EXISTS …``) to
+        create tables on first use, then checks the stored ``schema_version``
+        against ``SCHEMA_VERSION`` (currently {version}) and runs any
+        outstanding incremental migration functions up to that target version.
+        This means callers never need to manage schema lifecycle manually.
+    """.format(version=SCHEMA_VERSION)
     db_path = _project_db_path(project_id)
     conn = sqlite3.connect(str(db_path), timeout=10)
     conn.row_factory = sqlite3.Row
