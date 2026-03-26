@@ -1209,7 +1209,34 @@ def process_qa_task_v6(task: Dict, processing: Path) -> Dict:
         save_json(processing, result)
 
         if qa_status in ("completed", "passed_with_fallback"):
+            # Run project-specific release checks before merge
+            try:
+                from project_config import get_project_config
+                import shlex
+                pcfg = get_project_config(project_id)
+                if pcfg and pcfg.build.release_checks:
+                    for check_cmd in pcfg.build.release_checks:
+                        tlog.log_event("release_check_running", {"command": check_cmd})
+                        rc = subprocess.run(
+                            shlex.split(check_cmd), cwd=workspace,
+                            capture_output=True, text=True, timeout=300)
+                        if rc.returncode != 0:
+                            tlog.log_event("release_check_failed", {
+                                "command": check_cmd, "exit": rc.returncode,
+                                "stderr": rc.stderr[:500]})
+                            if chat_id:
+                                _gateway_notify(chat_id, f"❌ Release check failed: {check_cmd}")
+                            qa_status = "release_check_failed"
+                            break
+                        tlog.log_event("release_check_passed", {"command": check_cmd})
+            except (ImportError, Exception) as rc_err:
+                tlog.log_event("release_check_error", {"error": str(rc_err)[:200]})
+
             tlog.log_event("triggering_auto_merge", {"qa_status": qa_status})
+            if qa_status == "release_check_failed":
+                tlog.log_event("merge_skipped", {"reason": "release_check_failed"})
+                return result  # Don't merge
+
             branch = task.get("_branch", "")
             if not branch:
                 br = subprocess.run(["git", "branch", "--list", "dev/*", "--sort=-committerdate"],
