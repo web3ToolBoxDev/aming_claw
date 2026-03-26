@@ -11,7 +11,19 @@
 
 > **Want to integrate your project?** Read [`WORKFLOW.md`](WORKFLOW.md) — one file, everything you need.
 
-Aming Claw is a self-evolving AI development tool that manages its own codebase through a Telegram-driven task pipeline. Rather than being a passive assistant, Aming Claw operates as an autonomous development team: a product manager writes requirements, a developer codes the solution, a tester validates the output, and a QA auditor reviews quality -- all powered by AI models, all orchestrated through a single Telegram chat.
+### Your AI Supervisor
+
+Any Claude Code session can supervise your project through the auto-chain workflow:
+- **Observer mode**: Watch tasks flow through Dev → Gate → Tester → QA → Merge → Deploy
+- **Submit tasks**: Via API, Telegram, or direct JSON queue
+- **Intervene when needed**: `/takeover`, `/pause`, `/cancel` at any stage
+- **Zero setup**: Just read WORKFLOW.md and add .aming-claw.yaml to your repo
+
+The Observer pattern means your Claude session is a project supervisor — it submits work, monitors the pipeline, and only intervenes when the auto-chain can't self-heal.
+
+---
+
+Aming Claw is a self-evolving AI development tool that manages its own codebase through a multi-channel task pipeline. Rather than being a passive assistant, Aming Claw operates as an autonomous development team: a product manager writes requirements, a developer codes the solution, a tester validates the output, and a QA auditor reviews quality -- all powered by AI models, all orchestrated through a single Telegram chat.
 
 The core idea is **iterative self-improvement**. Every task submitted through Telegram flows through a multi-stage AI pipeline, producing code changes that are reviewed by a human gatekeeper. Accepted changes are committed and archived. Rejected changes are rolled back, and the feedback loop starts again. Over time, the system improves itself -- updating its own code, fixing its own bugs, and extending its own capabilities.
 
@@ -32,7 +44,7 @@ The core idea is **iterative self-improvement**. Every task submitted through Te
 ### How Self-Evolution Works
 
 ```
-  Developer sends task via Telegram
+  Observer / User submits task (API, Telegram, CLI, or direct queue)
         |
         v
   [ AI Pipeline Executes ]
@@ -51,15 +63,15 @@ The core idea is **iterative self-improvement**. Every task submitted through Te
   Aming Claw is now running its own improved code
 ```
 
-The acceptance/rejection loop is the engine of self-evolution. Each rejected task carries feedback that informs the next attempt. Each accepted task permanently advances the codebase. The system can modify any file in its own repository -- including its pipeline logic, its backend integrations, and its Telegram interface.
+The acceptance/rejection loop is the engine of self-evolution. Each rejected task carries feedback that informs the next attempt. Each accepted task permanently advances the codebase. The system can modify any file in its own repository -- including its pipeline logic, its backend integrations, its input channels (API, Telegram, CLI), and its observer interface.
 
 ---
 
 ### Architecture (v7 — Executor-Driven Auto-Chain)
 
 ```
-Telegram / API
-     │ message
+Observer / User  (API · Telegram · CLI · direct queue)
+     │ task / message
      ▼
 Coordinator ──► PM (requirements) ──► Dev (worktree)
   (dispatcher)      │                      │
@@ -113,7 +125,7 @@ Coordinator ──► PM (requirements) ──► Dev (worktree)
 ### Task Lifecycle
 
 ```
-User sends message
+Observer / User submits task (API, Telegram, CLI, or direct queue)
        |
        v
   [ pending ]  -------- task file written to pending/
@@ -619,9 +631,21 @@ aming_claw/
 
 ### 自我迭代的AI开发工具
 
-Aming Claw 是一个自我迭代的AI开发工具，通过 Telegram 驱动的任务流水线管理自己的代码库。它不是一个被动的助手，而是一个自主运作的开发团队：产品经理撰写需求、开发者编写代码、测试者验证输出、QA审计质量——全部由AI模型驱动，全部通过一个 Telegram 对话进行协调。
+### 你的 AI 督导
 
-核心理念是**迭代式自我进化**。通过 Telegram 提交的每个任务都会经过多阶段AI流水线，产生代码变更，由人类把关者审查。接受的变更被提交并归档。拒绝的变更被回滚，反馈循环重新开始。随着时间推移，系统不断改进自身——更新自己的代码，修复自己的缺陷，扩展自己的能力。
+任何 Claude Code session 都可以通过自动链工作流对你的项目进行督导：
+- **Observer 模式**：观察任务在 Dev → Gate → Tester → QA → Merge → Deploy 中流转
+- **提交任务**：通过 API、Telegram 或直接写入 JSON 队列
+- **随时介入**：在任意阶段使用 `/takeover`、`/pause`、`/cancel`
+- **零配置**：只需读取 WORKFLOW.md 并在你的仓库中添加 .aming-claw.yaml
+
+Observer 模式意味着你的 Claude session 是项目督导——它提交工作、监控流水线，只在自动链无法自我修复时才介入。
+
+---
+
+Aming Claw 是一个自我迭代的AI开发工具，通过多渠道任务流水线管理自己的代码库。它不是一个被动的助手，而是一个自主运作的开发团队：产品经理撰写需求、开发者编写代码、测试者验证输出、QA审计质量——全部由AI模型驱动，全部通过统一的任务管道进行协调。
+
+核心理念是**迭代式自我进化**。每个提交的任务都会经过多阶段AI流水线，产生代码变更，由人类把关者审查。接受的变更被提交并归档。拒绝的变更被回滚，反馈循环重新开始。随着时间推移，系统不断改进自身——更新自己的代码，修复自己的缺陷，扩展自己的能力。
 
 ### 核心能力
 
@@ -640,7 +664,7 @@ Aming Claw 是一个自我迭代的AI开发工具，通过 Telegram 驱动的任
 ### 自我进化机制
 
 ```
-  开发者通过 Telegram 发送任务
+  Observer / 用户提交任务（API、Telegram、CLI 或直接队列）
         |
         v
   [ AI 流水线执行 ]
@@ -659,18 +683,18 @@ Aming Claw 是一个自我迭代的AI开发工具，通过 Telegram 驱动的任
   Aming Claw 已在运行自己改进后的代码
 ```
 
-验收/拒绝循环是自我进化的引擎。每次拒绝都附带反馈信息，为下一次尝试提供改进方向。每次接受都永久地推进代码库。系统可以修改自身仓库中的任何文件——包括流水线逻辑、后端集成和 Telegram 界面。
+验收/拒绝循环是自我进化的引擎。每次拒绝都附带反馈信息，为下一次尝试提供改进方向。每次接受都永久地推进代码库。系统可以修改自身仓库中的任何文件——包括流水线逻辑、后端集成、输入渠道（API、Telegram、CLI）以及 Observer 接口。
 
 ---
 
 ### 架构
 
 ```
-Telegram 用户
-     | 发送消息
+Observer / 用户  (API · Telegram · CLI · 直接队列)
+     | 提交任务 / 发送消息
      v
 +-----------------+
-|   协调器        |  coordinator.py -- Telegram 轮询、命令处理、
+|   协调器        |  coordinator.py -- 多渠道输入、命令处理、
 |  Coordinator    |  验收门控、超时检测、归档
 +--------+--------+
          | 将任务文件写入 shared-volume/codex-tasks/pending/
@@ -711,7 +735,7 @@ Telegram 用户
 ### 任务生命周期
 
 ```
-用户发送消息
+Observer / 用户提交任务（API、Telegram、CLI 或直接队列）
        |
        v
   [ pending 待处理 ]  -------- 任务文件写入 pending/
