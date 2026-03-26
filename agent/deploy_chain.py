@@ -145,21 +145,16 @@ def rebuild_governance() -> tuple[bool, str]:
             return False, f"up failed: {up.stderr[:300]}"
         output_lines.append("container restarted")
 
-        stdout = build.stdout.strip()
-        stderr = build.stderr.strip()
-        if stdout:
-            output_lines.append(stdout[-200:])
-        if stderr:
-            output_lines.append(f"[stderr] {stderr[-200:]}")
-        if result.returncode != 0:
-            output_lines.append(f"[exit {result.returncode}] deploy script failed")
-            return False, "\n".join(output_lines)
+        # Capture combined output for diagnostics
+        combined = (build.stdout + "\n" + up.stdout).strip()
+        if combined:
+            output_lines.append(combined[-200:])
     except FileNotFoundError:
-        msg = f"Script not found: {script}"
+        msg = "docker compose not found — is Docker installed?"
         _log_error("rebuild_governance", msg)
         return False, msg
     except subprocess.TimeoutExpired:
-        msg = "deploy-governance.sh timed out after 300 s"
+        msg = "governance rebuild timed out after 300s"
         _log_error("rebuild_governance", msg)
         return False, msg
     except Exception as exc:  # noqa: BLE001
