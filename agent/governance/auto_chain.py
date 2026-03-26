@@ -303,7 +303,8 @@ def _gate_release(conn, project_id, result, metadata):
 
 def _build_dev_prompt(task_id, result, metadata):
     prd = result.get("prd", {})
-    target_files = result.get("target_files", prd.get("target_files", []))
+    # target_files: result > prd > original metadata (preserve original task metadata)
+    target_files = result.get("target_files", prd.get("target_files", metadata.get("target_files", [])))
     verification = result.get("verification", prd.get("verification", {}))
     requirements = prd.get("requirements", [])
     criteria = result.get("acceptance_criteria", prd.get("acceptance_criteria", []))
@@ -314,7 +315,7 @@ def _build_dev_prompt(task_id, result, metadata):
         f"acceptance_criteria: {json.dumps(criteria, ensure_ascii=False)}"
     )
     return prompt, {
-        **metadata,
+        **metadata,  # preserves skip_doc_check, changed_files, related_nodes, etc.
         "target_files": target_files,
         "verification": verification,
         "related_nodes": result.get("proposed_nodes", metadata.get("related_nodes", [])),
@@ -328,10 +329,11 @@ def _build_test_prompt(task_id, result, metadata):
         f"changed_files: {json.dumps(changed)}"
     )
     return prompt, {
-        **metadata,
-        "target_files": result.get("target_files", metadata.get("target_files", [])),
+        **metadata,  # preserves skip_doc_check and all other original task metadata
+        # Prioritise original metadata values; only fall back to result if metadata lacks them
+        "target_files": metadata.get("target_files") or result.get("target_files", []),
         "changed_files": changed,
-        "related_nodes": result.get("related_nodes", metadata.get("related_nodes", [])),
+        "related_nodes": metadata.get("related_nodes") or result.get("related_nodes", []),
     }
 
 
@@ -344,20 +346,22 @@ def _build_qa_prompt(task_id, result, metadata):
         f"changed_files: {json.dumps(changed)}"
     )
     return prompt, {
-        **metadata,
-        "target_files": result.get("target_files", metadata.get("target_files", [])),
+        **metadata,  # preserves skip_doc_check and all other original task metadata
+        # Prioritise original metadata values; only fall back to result if metadata lacks them
+        "target_files": metadata.get("target_files") or result.get("target_files", []),
         "changed_files": changed,
-        "related_nodes": result.get("related_nodes", metadata.get("related_nodes", [])),
+        "related_nodes": metadata.get("related_nodes") or result.get("related_nodes", []),
     }
 
 
 def _build_merge_prompt(task_id, result, metadata):
     prompt = f"Merge dev branch for {task_id} to main."
     return prompt, {
-        **metadata,
-        "target_files": result.get("target_files", metadata.get("target_files", [])),
-        "changed_files": result.get("changed_files", metadata.get("changed_files", [])),
-        "related_nodes": result.get("related_nodes", metadata.get("related_nodes", [])),
+        **metadata,  # preserves skip_doc_check and all other original task metadata
+        # Prioritise original metadata values; only fall back to result if metadata lacks them
+        "target_files": metadata.get("target_files") or result.get("target_files", []),
+        "changed_files": metadata.get("changed_files") or result.get("changed_files", []),
+        "related_nodes": metadata.get("related_nodes") or result.get("related_nodes", []),
     }
 
 

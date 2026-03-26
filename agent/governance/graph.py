@@ -7,7 +7,10 @@ It changes rarely (only when nodes are added/removed).
 import re
 import json
 import sys
+import logging
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 _agent_dir = str(Path(__file__).resolve().parents[1])
 if _agent_dir not in sys.path:
@@ -326,6 +329,18 @@ class AcceptanceGraph:
         if errors:
             self.G.remove_node(node_def.id)
             raise DAGError(f"Adding {node_def.id} creates cycle", {"errors": errors})
+
+        # Initialize node in node_state DB table (INSERT OR IGNORE — idempotent)
+        try:
+            from .db import get_connection
+            with get_connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO node_state (node_id, status) VALUES (?, ?)",
+                    (node_def.id, "pending"),
+                )
+                conn.commit()
+        except Exception as _db_err:
+            log.debug("add_node: node_state init skipped (non-blocking): %s", _db_err)
 
         # Layer warning (not enforced)
         if deps:

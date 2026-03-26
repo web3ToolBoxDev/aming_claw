@@ -281,8 +281,15 @@ class ExecutorWorker:
 
         return "\n".join(parts)
 
-    # Files/patterns to ignore in git diff (Claude CLI artifacts, not real changes)
-    _IGNORE_PATTERNS = {".claude/", "__pycache__/", ".pyc", ".lock"}
+    # Files/patterns to ignore in git diff (Claude CLI artifacts, not real changes).
+    # executor_worker.py is intentionally excluded — it IS the executor itself, not a task deliverable.
+    #
+    # Node mapping (file → acceptance-graph node):
+    #   executor_worker.py        → L3.2  ExecutorWorker (this file — executor process)
+    #   governance/auto_chain.py  → L2.1  AutoChain      (stage-transition dispatcher)
+    #   governance/graph.py       → L1.3  AcceptanceGraph (DAG rule layer)
+    #   governance/task_registry.py → L2.2 TaskRegistry  (task CRUD / queue)
+    _IGNORE_PATTERNS = {".claude/", "__pycache__/", ".pyc", ".lock", "executor_worker.py"}
 
     def _get_git_changed_files(self) -> list:
         """Run git diff --name-only to detect files changed since last commit."""
