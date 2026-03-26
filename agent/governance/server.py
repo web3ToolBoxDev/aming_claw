@@ -291,8 +291,15 @@ def handle_project_config(ctx: RequestContext):
 
     project_id = ctx.get_project_id()
     try:
-        from project_config import resolve_project_config
-        config = resolve_project_config(project_id)
+        from project_config import load_project_config
+        from pathlib import Path
+        # In Docker: try /workspace mount (bind-mounted project root)
+        ws = Path("/workspace")
+        if not ws.exists():
+            from project_config import resolve_project_config
+            config = resolve_project_config(project_id)
+        else:
+            config = load_project_config(ws)
         return {
             "project_id": config.project_id,
             "language": config.language,
@@ -316,7 +323,22 @@ def handle_project_explain(ctx: RequestContext):
     project_id = ctx.get_project_id()
     changed_files = ctx.body.get("changed_files", [])
     try:
-        from project_config import explain_config
+        from project_config import explain_config, load_project_config
+        from pathlib import Path
+        # In Docker: load from /workspace mount
+        ws = Path("/workspace")
+        if ws.exists():
+            config = load_project_config(ws)
+            # Build explain manually since explain_config uses registry
+            from deploy_chain import detect_affected_services
+            affected = detect_affected_services(changed_files, project_id=project_id) if changed_files else []
+            return {
+                "project_id": config.project_id,
+                "test_command": config.testing.unit_command,
+                "deploy_strategy": config.deploy.strategy,
+                "affected_services": affected,
+                "changed_files": changed_files,
+            }
         return explain_config(project_id, changed_files=changed_files)
     except Exception as e:
         return 404, {"error": f"explain failed: {e}"}
