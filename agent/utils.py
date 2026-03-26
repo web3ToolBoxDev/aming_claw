@@ -45,11 +45,32 @@ def utc_iso() -> str:
 
 
 def shared_root() -> Path:
-    """Return the shared volume root Path, creating it if necessary.
+    """Return the shared volume root as a :class:`pathlib.Path`.
 
-    Resolves the path from the SHARED_VOLUME_PATH environment variable when
-    set; otherwise defaults to <repo_root>/shared-volume. The directory is
-    always created (parents included) before returning.
+    Resolution order
+    ----------------
+    1. **``SHARED_VOLUME_PATH`` environment variable** – if the variable is
+       set to a non-empty string (after stripping whitespace), that value is
+       used verbatim as the root path.  This lets callers (and tests) override
+       the location without touching the source tree.
+    2. **Repo-relative default** – when ``SHARED_VOLUME_PATH`` is absent or
+       empty the path is resolved as ``<repo_root>/shared-volume``, where
+       ``<repo_root>`` is the parent of the ``agent/`` package directory
+       (i.e. two levels above this file).  The path is always made absolute
+       via :meth:`Path.resolve` so it is independent of the process working
+       directory.
+
+    Side-effects
+    ------------
+    The resolved directory (and any missing parent directories) is created
+    with ``mkdir(parents=True, exist_ok=True)`` before being returned, so
+    callers can safely write into it immediately.
+
+    Returns
+    -------
+    Path
+        Absolute path to the shared volume root directory, guaranteed to
+        exist on disk when this function returns.
     """
     root = os.getenv("SHARED_VOLUME_PATH", "").strip()
     if not root:
