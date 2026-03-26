@@ -44,9 +44,6 @@ from git_rollback import (
 # NEVER kill arbitrary claude.exe processes — they may be user Claude Code sessions.
 _EXECUTOR_SPAWNED_PIDS: set = set()
 
-# Service manager process started by this executor (for cleanup on shutdown).
-_service_manager_proc: Optional[subprocess.Popen] = None
-
 # ── Graceful shutdown ──────────────────────────────────────────────────────
 _shutdown_requested: threading.Event = threading.Event()
 _GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = int(os.getenv("EXECUTOR_SHUTDOWN_TIMEOUT_SEC", "120"))
@@ -662,7 +659,7 @@ def process_task(path: Path) -> None:
                 "action": task.get("action", "codex"),
             },
         )
-        # v6 path: dev_task/coordinator_chat with project_id → skip old finalize
+        # v7 path: dev_task/coordinator_chat with project_id → skip old finalize
         is_v6 = task.get("project_id") and task.get("type") in ("dev_task", "test_task", "qa_task", "coordinator_chat")
 
         if is_v6:
@@ -1465,7 +1462,6 @@ def _escape_telegram(text: str) -> str:
     """Escape MarkdownV2 special chars or strip markdown for plain text."""
     # Simple approach: strip common markdown formatting for plain text
     import re
-    # Remove **bold** → bold
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
     # Remove `code` → code
     text = re.sub(r'`(.+?)`', r'\1', text)
