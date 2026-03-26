@@ -140,7 +140,28 @@ def load_json(path: Path) -> Dict:
 
 
 def telegram_token() -> str:
-    """Return the Telegram bot token from environment variables."""
+    """Resolve and return the Telegram bot token from the environment.
+
+    Checks two environment variables in priority order:
+
+    1. ``TELEGRAM_BOT_TOKEN_CODEX`` – project-specific token intended for the
+       Codex/amingClaw deployment.  Checked first so that project-level
+       configuration takes precedence over a generic fallback.
+    2. ``TELEGRAM_BOT_TOKEN`` – generic fallback token used when the
+       project-specific variable is absent or empty.
+
+    Leading and trailing whitespace is stripped from each value before the
+    emptiness check, so a variable set to only spaces is treated as unset.
+
+    Returns:
+        str: The non-empty bot token string (e.g. ``"123456:ABC-DEF1234..."``).
+
+    Raises:
+        RuntimeError: If both ``TELEGRAM_BOT_TOKEN_CODEX`` and
+            ``TELEGRAM_BOT_TOKEN`` are unset or resolve to an empty string
+            after stripping whitespace.  The message is:
+            ``"missing TELEGRAM_BOT_TOKEN_CODEX or TELEGRAM_BOT_TOKEN"``.
+    """
     token = os.getenv("TELEGRAM_BOT_TOKEN_CODEX", "").strip()
     if not token:
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
