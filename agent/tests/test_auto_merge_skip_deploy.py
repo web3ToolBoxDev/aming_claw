@@ -49,7 +49,7 @@ class TestAutoMergeSkipDeploy(unittest.TestCase):
         """
         task = _make_qa_task(verification=verification)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             os.environ["SHARED_VOLUME_PATH"] = tmpdir
             processing = Path(tmpdir) / "codex-tasks" / "processing"
             processing.mkdir(parents=True)
