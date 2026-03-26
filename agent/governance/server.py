@@ -293,13 +293,16 @@ def handle_project_config(ctx: RequestContext):
     try:
         from project_config import load_project_config
         from pathlib import Path
-        # In Docker: try /workspace mount (bind-mounted project root)
-        ws = Path("/workspace")
-        if not ws.exists():
-            from project_config import resolve_project_config
-            config = resolve_project_config(project_id)
+        from workspace_registry import find_workspace_by_project_id
+        ws_entry = find_workspace_by_project_id(project_id)
+        if ws_entry:
+            config = load_project_config(Path(ws_entry['path']))
         else:
-            config = load_project_config(ws)
+            ws = Path('/workspace')
+            if ws.exists():
+                config = load_project_config(ws)
+            else:
+                return 404, {'error': f'no workspace registered for {project_id}'}
         return {
             "project_id": config.project_id,
             "language": config.language,
@@ -325,10 +328,10 @@ def handle_project_explain(ctx: RequestContext):
     try:
         from project_config import explain_config, load_project_config
         from pathlib import Path
-        # In Docker: load from /workspace mount
-        ws = Path("/workspace")
-        if ws.exists():
-            config = load_project_config(ws)
+        from workspace_registry import find_workspace_by_project_id
+        ws_entry = find_workspace_by_project_id(project_id)
+        if ws_entry:
+            config = load_project_config(Path(ws_entry['path']))
             # Build explain manually since explain_config uses registry
             from deploy_chain import detect_affected_services
             affected = detect_affected_services(changed_files, project_id=project_id) if changed_files else []
@@ -339,6 +342,21 @@ def handle_project_explain(ctx: RequestContext):
                 "affected_services": affected,
                 "changed_files": changed_files,
             }
+        else:
+            ws = Path('/workspace')
+            if ws.exists():
+                config = load_project_config(ws)
+                from deploy_chain import detect_affected_services
+                affected = detect_affected_services(changed_files, project_id=project_id) if changed_files else []
+                return {
+                    "project_id": config.project_id,
+                    "test_command": config.testing.unit_command,
+                    "deploy_strategy": config.deploy.strategy,
+                    "affected_services": affected,
+                    "changed_files": changed_files,
+                }
+            else:
+                return 404, {'error': f'no workspace registered for {project_id}'}
         return explain_config(project_id, changed_files=changed_files)
     except Exception as e:
         return 404, {"error": f"explain failed: {e}"}
