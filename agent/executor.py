@@ -1259,9 +1259,9 @@ def process_qa_task_v6(task: Dict, processing: Path) -> Dict:
 
                         tlog.log_event("deploy_chain_starting", {"changed_files": changed_files, "branch": branch})
 
-                        def _run_deploy_bg(files: list, cid: int) -> None:
+                        def _run_deploy_bg(files: list, cid: int, pid: str = "") -> None:
                             try:
-                                deploy_result = run_deploy(files, cid)
+                                deploy_result = run_deploy(files, cid, project_id=pid)
                                 try:
                                     tlog.log_event("deploy_chain_complete", {"result": deploy_result})
                                 except Exception:
@@ -1280,7 +1280,7 @@ def process_qa_task_v6(task: Dict, processing: Path) -> Dict:
 
                         threading.Thread(
                             target=_run_deploy_bg,
-                            args=(changed_files, chat_id),
+                            args=(changed_files, chat_id, task.get("project_id", "")),
                             daemon=True,
                             name=f"deploy-{task_id}",
                         ).start()

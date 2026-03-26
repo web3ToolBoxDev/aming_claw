@@ -41,8 +41,9 @@ class DevEvidence:
 class EvidenceCollector:
     """Independently collects execution evidence. Does not trust AI self-reports."""
 
-    def __init__(self, workspace: str = ""):
+    def __init__(self, workspace: str = "", project_id: str = ""):
         self.workspace = workspace or os.getenv("CODEX_WORKSPACE", os.getcwd())
+        self.project_id = project_id
 
     def collect_before_snapshot(self) -> dict:
         """Take a snapshot before dev execution for later comparison."""
@@ -152,7 +153,15 @@ class EvidenceCollector:
 
     def _run_tests(self) -> dict:
         """Run project tests and capture results."""
-        test_cmd = os.getenv("SAFE_TEST_COMMAND", "python -m pytest -q")
+        # Resolve test command from project config, fallback to env/default
+        default_cmd = "python -m pytest -q"
+        if self.project_id:
+            try:
+                from project_config import get_test_command
+                default_cmd = get_test_command(self.project_id) or default_cmd
+            except ImportError:
+                pass
+        test_cmd = os.getenv("SAFE_TEST_COMMAND", default_cmd)
         try:
             result = subprocess.run(
                 test_cmd.split(),

@@ -64,14 +64,36 @@ _SERVICE_RULES: list[tuple[list[str], list[str]]] = [
 ]
 
 
-def detect_affected_services(changed_files: list[str]) -> list[str]:
+def detect_affected_services(changed_files: list[str], project_id: str = "") -> list[str]:
     """Map *changed_files* to a deduplicated list of services that need restarting.
 
     Returns a list such as ``['executor', 'governance']`` or ``['all']``.
-    Files that match the "no-restart" patterns (docs/tests/md) contribute
-    nothing.  Files that match no rule at all are treated as requiring
+    If project_id is provided, reads service_rules from project config.
+    Files that match no rule at all are treated as requiring
     'executor' (safest default).
     """
+    # Try project-specific rules first
+    if project_id:
+        try:
+            from project_config import get_service_rules
+            rules = get_service_rules(project_id)
+            if rules:
+                services: set[str] = set()
+                for f in changed_files:
+                    normalized = f.replace("\\", "/")
+                    matched = False
+                    for rule in rules:
+                        patterns = rule.patterns if hasattr(rule, 'patterns') else rule.get("patterns", [])
+                        svcs = rule.services if hasattr(rule, 'services') else rule.get("services", [])
+                        if any(_matches_any(normalized, [p]) for p in patterns):
+                            services.update(svcs)
+                            matched = True
+                    if not matched:
+                        services.add("executor")
+                return sorted(services - {""})
+        except (ImportError, Exception):
+            pass  # Fall through to default rules
+
     services: set[str] = set()
     for f in changed_files:
         matched = False
@@ -325,7 +347,7 @@ def smoke_test() -> dict[str, Any]:
 # 6. run_deploy
 # ---------------------------------------------------------------------------
 
-def run_deploy(changed_files: list[str], chat_id: int = 0) -> dict[str, Any]:
+def run_deploy(changed_files: list[str], chat_id: int = 0, project_id: str = "") -> dict[str, Any]:
     """Full deploy orchestration.
 
     Steps:
@@ -350,7 +372,7 @@ def run_deploy(changed_files: list[str], chat_id: int = 0) -> dict[str, Any]:
 
     try:
         # 1. Detect
-        affected = detect_affected_services(changed_files)
+        affected = detect_affected_services(changed_files, project_id=project_id)
         report["affected_services"] = affected
 
         if not affected:
