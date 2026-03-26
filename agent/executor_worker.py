@@ -48,7 +48,7 @@ TASK_ROLE_MAP = {
     "dev":   ("dev", 300),
     "test":  ("tester", 180),
     "qa":    ("qa", 120),
-    "merge": ("dev", 60),
+    "merge": ("dev", 180),
     "task":  ("dev", 300),
 }
 
