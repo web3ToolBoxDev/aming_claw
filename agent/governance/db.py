@@ -256,7 +256,20 @@ def get_connection(project_id: str) -> sqlite3.Connection:
 
 
 def _ensure_schema(conn: sqlite3.Connection):
-    """Create tables if they don't exist, run migrations if needed."""
+    """Create all required tables if they do not already exist, then run any pending migrations.
+
+    On first use, executes the full ``SCHEMA_SQL`` block (``CREATE TABLE IF NOT
+    EXISTS …``) to initialise every table and index in the governance database.
+    Subsequent calls are safe because every statement uses ``IF NOT EXISTS``.
+
+    After the baseline schema is applied, the stored ``schema_version`` value is
+    read from the ``schema_meta`` table and compared against the module-level
+    ``SCHEMA_VERSION`` constant.  For each version step between the current and
+    target version, the corresponding incremental migration function is executed
+    in order to bring the schema up to date (e.g. adding new columns, creating
+    new indexes, or back-filling data).  When all pending migrations have run,
+    the stored version is updated to reflect the new baseline.
+    """
     conn.executescript(SCHEMA_SQL)
 
     # Check and set schema version
