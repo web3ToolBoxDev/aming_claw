@@ -1,4 +1,5 @@
 """deploy_chain.py – Orchestrate service restarts after a code push.
+# Multi-project deploy orchestration - supports any project via .aming-claw.yaml config
 
 Functions
 ---------
