@@ -1,0 +1,58 @@
+version: 1
+project_id: "aming-claw"
+name: "Aming Claw"
+language: "python"
+
+testing:
+  unit_command: "python -m pytest agent/tests/ -q --tb=short"
+  e2e_command: "bash scripts/e2e-task-test.sh"
+  allowed_commands:
+    - executable: "python"
+      args_prefixes: ["-m pytest", "-m unittest"]
+    - executable: "bash"
+      args_prefixes: ["scripts/e2e-"]
+
+build:
+  command: ""
+  release_checks: []
+
+deploy:
+  strategy: "docker"
+  service_rules:
+    - patterns: ["docs/**", "tests/**", "*.md", "*.txt"]
+      services: []
+    - patterns: ["scripts/**"]
+      services: ["all"]
+    - patterns: ["agent/utils.py", "agent/i18n.py", "agent/workspace*.py"]
+      services: ["executor", "governance"]
+    - patterns: ["agent/governance/**"]
+      services: ["governance"]
+    - patterns: ["agent/telegram_gateway/**"]
+      services: ["gateway"]
+    - patterns: ["agent/executor.py", "agent/task_*.py", "agent/ai_lifecycle.py", "agent/parallel_dispatcher.py"]
+      services: ["executor"]
+    - patterns: ["docker-compose*.yml", "Dockerfile*"]
+      services: ["all"]
+  commands:
+    executor:
+      restart: "signal"
+      health: "http://localhost:40100/status"
+    governance:
+      restart: "docker compose -f docker-compose.governance.yml build governance && docker compose -f docker-compose.governance.yml up -d governance"
+      health: "http://localhost:40000/api/health"
+    gateway:
+      restart: "docker compose -f docker-compose.governance.yml restart telegram-gateway"
+  smoke_test:
+    - name: "executor"
+      type: "http"
+      url: "http://localhost:40100/status"
+    - name: "governance"
+      type: "http"
+      url: "http://localhost:40000/api/health"
+    - name: "gateway"
+      type: "docker"
+      container: "aming_claw-telegram-gateway-1"
+
+governance:
+  enabled: true
+  test_tool_label: "pytest"
