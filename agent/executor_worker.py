@@ -335,9 +335,18 @@ class ExecutorWorker:
         """Parse AI session output into structured result, handling non-JSON gracefully."""
         stdout = session.stdout or ""
 
-        # Try to extract the last (outermost) JSON object from output
+        # Try to extract JSON from markdown code blocks first (```json ... ```)
         import re
-        # Find all JSON-like blocks (handles nested braces)
+        code_blocks = re.findall(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', stdout)
+        for block in reversed(code_blocks):
+            try:
+                obj = json.loads(block)
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                continue
+
+        # Fallback: find last JSON object from raw output
         parsed = None
         for candidate in reversed(list(re.finditer(r'\{', stdout))):
             start = candidate.start()

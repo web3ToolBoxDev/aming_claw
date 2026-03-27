@@ -175,17 +175,27 @@ def _gate_version_check(project_id, result, metadata):
 
 
 def _gate_post_pm(conn, project_id, result, metadata):
-    """Validate PM PRD has mandatory fields: target_files, verification, acceptance_criteria."""
+    """Validate PM PRD has mandatory fields: target_files, verification, acceptance_criteria.
+
+    Falls back to task metadata if PM output lacks structured PRD fields.
+    This handles cases where Claude outputs free-text instead of JSON.
+    """
     prd = result.get("prd", {})
+    # Check each field in result → prd → metadata (fallback chain)
     missing = []
     for field in ("target_files", "verification", "acceptance_criteria"):
-        if not result.get(field) and not prd.get(field):
+        if not result.get(field) and not prd.get(field) and not metadata.get(field):
             missing.append(field)
     if missing:
         return False, f"PRD missing mandatory fields: {missing}"
-    target_files = result.get("target_files", prd.get("target_files", []))
+    target_files = (result.get("target_files") or prd.get("target_files")
+                    or metadata.get("target_files") or [])
     if not target_files:
         return False, "PRD target_files is empty"
+    # Merge PRD fields back into result so downstream stages can access them
+    for field in ("target_files", "verification", "acceptance_criteria"):
+        if not result.get(field):
+            result[field] = prd.get(field) or metadata.get(field)
     return True, "ok"
 
 
