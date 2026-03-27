@@ -163,14 +163,16 @@ TOOLS: list[dict] = [
 class ToolDispatcher:
     """Routes MCP tool calls to governance API or in-process worker pool."""
 
-    def __init__(self, api_fn, worker_pool):
+    def __init__(self, api_fn, worker_pool, service_mgr=None):
         """
         Args:
             api_fn: Callable(method, path, data) → dict (HTTP to governance)
-            worker_pool: WorkerPool instance for executor tools
+            worker_pool: WorkerPool instance for executor tools (may be None)
+            service_mgr: ServiceManager for executor subprocess lifecycle
         """
         self._api = api_fn
         self._pool = worker_pool
+        self._svc = service_mgr
 
     def dispatch(self, name: str, args: dict) -> Any:
         # --- Task tools ---
@@ -216,14 +218,24 @@ class ToolDispatcher:
 
         # --- Executor tools ---
         if name == "executor_status":
+            if self._svc:
+                return self._svc.status()
             if self._pool:
                 return self._pool.status()
-            return {"mode": "external", "message": "Executor runs as independent process. Use: python -m agent.mcp.executor --project aming-claw"}
+            return {"mode": "external", "message": "No executor manager configured"}
 
         if name == "executor_scale":
+            if self._svc:
+                workers = args.get("workers", 1)
+                if workers == 0:
+                    self._svc.stop()
+                    return {"action": "stopped"}
+                else:
+                    self._svc.start()
+                    return self._svc.status()
             if self._pool:
                 return self._pool.scale(args["workers"])
-            return {"error": "Executor is external. Scale via process manager."}
+            return {"error": "No executor manager configured"}
 
         # --- System ---
         if name == "health":

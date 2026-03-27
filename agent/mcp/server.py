@@ -134,10 +134,23 @@ class AmingClawMCP:
             notify_fn=self._on_redis_event,
         )
 
+        # Service manager — manages executor_worker subprocess lifecycle
+        from service_manager import ServiceManager
+        self.service_mgr = ServiceManager(
+            project_id=project_id,
+            governance_url=governance_url,
+            executor_cmd=[
+                sys.executable, "-m", "agent.executor_worker",
+                "--project", project_id,
+                "--url", governance_url,
+            ],
+        )
+
         # Tool dispatcher (worker_pool may be None — executor tools return status only)
         self.dispatcher = ToolDispatcher(
             api_fn=self._http,
             worker_pool=self.worker_pool,
+            service_mgr=self.service_mgr,
         )
 
     def run(self) -> None:
@@ -150,6 +163,10 @@ class AmingClawMCP:
             self.worker_pool.start()
         self.event_bridge.start()
         self._start_http_api()
+
+        # Auto-start executor subprocess
+        self.service_mgr.start()
+        log.info("Executor subprocess started via ServiceManager")
 
         # Read stdin (JSON-RPC messages from Claude Code)
         try:
@@ -197,6 +214,7 @@ class AmingClawMCP:
 
     def _shutdown(self) -> None:
         log.info("Shutting down MCP server...")
+        self.service_mgr.stop()
         self.event_bridge.stop()
         if self.worker_pool:
             self.worker_pool.stop(timeout=30)
