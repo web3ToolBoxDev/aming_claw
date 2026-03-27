@@ -143,10 +143,17 @@ class WorkerSlot:
 
             chain = completion.get("auto_chain", {})
             if chain.get("gate_blocked"):
-                log.warning("[%s] Gate blocked: %s", self.slot_id, chain.get("reason", ""))
+                reason = chain.get("reason", "")
+                log.warning("[%s] Gate blocked: %s", self.slot_id, reason)
+                # Gate blocked → discard worktree (code not good enough)
+                worktree_path = result.get("_worktree") if isinstance(result, dict) else None
+                branch_name = result.get("_branch") if isinstance(result, dict) else None
+                if worktree_path and branch_name:
+                    log.info("[%s] Discarding worktree after gate block: %s", self.slot_id, branch_name)
+                    self._remove_worktree(worktree_path, branch_name)
                 self.pool.on_event("gate.blocked", {
                     "task_id": task_id, "stage": task_type,
-                    "reason": chain.get("reason", ""),
+                    "reason": reason,
                 })
             elif chain.get("task_id"):
                 log.info("[%s] Auto-chain: %s → %s (%s)",
@@ -167,7 +174,7 @@ class WorkerSlot:
             self._cli_proc = None
 
     def _execute_ai(self, task_id, task_type, prompt, metadata, role, timeout) -> dict:
-        """Execute via Claude CLI."""
+        """Execute via Claude CLI, with worktree isolation for dev role."""
         from ai_lifecycle import AILifecycleManager
 
         context = {
@@ -179,92 +186,192 @@ class WorkerSlot:
             "related_nodes": metadata.get("related_nodes", []),
         }
 
-        enhanced_prompt = self._build_prompt(prompt, task_type, context)
-        lifecycle = AILifecycleManager()
-        session = lifecycle.create_session(
-            role=role,
-            prompt=enhanced_prompt,
-            context=context,
-            project_id=self.pool.project_id,
-            timeout_sec=timeout,
-            workspace=self.pool.workspace,
-        )
+        # Dev tasks run in isolated worktree; others run in main workspace
+        worktree_path = None
+        branch_name = None
+        work_dir = self.pool.workspace
 
-        if session.status == "failed":
-            return {"status": "failed", "error": session.stderr}
+        if role == "dev":
+            worktree_path, branch_name = self._create_worktree(task_id)
+            if worktree_path:
+                work_dir = worktree_path
+                log.info("[%s] Dev worktree created: %s (branch: %s)",
+                         self.slot_id, worktree_path, branch_name)
+            else:
+                log.warning("[%s] Worktree creation failed, running in main", self.slot_id)
 
-        # Track the subprocess for clean shutdown
-        self._cli_proc = getattr(session, '_proc', None)
+        try:
+            enhanced_prompt = self._build_prompt(prompt, task_type, context)
+            lifecycle = AILifecycleManager()
+            session = lifecycle.create_session(
+                role=role,
+                prompt=enhanced_prompt,
+                context=context,
+                project_id=self.pool.project_id,
+                timeout_sec=timeout,
+                workspace=work_dir,
+            )
 
-        lifecycle.wait_for_output(session.session_id)
+            if session.status == "failed":
+                return {"status": "failed", "error": session.stderr}
 
-        if session.status in ("timeout", "failed"):
-            return {"status": "failed", "error": session.stderr[:500] if session.stderr else f"{session.status}"}
+            # Track the subprocess for clean shutdown
+            self._cli_proc = getattr(session, '_proc', None)
 
-        # Git diff for ground truth
-        changed_files = self._get_git_changed()
-        if changed_files:
-            try:
-                subprocess.run(
-                    ["git", "add", "--"] + changed_files,
-                    cwd=self.pool.workspace, capture_output=True, timeout=30,
-                )
-            except Exception:
-                pass
+            lifecycle.wait_for_output(session.session_id)
 
-        result = self._parse_output(session, task_type)
-        if changed_files:
-            result["changed_files"] = changed_files
-        elif "changed_files" not in result:
-            result["changed_files"] = []
+            if session.status in ("timeout", "failed"):
+                return {"status": "failed", "error": session.stderr[:500] if session.stderr else f"{session.status}"}
 
-        return {"status": "succeeded", "result": result}
+            # Git diff for ground truth (in the work directory)
+            changed_files = self._get_git_changed(cwd=work_dir)
+            if changed_files:
+                try:
+                    subprocess.run(
+                        ["git", "add", "--"] + changed_files,
+                        cwd=work_dir, capture_output=True, timeout=30,
+                    )
+                except Exception:
+                    pass
+
+            result = self._parse_output(session, task_type)
+            if changed_files:
+                result["changed_files"] = changed_files
+            elif "changed_files" not in result:
+                result["changed_files"] = []
+
+            # Store worktree info for merge stage
+            if worktree_path and branch_name:
+                result["_worktree"] = worktree_path
+                result["_branch"] = branch_name
+
+            return {"status": "succeeded", "result": result}
+
+        except Exception:
+            raise
+        finally:
+            # On failure/timeout, clean up worktree
+            # (On success, merge stage handles cleanup)
+            pass
 
     def _execute_merge(self, task_id: str, metadata: dict) -> dict:
-        """Git add + commit. No AI."""
+        """Merge dev branch to main (or direct commit if no branch)."""
+        ws = self.pool.workspace
+        branch = metadata.get("_branch", "")
+        worktree = metadata.get("_worktree", "")
         changed = metadata.get("changed_files", [])
+
         try:
-            ws = self.pool.workspace
-            if changed:
-                subprocess.run(["git", "add", "--"] + changed,
-                               cwd=ws, capture_output=True, timeout=30)
+            if branch:
+                # Merge dev branch into main
+                log.info("[%s] Merging branch %s into main", self.slot_id, branch)
+
+                # Commit in worktree first if there are staged changes
+                if worktree and os.path.isdir(worktree):
+                    subprocess.run(["git", "add", "-A"], cwd=worktree,
+                                   capture_output=True, timeout=30)
+                    status = subprocess.run(["git", "diff", "--cached", "--name-only"],
+                                           cwd=worktree, capture_output=True, text=True, timeout=10)
+                    staged = [f.strip() for f in status.stdout.splitlines() if f.strip()]
+                    if staged:
+                        msg = f"dev: {task_id}\n\nChanged: {', '.join(staged[:10])}"
+                        subprocess.run(["git", "commit", "-m", msg],
+                                       cwd=worktree, capture_output=True, text=True, timeout=30)
+
+                # Merge branch into main
+                proc = subprocess.run(
+                    ["git", "merge", branch, "--no-ff", "-m", f"Auto-merge: {task_id}"],
+                    cwd=ws, capture_output=True, text=True, timeout=30,
+                )
+                if proc.returncode != 0:
+                    # Abort failed merge
+                    subprocess.run(["git", "merge", "--abort"], cwd=ws,
+                                   capture_output=True, timeout=10)
+                    return {"status": "failed", "error": f"Merge conflict: {proc.stderr[:300]}"}
+
+                # Cleanup worktree and branch
+                self._remove_worktree(worktree, branch)
+
             else:
-                subprocess.run(["git", "add", "-A"],
-                               cwd=ws, capture_output=True, timeout=30)
+                # No branch — direct commit on main (legacy path)
+                if changed:
+                    subprocess.run(["git", "add", "--"] + changed,
+                                   cwd=ws, capture_output=True, timeout=30)
+                else:
+                    subprocess.run(["git", "add", "-A"],
+                                   cwd=ws, capture_output=True, timeout=30)
 
-            status = subprocess.run(["git", "diff", "--cached", "--name-only"],
-                                    cwd=ws, capture_output=True, text=True, timeout=10)
-            staged = [f.strip() for f in status.stdout.splitlines() if f.strip()]
+                status = subprocess.run(["git", "diff", "--cached", "--name-only"],
+                                       cwd=ws, capture_output=True, text=True, timeout=10)
+                staged = [f.strip() for f in status.stdout.splitlines() if f.strip()]
 
-            if not staged:
-                return {"status": "succeeded", "result": {
-                    "merge_commit": "none", "branch": "main",
-                    "files_changed": 0, "note": "nothing to commit",
-                }}
+                if not staged:
+                    return {"status": "succeeded", "result": {
+                        "merge_commit": "none", "branch": "main",
+                        "files_changed": 0, "note": "nothing to commit",
+                    }}
 
-            msg = f"Auto-merge: {task_id}\n\nChanged: {', '.join(staged[:10])}"
-            proc = subprocess.run(["git", "commit", "-m", msg],
-                                  cwd=ws, capture_output=True, text=True, timeout=30)
-            if proc.returncode != 0:
-                return {"status": "failed", "error": f"git commit failed: {proc.stderr[:300]}"}
+                msg = f"Auto-merge: {task_id}\n\nChanged: {', '.join(staged[:10])}"
+                proc = subprocess.run(["git", "commit", "-m", msg],
+                                      cwd=ws, capture_output=True, text=True, timeout=30)
+                if proc.returncode != 0:
+                    return {"status": "failed", "error": f"git commit failed: {proc.stderr[:300]}"}
 
             rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                                  cwd=ws, capture_output=True, text=True, timeout=5)
             return {"status": "succeeded", "result": {
                 "merge_commit": rev.stdout.strip(),
                 "branch": "main",
-                "files_changed": len(staged),
-                "changed_files": staged,
+                "files_changed": len(changed),
+                "changed_files": changed,
             }}
         except Exception as e:
             return {"status": "failed", "error": str(e)}
 
-    def _get_git_changed(self) -> list[str]:
+    # --- Worktree management ---
+
+    def _create_worktree(self, task_id: str) -> tuple[str | None, str | None]:
+        """Create isolated git worktree for dev task."""
+        ws = self.pool.workspace
+        branch_name = f"dev/{task_id}"
+        worktree_dir = os.path.join(ws, ".worktrees", f"dev-{task_id}")
+
+        try:
+            os.makedirs(os.path.dirname(worktree_dir), exist_ok=True)
+            proc = subprocess.run(
+                ["git", "worktree", "add", "-b", branch_name, worktree_dir, "HEAD"],
+                cwd=ws, capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode != 0:
+                log.error("Worktree create failed: %s", proc.stderr[:200])
+                return None, None
+            return worktree_dir, branch_name
+        except Exception as e:
+            log.error("Worktree create exception: %s", e)
+            return None, None
+
+    def _remove_worktree(self, worktree_path: str, branch_name: str) -> None:
+        """Remove worktree and delete dev branch after merge."""
+        ws = self.pool.workspace
+        try:
+            subprocess.run(
+                ["git", "worktree", "remove", worktree_path, "--force"],
+                cwd=ws, capture_output=True, timeout=30,
+            )
+            subprocess.run(
+                ["git", "branch", "-D", branch_name],
+                cwd=ws, capture_output=True, timeout=10,
+            )
+            log.info("Worktree removed: %s (branch: %s)", worktree_path, branch_name)
+        except Exception as e:
+            log.warning("Worktree cleanup failed: %s", e)
+
+    def _get_git_changed(self, cwd: str = None) -> list[str]:
         """Detect changed files via git diff."""
         ignore = {".claude/", "__pycache__/"}
         files = set()
+        ws = cwd or self.pool.workspace
         try:
-            ws = self.pool.workspace
             for cmd in [
                 ["git", "diff", "--name-only", "HEAD"],
                 ["git", "diff", "--name-only", "--diff-filter=A", "--cached"],

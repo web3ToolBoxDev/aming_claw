@@ -373,13 +373,18 @@ def _build_test_prompt(task_id, result, metadata):
         f"Run tests for {task_id}.\n"
         f"changed_files: {json.dumps(changed)}"
     )
-    return prompt, {
+    meta = {
         **metadata,  # preserves skip_doc_check and all other original task metadata
         # Prioritise original metadata values; only fall back to result if metadata lacks them
         "target_files": metadata.get("target_files") or result.get("target_files", []),
         "changed_files": changed,
         "related_nodes": metadata.get("related_nodes") or result.get("related_nodes", []),
     }
+    # Propagate worktree info from dev result → test → qa → merge
+    if result.get("_worktree"):
+        meta["_worktree"] = result["_worktree"]
+        meta["_branch"] = result.get("_branch", "")
+    return prompt, meta
 
 
 def _build_qa_prompt(task_id, result, metadata):
