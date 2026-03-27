@@ -354,32 +354,154 @@ Respond with exactly one JSON: {"action": "reply"|"create_task", ...}
 
 ---
 
-### 3.4 Memory Write on Completion
+### 3.4 Structured Memory Write on Completion
 
-**File:** `agent/executor_worker.py` — After successful task
+Current memory_service.py supports free-form entries. This PRD adds a structured schema so memories are queryable knowledge, not log copies.
+
+#### 3.4.1 Memory Entry Schema
+
+```json
+{
+    "module": "agent/governance/auto_chain.py",
+    "kind": "decision | pitfall | test_result | architecture | failure_pattern",
+    "content": "Human-readable summary",
+
+    "structured": {
+        "decision_type": "bugfix | feature | refactor | config",
+        "related_files": ["agent/auto_chain.py", "docs/ai-agent-integration-guide.md"],
+        "root_cause": "checkpoint_gate only checked changed_files list, not git diff",
+        "validation_status": "tested | untested | partial",
+        "failure_pattern": "Gate bypass via fake changed_files",
+        "followup_needed": false,
+        "task_id": "task-1774567042-b3a09c",
+        "chain_stage": "dev"
+    }
+}
+```
+
+Not all fields required. Each task type populates what it knows:
+
+| Field | dev | test | qa |
+|-------|-----|------|-----|
+| `decision_type` | ✅ inferred from prompt | — | — |
+| `related_files` | ✅ from changed_files | ✅ from changed_files | — |
+| `root_cause` | ✅ if bugfix | — | ✅ if reject |
+| `validation_status` | "untested" | "tested" | — |
+| `failure_pattern` | ✅ if gate blocked before | ✅ if tests failed | — |
+| `followup_needed` | ✅ if gate blocked | — | ✅ if conditional pass |
+| `task_id` | ✅ always | ✅ always | ✅ always |
+| `chain_stage` | "dev" | "test" | "qa" |
+
+#### 3.4.2 Executor Memory Write
+
+**File:** `agent/executor_worker.py`
 
 ```python
-def _write_memory(self, task_type, result):
-    if task_type == "dev" and result.get("summary"):
-        changed = result.get("changed_files", [])
+def _write_memory(self, task_type, task_id, result, metadata):
+    """Write structured memory after task completion."""
+    changed = result.get("changed_files", [])
+    summary = result.get("summary", "")
+
+    if task_type == "dev" and (summary or changed):
+        # Infer decision_type from keywords
+        prompt = metadata.get("original_prompt", summary)
+        if any(w in prompt.lower() for w in ("fix", "bug", "error")):
+            decision_type = "bugfix"
+        elif any(w in prompt.lower() for w in ("add", "new", "create", "implement")):
+            decision_type = "feature"
+        elif any(w in prompt.lower() for w in ("refactor", "clean", "rename")):
+            decision_type = "refactor"
+        else:
+            decision_type = "config"
+
+        gate_reason = metadata.get("previous_gate_reason", "")
+
         self._api("POST", f"/api/mem/{self.project_id}/write", {
             "module": changed[0] if changed else "general",
             "kind": "decision",
-            "content": result["summary"],
+            "content": summary,
+            "structured": {
+                "decision_type": decision_type,
+                "related_files": changed,
+                "validation_status": "untested",
+                "failure_pattern": gate_reason if gate_reason else None,
+                "followup_needed": bool(gate_reason),
+                "task_id": task_id,
+                "chain_stage": "dev",
+            },
         })
-    elif task_type == "test" and result.get("test_report"):
+
+    elif task_type == "test":
+        report = result.get("test_report", {})
+        passed = report.get("passed", 0)
+        failed = report.get("failed", 0)
+
         self._api("POST", f"/api/mem/{self.project_id}/write", {
             "module": "testing",
-            "kind": "test_result",
-            "content": json.dumps(result["test_report"]),
+            "kind": "test_result" if failed == 0 else "failure_pattern",
+            "content": f"{passed} passed, {failed} failed",
+            "structured": {
+                "related_files": changed,
+                "validation_status": "tested" if failed == 0 else "failed",
+                "failure_pattern": report.get("error_summary", "") if failed > 0 else None,
+                "followup_needed": failed > 0,
+                "task_id": task_id,
+                "chain_stage": "test",
+            },
+        })
+
+    elif task_type == "qa" and result.get("recommendation") == "reject":
+        self._api("POST", f"/api/mem/{self.project_id}/write", {
+            "module": changed[0] if changed else "general",
+            "kind": "failure_pattern",
+            "content": result.get("review_summary", "QA rejected"),
+            "structured": {
+                "root_cause": result.get("reject_reason", ""),
+                "related_files": changed,
+                "followup_needed": True,
+                "task_id": task_id,
+                "chain_stage": "qa",
+            },
         })
 ```
 
-| Type | Write | Content |
-|------|-------|---------|
-| dev | ✅ | `{kind: "decision", content: summary}` |
-| test | ✅ | `{kind: "test_result", content: report}` |
-| coordinator/pm/qa/merge | ❌ | — |
+#### 3.4.3 Memory Query Enhancement
+
+Existing `GET /api/mem/{pid}/query` already supports `module`, `kind`, `node` filters.
+
+Add support for structured field queries (future, not in this PRD):
+```
+GET /api/mem/{pid}/query?kind=failure_pattern&followup_needed=true
+GET /api/mem/{pid}/query?decision_type=bugfix&module=auto_chain.py
+```
+
+For now, structured fields are stored as JSON in the entry and returned in full. Filtering is client-side (AI reads and filters in context).
+
+#### 3.4.4 Memory in Context Snapshot
+
+The `recent_memories` in `/api/context-snapshot` selects the 3 most relevant entries:
+
+Priority scoring:
+1. `followup_needed=true` → highest priority (unresolved issues)
+2. `kind=failure_pattern` → high (avoid repeating mistakes)
+3. `kind=decision` with matching module → medium (relevant experience)
+4. `kind=test_result` → low (routine)
+
+```python
+def _select_relevant_memories(memories, task_prompt, limit=3):
+    scored = []
+    for m in memories:
+        score = 0
+        s = m.get("structured", {})
+        if s.get("followup_needed"): score += 10
+        if m.get("kind") == "failure_pattern": score += 5
+        if m.get("kind") == "decision": score += 2
+        # Boost if module matches any word in prompt
+        if m.get("module", "") in task_prompt: score += 3
+        scored.append((score, m))
+    scored.sort(key=lambda x: -x[0])
+    return [m for _, m in scored[:limit]]
+```
 
 ---
 
@@ -395,7 +517,8 @@ def _write_memory(self, task_type, result):
 | `agent/telegram_gateway/gateway.py` | Modify | Version gate at message entry |
 | `agent/ai_lifecycle.py` | Modify | Fetch `/api/context-snapshot` for base context |
 | `agent/role_permissions.py` | Modify | API reference in all ROLE_PROMPTS, coordinator knowledge |
-| `agent/executor_worker.py` | Modify | Memory write + merge version update |
+| `agent/executor_worker.py` | Modify | Structured memory write + merge version update |
+| `agent/governance/memory_service.py` | Modify | Accept `structured` field in write_memory, store as JSON |
 | `Dockerfile.governance` | Verify | Ensure schema migration runs |
 | `Dockerfile.telegram-gateway` | Verify | requests library available |
 
@@ -408,7 +531,7 @@ def _write_memory(self, task_type, result):
 | Node ID | Title | Current | Action |
 |---------|-------|---------|--------|
 | L15.1 | AI Session Lifecycle | qa_pass | → testing (snapshot injection) |
-| L22.2 | Memory Write | qa_pass | → testing (executor writes) |
+| L22.2 | Memory Write | qa_pass | → testing (structured schema + executor writes) |
 | L4.11 | Project Service | qa_pass | → testing (init version) |
 | L4.15 | Governance Server | qa_pass | → testing (new endpoints) |
 | L11.1 | Gateway Message Classifier | qa_pass | → testing (version gate) |
