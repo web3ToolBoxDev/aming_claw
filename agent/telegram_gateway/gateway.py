@@ -671,14 +671,12 @@ def handle_task_dispatch(chat_id: int, text: str, route: dict) -> None:
     )
 
     if "error" in result:
-        send_text(chat_id, f"Task creation failed: {result['error']}")
+        send_text(chat_id, f"Processing failed: {result['error']}")
         return
 
-    task_id = result.get("task_id", "unknown")
-    status = result.get("status", "created")
-
-    # Notify user — task is now in Governance registry, auto-chain will pick it up
-    send_text(chat_id, f"✅ Task created: {task_id[-12:]}\nStatus: {status}\nAuto-chain will execute.")
+    # Coordinator task is transparent to user — no "Task created" notification
+    # Coordinator AI will decide whether to reply, create subtask, etc.
+    log.info("Coordinator task queued: %s", result.get("task_id", "?"))
 
 
 # --- HTTP API for coordinators ---
