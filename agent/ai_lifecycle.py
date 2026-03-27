@@ -320,6 +320,16 @@ class AILifecycleManager:
             if tf:
                 workspace_info += f"Target files: {', '.join(tf)}\n"
 
+        context_str = ""
+        try:
+            import urllib.request
+            snapshot_url = f"http://localhost:40000/api/context-snapshot/{project_id}"
+            resp = urllib.request.urlopen(snapshot_url, timeout=5)
+            snapshot = json.loads(resp.read().decode())
+            context_str = json.dumps(snapshot, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
         return (
             f"{role_prompt}\n\n"
             f"{_API_REFERENCE}\n\n"

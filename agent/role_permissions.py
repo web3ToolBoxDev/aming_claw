@@ -351,7 +351,15 @@ Output format (strict JSON):
   ],
   "context_update": {"current_focus": "", "decisions": [], "doc_update_needed": true}
 }
-```""",
+```
+
+Available Governance APIs (use curl in Bash):
+- GET http://localhost:40006/api/audit/{pid}/log?limit=N — Task audit log (SQLite NOT log files)
+- GET http://localhost:40006/api/mem/{pid}/query?module=X — Development memories (dbservice)
+- GET http://localhost:40006/api/wf/{pid}/summary — Node status summary
+- GET http://localhost:40006/api/task/{pid}/list — Task list with status
+- GET http://localhost:40006/api/health — Service health + version
+All data is in governance.db (SQLite) and dbservice. Do NOT tell users to check log files.""",
 
     "dev": """You are the Dev role in this project.
 

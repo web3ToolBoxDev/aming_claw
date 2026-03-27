@@ -1581,29 +1581,29 @@ def handle_context_snapshot(ctx: RequestContext):
     task_id = ctx.query.get("task_id", [""])[0]
     now = _utc_now()
 
-    # Task summary
-    task_summary = {}
-    if task_id:
-        row = conn.execute(
-            "SELECT task_id, type, prompt, status FROM tasks WHERE task_id=?",
-            (task_id,)
-        ).fetchone()
-        if row:
-            task_summary = {
+    # Task summary — recent 3 tasks
+    task_summary = []
+    try:
+        for row in conn.execute(
+            "SELECT task_id, type, status FROM tasks ORDER BY created_at DESC LIMIT 3"
+        ).fetchall():
+            task_summary.append({
                 "task_id": row["task_id"],
                 "type": row["type"],
-                "prompt": (row["prompt"] or "")[:500],
                 "status": row["status"],
-            }
+            })
+    except Exception:
+        pass
 
     # Project state
     ver_row = conn.execute(
-        "SELECT chain_version, updated_at FROM project_version WHERE project_id=?",
+        "SELECT chain_version, updated_at, dirty_files FROM project_version WHERE project_id=?",
         (pid,)
     ).fetchone()
+    dirty_files = json.loads(ver_row["dirty_files"] or "[]") if ver_row and ver_row["dirty_files"] else []
     project_state = {
         "chain_version": ver_row["chain_version"] if ver_row else "unknown",
-        "version_updated_at": ver_row["updated_at"] if ver_row else None,
+        "dirty": bool(dirty_files),
     }
 
     # Node summary (one-line)
@@ -1646,15 +1646,11 @@ def handle_context_snapshot(ctx: RequestContext):
         "snapshot_at": now,
         "project_id": pid,
         "role": role,
-        "task": task_summary,
+        "task_summary": task_summary,
         "project_state": project_state,
         "node_summary": node_counts,
         "recent_memories": recent_memories,
-        "constraints": [
-            "All data in governance.db (SQLite) and dbservice. Do NOT check log files.",
-            "Version gate: code must go through auto-chain (PM→Dev→Test→QA→Merge).",
-            f"Current chain_version: {project_state['chain_version']}",
-        ],
+        "constraints": "All changes through auto-chain",
         "generated_at": now,
         "project_version": project_state["chain_version"],
     }
