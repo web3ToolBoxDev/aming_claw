@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__aming-claw__health",
+      "mcp__aming-claw__executor_status",
+      "Bash(curl -s \"http://localhost:40006/api/task/aming-claw/list\")",
+      "Bash(python3 -c \":*)",
+      "Bash(tasklist)",
+      "mcp__aming-claw__task_complete",
+      "Bash(curl -s http://localhost:40006/api/task/aming-claw/list?status=queued)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(f''''{t[\"\"task_id\"\"]} type={t[\"\"type\"\"]} status={t[\"\"status\"\"]}''''\\) for t in d.get\\(''''tasks'''',[]\\)]\")",
+      "Bash(curl -s http://localhost:40006/api/task/aming-claw/list)",
+      "Bash(while read:*)",
+      "Bash(do taskkill:*)",
+      "Bash(done)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(''''Sent!'''' if d.get\\(''''ok''''\\) else f''''Error: {d}''''\\)\")",
+      "mcp__aming-claw__wf_summary",
+      "Bash(powershell -Command \"\\(Get-CimInstance Win32_Process -Filter ''ProcessId=30664''\\).CommandLine\")",
+      "Bash(curl -s http://localhost:40000/api/health)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f''''Nodes: {d.get\\(\"\"total_nodes\"\"\\)} | {d.get\\(\"\"by_status\"\"\\)}''''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''agent/mcp/server.py''\\).read\\(\\)\\); ast.parse\\(open\\(''agent/mcp/tools.py''\\).read\\(\\)\\); print\\(''OK''\\)\")"
+    ]
+  }
+}
