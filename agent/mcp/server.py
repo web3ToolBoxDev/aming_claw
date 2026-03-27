@@ -162,7 +162,7 @@ class AmingClawMCP:
         if self.worker_pool:
             self.worker_pool.start()
         self.event_bridge.start()
-        self._start_http_api()
+        # Note: :40020 HTTP removed — executor syncs git status via governance API
 
         # Auto-start executor subprocess
         self.service_mgr.start()

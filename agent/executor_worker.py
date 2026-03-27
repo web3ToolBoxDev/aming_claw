@@ -635,8 +635,12 @@ class ExecutorWorker:
             return
         log.info("Governance: v%s (PID %s)", health.get("version", "?"), health.get("pid", "?"))
 
+        # Initial git sync
+        self._sync_git_status()
+
         while self._running:
             try:
+                self._sync_git_status()
                 processed = self.run_once()
                 if not processed:
                     time.sleep(POLL_INTERVAL)
@@ -648,6 +652,28 @@ class ExecutorWorker:
             except Exception as e:
                 log.error("Poll loop error: %s", e, exc_info=True)
                 time.sleep(POLL_INTERVAL)
+
+    def _sync_git_status(self):
+        """Sync git HEAD + dirty files to governance DB. Called each poll cycle."""
+        try:
+            import subprocess
+            head = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=self.workspace, timeout=5
+            ).decode().strip()
+
+            diff = subprocess.check_output(
+                ["git", "diff", "--name-only"],
+                cwd=self.workspace, timeout=5
+            ).decode().strip()
+            dirty = [f for f in diff.splitlines() if f.strip()] if diff else []
+
+            self._api("POST", f"/api/version-sync/{self.project_id}", {
+                "git_head": head,
+                "dirty_files": dirty,
+            })
+        except Exception as e:
+            pass  # fail silently, non-critical
 
     def stop(self):
         """Stop the polling loop."""

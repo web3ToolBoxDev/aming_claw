@@ -1383,63 +1383,82 @@ def handle_health(ctx: RequestContext):
 
 @route("GET", "/api/version-check/{project_id}")
 def handle_version_check(ctx: RequestContext):
-    """Check chain version. Reads CHAIN_VERSION from DB, compares with VERSION file.
+    """Check chain version vs git HEAD. All data from DB (synced by executor).
 
-    VERSION file is COPY'd into Docker at build time and contains the git HEAD
-    at build time. This avoids needing git inside the container or calling MCP.
-    For dirty-file detection, caller (MCP tool / gateway) should check separately.
+    executor_worker polls git on host and writes to DB via /api/version-sync.
+    This endpoint just reads DB — no git, no MCP, no external HTTP calls.
     """
     pid = ctx.get_project_id()
     conn = get_connection(pid)
 
-    # Read chain_version from DB
-    row = conn.execute("SELECT chain_version, updated_at FROM project_version WHERE project_id=?", (pid,)).fetchone()
-    chain_ver = row["chain_version"] if row else None
-    chain_updated = row["updated_at"] if row else None
+    row = conn.execute(
+        "SELECT chain_version, updated_at, git_head, dirty_files, git_synced_at "
+        "FROM project_version WHERE project_id=?", (pid,)
+    ).fetchone()
 
-    # Read build-time version from VERSION file (COPY'd into Docker)
-    build_ver = "unknown"
-    import os
-    for vpath in ["/app/VERSION", os.path.join(os.getcwd(), "VERSION"),
-                  os.path.join(os.path.dirname(__file__), "..", "..", "VERSION")]:
-        try:
-            with open(vpath) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("CHAIN_VERSION="):
-                        build_ver = line.split("=", 1)[1].strip()
-                        break
-            if build_ver != "unknown":
-                break
-        except FileNotFoundError:
-            continue
+    if not row:
+        return {
+            "ok": True, "project_id": pid,
+            "head": "unknown", "chain_version": "(not set)",
+            "dirty": False, "dirty_files": [],
+            "message": "Project not initialized",
+            "generated_at": _utc_now(), "project_version": "unknown",
+        }
 
-    # Compare: chain_ver (DB) vs build_ver (VERSION file)
-    if not chain_ver:
-        ok = True
-        msg = "No chain_version set (project not initialized)"
-    elif build_ver == "unknown":
-        ok = True
-        msg = "VERSION file not found (first deploy)"
-    elif build_ver != chain_ver:
+    chain_ver = row["chain_version"]
+    git_head = row["git_head"] or ""
+    dirty_files = json.loads(row["dirty_files"] or "[]")
+    git_synced = row["git_synced_at"] or ""
+
+    # Compare
+    ok = True
+    parts = []
+
+    if not git_head:
+        parts.append("Executor has not synced git status yet")
+    elif git_head != chain_ver:
         ok = False
-        msg = f"BUILD_VERSION ({build_ver}) != CHAIN_VERSION ({chain_ver})"
-    else:
-        ok = True
-        msg = ""
+        parts.append(f"HEAD ({git_head}) != CHAIN_VERSION ({chain_ver})")
+    if dirty_files:
+        ok = False
+        parts.append(f"{len(dirty_files)} uncommitted files")
 
     return {
         "ok": ok,
         "project_id": pid,
-        "head": build_ver,
-        "chain_version": chain_ver or "(not set)",
-        "chain_updated_at": chain_updated,
-        "dirty": False,   # dirty check done by MCP tool on host
-        "dirty_files": [],
-        "message": msg,
+        "head": git_head or "unknown",
+        "chain_version": chain_ver,
+        "chain_updated_at": row["updated_at"],
+        "dirty": bool(dirty_files),
+        "dirty_files": dirty_files,
+        "git_synced_at": git_synced,
+        "message": "; ".join(parts),
         "generated_at": _utc_now(),
-        "project_version": chain_ver or "unknown",
+        "project_version": chain_ver,
     }
+
+
+@route("POST", "/api/version-sync/{project_id}")
+def handle_version_sync(ctx: RequestContext):
+    """Executor syncs git status from host machine. Lightweight, no auth."""
+    pid = ctx.get_project_id()
+    conn = get_connection(pid)
+    body = ctx.body or {}
+
+    git_head = body.get("git_head", "")
+    dirty_files = body.get("dirty_files", [])
+    if not git_head:
+        return {"error": "missing git_head"}, 400
+
+    now = _utc_now()
+    conn.execute("""
+        UPDATE project_version
+        SET git_head = ?, dirty_files = ?, git_synced_at = ?
+        WHERE project_id = ?
+    """, (git_head, json.dumps(dirty_files), now, pid))
+    conn.commit()
+
+    return {"ok": True, "git_head": git_head, "dirty_files": dirty_files, "synced_at": now}
 
 
 @route("POST", "/api/version-update/{project_id}")

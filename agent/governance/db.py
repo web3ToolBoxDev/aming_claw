@@ -151,7 +151,10 @@ CREATE TABLE IF NOT EXISTS project_version (
     project_id    TEXT PRIMARY KEY,
     chain_version TEXT NOT NULL,     -- git short hash from last auto-merge
     updated_at    TEXT NOT NULL,     -- ISO 8601
-    updated_by    TEXT NOT NULL      -- "auto-chain" | "init" | "register"
+    updated_by    TEXT NOT NULL,     -- "auto-chain" | "init" | "register"
+    git_head      TEXT DEFAULT '',   -- current git HEAD (synced by executor)
+    dirty_files   TEXT DEFAULT '[]', -- JSON array of uncommitted files
+    git_synced_at TEXT DEFAULT ''    -- when executor last synced git status
 );
 
 -- Schema version tracking
