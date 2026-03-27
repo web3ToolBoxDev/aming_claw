@@ -373,6 +373,7 @@ See [AI Agent Integration Guide](docs/ai-agent-integration-guide.md) for the ful
 | GET | `/api/wf/{pid}/export` | Export as JSON/Mermaid |
 | GET | `/api/wf/{pid}/impact?files=...` | File change impact analysis |
 | POST | `/api/wf/{pid}/rollback` | Rollback to snapshot version |
+| POST | `/api/wf/{pid}/node-delete` | Delete nodes from graph + DB |
 
 ### Roles & Sessions
 
