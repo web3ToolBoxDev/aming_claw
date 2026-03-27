@@ -312,13 +312,39 @@ class ExecutorWorker:
             metadata = json.loads(metadata)
         chat_id = metadata.get("chat_id", "")
 
-        # Extract JSON from AI output (may be wrapped in markdown or text)
+        # Extract JSON from AI output — try multiple strategies
         raw = result.get("summary", "") or result.get("raw_output", "") or json.dumps(result)
-        json_match = re.search(r'\{[^{}]*"action"\s*:\s*"[^"]+?"[^{}]*\}', raw)
-        if not json_match:
+
+        action_data = None
+        # Strategy 1: full output is valid JSON
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and "action" in parsed:
+                action_data = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Strategy 2: find JSON block with balanced braces
+        if not action_data:
+            start = raw.find('{"action"')
+            if start == -1:
+                start = raw.find("{'action")
+            if start >= 0:
+                depth = 0
+                for i in range(start, len(raw)):
+                    if raw[i] == '{': depth += 1
+                    elif raw[i] == '}': depth -= 1
+                    if depth == 0:
+                        try:
+                            action_data = json.loads(raw[start:i+1])
+                        except json.JSONDecodeError:
+                            pass
+                        break
+
+        if not action_data:
             log.warning("Coordinator output has no action JSON: %s", raw[:200])
             if chat_id:
-                self._telegram_reply(chat_id, f"Coordinator could not decide. Raw output:\n{raw[:500]}")
+                self._telegram_reply(chat_id, raw[:2000])  # Send raw output as fallback
             return
 
         try:
