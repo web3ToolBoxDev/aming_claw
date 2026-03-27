@@ -2,7 +2,7 @@
 
 **Author:** Observer (Claude Code session)
 **Date:** 2026-03-27
-**Status:** Pending Review (v6 — replaces v5)
+**Status:** Pending Review (v6.2 — adds version-update protection + role query strategy)
 **Priority:** P0 — Foundation infrastructure
 
 ---
@@ -188,17 +188,105 @@ self._api("POST", f"/api/version-update/{self.project_id}", {
 ```
 
 **File:** `agent/governance/server.py` — `POST /api/version-update/{pid}`
-- Only accepts `updated_by` in ("auto-chain", "init", "register")
-- Rejects manual updates server-side
+
+Adopts "lightweight internal protection + lifecycle validation + audit trail" strategy for personal projects.
+
+##### Request Format
+
+```json
+{
+    "project_id": "aming-claw",
+    "task_id": "task-xxx",
+    "old_version": "abc123",
+    "new_version": "def456",
+    "chain_stage": "merge",
+    "updated_by": "auto-chain"
+}
+```
+
+##### Protection Rules (5-step server-side validation)
+
+```
+Step 1: Internal Token Check
+  Header: X-Internal-Token must match VERSION_UPDATE_TOKEN env var
+  Purpose: prevent agent/script/temp code from "casually calling"
+  Reject reason: INVALID_TOKEN
+
+Step 2: Field Completeness
+  Required: project_id, task_id, old_version, new_version, chain_stage, updated_by
+  Reject reason: MISSING_FIELDS
+
+Step 3: Lifecycle Validation
+  chain_stage must == "merge"
+  Task status must be "completed" or "merged"
+  updated_by must be "auto-chain" or "merge-service"
+  Reject reason: INVALID_CHAIN_STAGE | TASK_NOT_COMPLETED | INVALID_UPDATED_BY
+
+Step 4: Version Consistency
+  old_version must == DB.project_version.chain_version (prevent stale update)
+  new_version must == git HEAD (prevent arbitrary version)
+  Reject reason: OLD_VERSION_MISMATCH | NEW_VERSION_NOT_GIT_HEAD
+
+Step 5: Update + Audit
+  Success: UPDATE project_version, write success audit
+  Failure: write reject audit with reason
+```
+
+##### Reject Reason Enum
+
+```python
+VERSION_UPDATE_REJECT = {
+    "INVALID_TOKEN",
+    "MISSING_FIELDS",
+    "INVALID_CHAIN_STAGE",
+    "TASK_NOT_COMPLETED",
+    "OLD_VERSION_MISMATCH",
+    "NEW_VERSION_NOT_GIT_HEAD",
+    "INVALID_UPDATED_BY",
+    "PROJECT_NOT_FOUND",
+    "INTERNAL_ERROR",
+}
+```
+
+##### Audit Record (every call, success or failure)
+
+```json
+{
+    "event": "version.update_attempt",
+    "project_id": "aming-claw",
+    "task_id": "task-xxx",
+    "old_version": "abc123",
+    "new_version": "def456",
+    "chain_stage": "merge",
+    "updated_by": "auto-chain",
+    "caller_role": "merge-service",
+    "result": "success | rejected",
+    "reject_reason": "OLD_VERSION_MISMATCH",
+    "timestamp": "2026-03-27T15:30:00Z"
+}
+```
+
+##### Design Rationale
+
+This endpoint does NOT need enterprise-grade auth. It protects against:
+- AI agent forgetting constraints and accidentally updating baseline
+- Non-merge stage incorrectly advancing chain_version
+- Debug scripts / temp code accidentally calling
+- System complexity growing and boundary leaking
+
+The internal token is just "door entry"; lifecycle validation is the real business gate.
 
 #### 3.1.7 Anti-Tamper
 
 | Attack | Defense |
 |--------|---------|
-| AI calls /api/version-update | Server rejects: updated_by must be "auto-chain" |
+| AI calls /api/version-update directly | 5-step validation rejects: token + lifecycle + version checks |
 | AI commits to match chain_version | Commit changes HEAD → new mismatch |
 | AI modifies dirty check | MCP server runs git directly, subprocess not interceptable |
 | No VERSION file to edit | Version stored in governance.db, not filesystem |
+| Script/temp code calls update | X-Internal-Token check blocks casual calls |
+| Non-merge stage tries to update | chain_stage == "merge" check rejects |
+| Stale update (race condition) | old_version == DB.chain_version prevents double-update |
 
 ---
 
@@ -351,6 +439,92 @@ You are the Coordinator. You classify user intent and decide action:
 
 Respond with exactly one JSON: {"action": "reply"|"create_task", ...}
 ```
+
+#### 3.3.2 Role Query Priority Strategy
+
+Each role follows a stable "what to check first, what to check later" order. This reduces missed context, wasteful API calls, and irrelevant information injection.
+
+##### Universal Rules
+
+```
+1. Always read base snapshot (Layer 1) before querying Layer 2
+2. Only query APIs relevant to your role's responsibility
+3. If base context is sufficient, do NOT expand queries
+4. Only do deeper drill-down on: info gaps, context conflicts, blockers, version anomalies, relevant failure patterns
+5. Prefer summaries first, details only when needed
+6. Do NOT continuously query APIs "just in case"
+```
+
+##### Per-Role Priority
+
+**Coordinator** — Dispatches tasks, identifies blockers, ensures flow progress. Does NOT analyze code details.
+
+| Priority | Query | When |
+|----------|-------|------|
+| P0 (always) | context-snapshot, project_state, task/node summary | Every session |
+| P1 (conditional) | runtime/audit summary | Task is stuck |
+| P1 (conditional) | version-check | Suspect state anomaly |
+| P1 (conditional) | recent decisions memory | Need historical context for dispatch |
+| P2 (rarely) | git diff, code details, test result full text | Almost never |
+
+**PM** — Clarifies requirements, outputs PRD, defines acceptance criteria. Does NOT implement.
+
+| Priority | Query | When |
+|----------|-------|------|
+| P0 (always) | context-snapshot, task details, existing constraints | Every session |
+| P0 (always) | recent decisions memory | Every session |
+| P1 (conditional) | related module memory | Continuing from existing feature |
+| P1 (conditional) | failure_pattern memory | Requirement has failed before |
+| P2 (rarely) | git diff, runtime log details, low-level test data | Almost never |
+
+**Dev** — Implements changes, modifies code. Most context-hungry role.
+
+| Priority | Query | When |
+|----------|-------|------|
+| P0 (always) | context-snapshot, task details, acceptance criteria | Every session |
+| P0 (always) | related module decisions memory, project_state | Every session |
+| P1 (recommended) | git summary / changed files | Before writing code |
+| P1 (recommended) | recent failure_pattern memory | Same module had issues |
+| P1 (recommended) | upstream node artifacts | Continuing from another role's output |
+| P2 (conditional) | task node details, recent task history, version-check | When implementation unclear |
+
+**Dev rule:** Check acceptance criteria before writing code. Check history before refactoring. Check failure patterns for same module.
+
+**Tester** — Verifies functionality against acceptance criteria. Discovers defects and regressions.
+
+| Priority | Query | When |
+|----------|-------|------|
+| P0 (always) | context-snapshot, acceptance criteria, recent changed files | Every session |
+| P1 (recommended) | failure_pattern memory | Regression risk |
+| P1 (recommended) | related decisions memory | Understanding intent |
+| P1 (recommended) | upstream artifacts / implementation summary | Knowing what was built |
+| P2 (conditional) | runtime/audit summary, version-check | Inconsistency detected |
+
+**Tester rule:** Test against acceptance criteria, not just happy path. Prioritize recent changes. Regress on historical failure patterns.
+
+**QA** — Final verification, process compliance, merge readiness. Focuses on readiness, not re-doing dev/test.
+
+| Priority | Query | When |
+|----------|-------|------|
+| P0 (always) | context-snapshot, task completion summary, test results | Every session |
+| P0 (always) | project_state / version-check | Every session (merge readiness) |
+| P1 (recommended) | recent decisions memory, audit summary | Understanding trajectory |
+| P1 (recommended) | changed files summary | Scope verification |
+| P2 (conditional) | runtime / blockers, git HEAD vs workflow state | Pre-merge anomaly |
+
+**QA rule:** Not just "does it work" but "is the process legal." Must confirm version state before merge approval.
+
+##### Summary Table
+
+| Role | P0 (always) | P1 (conditional) | P2 (rarely) | Never query first |
+|------|------------|-------------------|-------------|-------------------|
+| **Coordinator** | snapshot / node summary | project_state / blockers | audit / version-check | Code details |
+| **PM** | task details / constraints | decisions memory | failure patterns | git diff |
+| **Dev** | acceptance / module memory | changed files / failure patterns | node artifacts / version-check | Unrelated audit |
+| **Tester** | acceptance / changed files | failure patterns | implementation summary / audit | Bulk history |
+| **QA** | completion summary / test results | project_state / version-check | audit / decisions | Code implementation |
+
+This strategy is injected into each role's ROLE_PROMPT as a "Query Guidelines" section.
 
 ---
 
@@ -560,7 +734,10 @@ def _select_relevant_memories(memories, task_prompt, limit=3):
 | 2 | Dirty working tree → Telegram message | "N uncommitted files", no task |
 | 3 | Auto-merge → Telegram message | Normal coordinator flow |
 | 4 | MCP down → Telegram message | Fail-open, proceeds |
-| 5 | AI calls /api/version-update | Rejected (updated_by check) |
+| 5 | AI calls /api/version-update directly | Rejected: INVALID_TOKEN (no internal token) |
+| 5a | Script calls with token but wrong stage | Rejected: INVALID_CHAIN_STAGE |
+| 5b | Auto-chain merge calls with valid token+stage | Accepted, audit written |
+| 5c | Stale old_version in request | Rejected: OLD_VERSION_MISMATCH |
 | 6 | New project /api/init | project_version initialized |
 | 7 | Coordinator "check audit" | Queries /api/audit, returns DB data |
 | 8 | Dev session starts | Base snapshot in system prompt (~500 token) |
@@ -578,13 +755,16 @@ def _select_relevant_memories(memories, task_prompt, limit=3):
 - [ ] MCP :40020 `/git-status` returns HEAD + dirty
 - [ ] `version_check` MCP tool available
 - [ ] `/api/version-check/{pid}` combines DB + git
-- [ ] `/api/version-update/{pid}` rejects non-auto-chain
+- [ ] `/api/version-update/{pid}` 5-step validation: internal token + fields + lifecycle + version + audit
+- [ ] `/api/version-update/{pid}` rejects: INVALID_TOKEN, INVALID_CHAIN_STAGE, TASK_NOT_COMPLETED, OLD_VERSION_MISMATCH, NEW_VERSION_NOT_GIT_HEAD
+- [ ] Every version-update call (success or reject) writes audit record
 - [ ] Gateway blocks on version/dirty mismatch (0 token)
 - [ ] Gateway fail-open on MCP unavailable
 - [ ] `/api/context-snapshot/{pid}` returns consistent base context
 - [ ] `generated_at` + `project_version` on 5 key API responses
 - [ ] ai_lifecycle injects snapshot into system prompt
 - [ ] All ROLE_PROMPTS include 5-category API reference
+- [ ] All ROLE_PROMPTS include "Query Guidelines" with P0/P1/P2 priority per role
 - [ ] Coordinator prompt includes classification instructions
 - [ ] Dev/test write memory on completion
 - [ ] Merge updates project_version
