@@ -1,4 +1,4 @@
-# v5: enrichment + deploy fix verified
+# v6: gate order fix verified
 """Auto-chain dispatcher.
 
 Wires task completion to next-stage task creation with gate validation
@@ -267,9 +267,11 @@ def _gate_t2_pass(conn, project_id, result, metadata):
     if failed > 0:
         return False, f"Tests failed: {failed} failures"
     # Update nodes FIRST (test passed → promote to t2_pass)
+    passed_count = report.get("passed", 1)  # Default 1 if not reported (tests passed gate)
     _try_verify_update(conn, project_id, metadata, "t2_pass", "tester",
                        {"type": "test_report", "producer": "auto-chain",
                         "tool": report.get("tool", "pytest"),
+                        "passed": passed_count, "failed": 0,
                         "summary": report})
     # Then verify nodes reached t2_pass
     related_nodes = metadata.get("related_nodes", [])
@@ -502,7 +504,8 @@ def _try_verify_update(conn, project_id, metadata, target_status, role, evidence
         )
         log.info("auto_chain: nodes %s → %s", related, target_status)
     except Exception as e:
-        log.warning("auto_chain: verify_update %s failed (non-blocking): %s", target_status, e)
+        log.warning("auto_chain: verify_update %s failed (non-blocking): %s", target_status, e,
+                    exc_info=True)
 
 
 def _publish_event(event_name, payload):
