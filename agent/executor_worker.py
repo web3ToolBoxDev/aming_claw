@@ -661,10 +661,15 @@ class ExecutorWorker:
 
         # Initial git sync
         self._sync_git_status()
+        self._sync_counter = 0
 
         while self._running:
             try:
-                self._sync_git_status()
+                # Sync git every 6th poll (60s) to avoid DB lock contention
+                self._sync_counter += 1
+                if self._sync_counter >= 6:
+                    self._sync_git_status()
+                    self._sync_counter = 0
                 processed = self.run_once()
                 if not processed:
                     time.sleep(POLL_INTERVAL)
@@ -677,8 +682,11 @@ class ExecutorWorker:
                 log.error("Poll loop error: %s", e, exc_info=True)
                 time.sleep(POLL_INTERVAL)
 
+    _last_git_head = ""
+    _last_dirty = []
+
     def _sync_git_status(self):
-        """Sync git HEAD + dirty files to governance DB. Called each poll cycle."""
+        """Sync git HEAD + dirty files to governance DB. Only writes when changed."""
         try:
             import subprocess
             head = subprocess.check_output(
@@ -691,6 +699,12 @@ class ExecutorWorker:
                 cwd=self.workspace, timeout=5
             ).decode().strip()
             dirty = [f for f in diff.splitlines() if f.strip()] if diff else []
+
+            # Only write to DB if state changed (avoid unnecessary DB contention)
+            if head == self._last_git_head and dirty == self._last_dirty:
+                return
+            self._last_git_head = head
+            self._last_dirty = dirty
 
             self._api("POST", f"/api/version-sync/{self.project_id}", {
                 "git_head": head,
