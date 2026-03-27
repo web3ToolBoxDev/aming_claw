@@ -1,4 +1,4 @@
-# v3: full chain verification - metadata propagation + node enrichment
+# v5: enrichment + deploy fix verified
 """Auto-chain dispatcher.
 
 Wires task completion to next-stage task creation with gate validation
