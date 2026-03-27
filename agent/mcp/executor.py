@@ -198,8 +198,8 @@ class WorkerSlot:
             "related_nodes": metadata.get("related_nodes", []),
             "workspace": work_dir,
         }
-            else:
-                log.warning("[%s] Worktree creation failed, running in main", self.slot_id)
+        if role == "dev" and not worktree_path:
+            log.warning("[%s] Worktree creation failed, running in main", self.slot_id)
 
         try:
             enhanced_prompt = self._build_prompt(prompt, task_type, context)
