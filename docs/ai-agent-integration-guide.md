@@ -102,7 +102,14 @@ When you complete a task with type=pm/dev/test/qa/merge, auto_chain automaticall
 | `qa` | QA Pass: recommendation is qa_pass | `merge` task |
 | `merge` | Release: trust merge result | Auto-triggers `deploy_chain.run_deploy()` |
 
-When a gate fails, it returns `{"gate_blocked": True, "stage": "...", "reason": "..."}`. The Observer can inspect the reason and resubmit after fixing.
+When a gate fails, the chain auto-retries: creates a new task at the same stage with the gate reason injected into the prompt. The AI receives context like "Previous attempt blocked: Related docs not updated" and can fix the issue. Max retry depth controlled by `MAX_CHAIN_DEPTH` (default 10).
+
+Response format:
+```json
+{"gate_blocked": true, "stage": "dev", "reason": "...", "retry_task_id": "task-xxx"}
+```
+
+Set `_no_retry: true` in metadata to disable auto-retry for a specific task.
 
 ### Stage Details
 

@@ -101,6 +101,38 @@ def on_task_completed(conn, project_id, task_id, task_type, status, result, meta
             "stage": task_type, "next_stage": next_type or "deploy",
             "reason": reason,
         })
+
+        # Auto-retry: create a new task at the SAME stage with gate reason injected
+        if depth < MAX_CHAIN_DEPTH - 1 and not metadata.get("_no_retry"):
+            retry_prompt = (
+                f"Previous attempt ({task_id}) was blocked by gate.\n"
+                f"Gate reason: {reason}\n\n"
+                f"Fix the issue described above and retry.\n"
+                f"Original task: {metadata.get('_original_prompt', result.get('summary', ''))}"
+            )
+            from . import task_registry
+            retry_task = task_registry.create_task(
+                conn, project_id,
+                prompt=retry_prompt,
+                task_type=task_type,
+                created_by="auto-chain-retry",
+                metadata={
+                    **metadata,
+                    "parent_task_id": task_id,
+                    "chain_depth": depth + 1,
+                    "previous_gate_reason": reason,
+                    "_original_prompt": metadata.get("_original_prompt", ""),
+                },
+            )
+            retry_id = retry_task.get("task_id", "?")
+            log.info("auto_chain: retry created %s for blocked %s", retry_id, task_id)
+            _publish_event("task.retry", {
+                "project_id": project_id, "task_id": retry_id,
+                "original_task_id": task_id, "reason": reason,
+            })
+            return {"gate_blocked": True, "stage": task_type, "reason": reason,
+                    "retry_task_id": retry_id}
+
         return {"gate_blocked": True, "stage": task_type, "reason": reason}
 
     # Terminal stage → trigger deploy

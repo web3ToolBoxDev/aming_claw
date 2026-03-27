@@ -1692,6 +1692,21 @@ Both governance and gateway do `build + up` (not just `restart`), ensuring code 
 
 VERSION file warns AI agents not to edit manually. Even if they do, the commit changes HEAD → no longer matches the value written → gate still blocks.
 
+## Gate Retry
+
+When a gate blocks, auto_chain creates a retry task at the same stage:
+
+```
+dev complete → checkpoint gate BLOCKS (reason: "docs not updated")
+  → auto-create new dev task with prompt:
+    "Previous attempt blocked: docs not updated. Fix and retry."
+  → executor claims retry task → AI sees the gate reason → fixes
+  → checkpoint gate passes → chain continues to test
+```
+
+Retry depth limited by `MAX_CHAIN_DEPTH` (10). Set `_no_retry: true` in metadata to disable.
+
 ## Changelog
+- 2026-03-27: Gate retry mechanism (auto-retry on block with reason injection)
 - 2026-03-27: Version gate, context snapshot, structured memory, role prompts with API reference
 - 2026-03-26: Old Telegram bot system completely removed, unified to governance API
