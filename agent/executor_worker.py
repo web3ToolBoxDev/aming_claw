@@ -457,12 +457,6 @@ class ExecutorWorker:
                 self._telegram_reply(chat_id, raw[:2000])  # Send raw output as fallback
             return
 
-        try:
-            action_data = json.loads(json_match.group())
-        except json.JSONDecodeError:
-            log.error("Invalid coordinator JSON: %s", json_match.group()[:200])
-            return
-
         action = action_data.get("action", "")
         log.info("Coordinator action: %s (task %s)", action, task["task_id"])
 
