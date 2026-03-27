@@ -619,6 +619,10 @@ class ExecutorWorker:
             task_type = task.get("type", "")
             if task_type == "coordinator" and status == "succeeded":
                 self._handle_coordinator_result(task, result)
+                # Replace result with minimal payload so the gateway event listener
+                # does NOT send a duplicate "Task completed" Telegram notification.
+                # _reply_sent=True signals that the reply was already sent above.
+                result = {"action": "handled", "_reply_sent": True}
 
             completion = self._complete_task(task_id, status, result)
             chain = completion.get("auto_chain", {})
