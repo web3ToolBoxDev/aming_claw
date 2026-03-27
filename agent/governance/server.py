@@ -1084,8 +1084,6 @@ def handle_node_delete(ctx: RequestContext):
     Body: {"nodes": ["L1.1", "L1.2", ...], "reason": "..."}
     """
     project_id = ctx.get_project_id()
-    with DBContext(project_id) as conn:
-        ctx.require_auth(conn)
     nodes = ctx.body.get("nodes", [])
     reason = ctx.body.get("reason", "")
     if not nodes:
@@ -1106,17 +1104,13 @@ def handle_node_delete(ctx: RequestContext):
     from .db import _resolve_project_dir
     graph.save(_resolve_project_dir(project_id) / "graph.json")
 
-    # Remove from node_state DB
+    # Remove from node_state DB + audit
     with DBContext(project_id) as conn:
         for nid in deleted:
             conn.execute("DELETE FROM node_state WHERE project_id = ? AND node_id = ?",
                          (project_id, nid))
-        conn.commit()
-
-    # Audit
-    _audit(project_id, "node.batch_delete", {
-        "deleted": deleted, "skipped": skipped, "reason": reason,
-    })
+        audit_service.record(conn, project_id, "node.batch_delete",
+                             node_ids=deleted, reason=reason)
 
     return {"deleted": len(deleted), "skipped": skipped, "reason": reason}
 
