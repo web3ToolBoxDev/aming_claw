@@ -1,4 +1,4 @@
-# v8: evidence summary fix
+# v10: complete chain verified
 """Auto-chain dispatcher.
 
 Wires task completion to next-stage task creation with gate validation
