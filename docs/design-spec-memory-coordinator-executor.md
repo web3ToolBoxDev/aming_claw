@@ -165,6 +165,27 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content=memories, content_rowid=rowid
 );
 
+-- FTS5 sync triggers (INSERT + UPDATE + DELETE)
+CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content, module_id, kind, summary)
+    VALUES (new.rowid, new.content, new.module_id, new.kind, new.summary);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE OF content, summary, status ON memories BEGIN
+    DELETE FROM memories_fts WHERE rowid = old.rowid;
+    INSERT INTO memories_fts(rowid, content, module_id, kind, summary)
+    VALUES (new.rowid, new.content, new.module_id, new.kind, new.summary);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER DELETE ON memories BEGIN
+    DELETE FROM memories_fts WHERE rowid = old.rowid;
+END;
+
+-- Note: when status changes to 'superseded'/'archived'/'inactive',
+-- the UPDATE trigger re-inserts into FTS. Search queries MUST filter
+-- by status='active' to avoid returning stale results.
+-- Recommended: FTS query wrapper always adds "AND status='active'".
+
 -- Memory relations (graph structure between ref_ids)
 -- Aligned with dbservice memoryRelations.js
 CREATE TABLE IF NOT EXISTS memory_relations (
@@ -472,7 +493,8 @@ Before making any task decision, Coordinator must have:
 
 ### 7.2 Task Metadata Standard
 
-Every task should include:
+Every task MUST include these fields. Coordinator is responsible for extracting them
+from user message before creating subtasks. Missing mandatory fields = gate rejection.
 
 ```json
 {
@@ -481,13 +503,39 @@ Every task should include:
   "intent_summary": "User wants to add a hello world function to utils.py",
   "target_modules": ["agent/utils.py"],
   "target_files": ["agent/utils.py"],
-  "operation_type": "add",         // add / modify / delete / refactor / test
-  "risk_level": "low",             // low / medium / high
+  "operation_type": "add",
+  "risk_level": "low",
   "depends_on": [],
   "source_message_hash": "sha256:...",
   "status": "queued"
 }
 ```
+
+**Field requirements:**
+
+| Field | Required | Extracted By | Fallback |
+|-------|----------|-------------|----------|
+| `intent_summary` | **Mandatory** | Coordinator AI | = original prompt |
+| `target_files` | **Mandatory** | Coordinator AI or PM | gate blocks if empty |
+| `target_modules` | Recommended | Derived from target_files | directory of target_files |
+| `operation_type` | **Mandatory** | Coordinator rule engine | keyword match: add/modify/delete/refactor/test |
+| `source_message_hash` | **Mandatory** | Gateway (auto-generated) | sha256 of user message text |
+| `risk_level` | Recommended | Coordinator AI | "medium" default |
+| `depends_on` | Optional | Coordinator if detected | [] |
+
+**operation_type extraction rules (code logic in gateway/coordinator):**
+
+```python
+OP_KEYWORDS = {
+    "add":      ["添加", "新增", "创建", "实现", "add", "create", "implement", "new"],
+    "modify":   ["修改", "更新", "优化", "改", "update", "modify", "optimize", "improve"],
+    "delete":   ["删除", "移除", "去掉", "delete", "remove", "drop"],
+    "refactor": ["重构", "重写", "迁移", "refactor", "rewrite", "migrate"],
+    "test":     ["测试", "验证", "检查", "test", "verify", "check"],
+}
+```
+
+**Validation gate:** Post-PM gate MUST reject tasks with empty `target_files` or `intent_summary`.
 
 ### 7.3 Conflict Detection: Rules First, AI Assists
 
@@ -694,18 +742,112 @@ Phase 1 and 2 are independent and can run in parallel.
 
 ---
 
-## 12. Summary
+## 12. Verification Script
+
+Each invariant must be provable. Implementation MUST include automated verification:
+
+```python
+# scripts/verify_spec.py — Run after each phase to prove invariants hold
+
+def test_memory_version_chain():
+    """Same ref_id, multiple writes → query returns only latest active."""
+    write(ref_id="test:vc", content="v1", version=1)
+    write(ref_id="test:vc", content="v2", version=2, supersedes="v1_memory_id")
+    results = query(ref_id="test:vc")
+    assert len(results) == 1
+    assert results[0]["content"] == "v2"
+    assert results[0]["status"] == "active"
+
+def test_fts_excludes_superseded():
+    """FTS search must not return superseded/archived memories."""
+    write(ref_id="test:fts", content="hello world", status="active")
+    write(ref_id="test:fts2", content="hello earth", status="superseded")
+    results = search("hello")
+    assert all(r["status"] == "active" for r in results)
+
+def test_semantic_fallback():
+    """mem0 unavailable → automatic fallback to FTS5."""
+    # Simulate: DBSERVICE_URL points to dead host
+    os.environ["DBSERVICE_URL"] = "http://localhost:99999"
+    results = search("test query")  # Should not raise, should use FTS5
+    assert results is not None  # May be empty but not error
+    os.environ.pop("DBSERVICE_URL")
+
+def test_executor_crash_recovery():
+    """Claimed task with stale heartbeat → requeued on executor startup."""
+    # Create task, mark as claimed with old heartbeat
+    task = create_task(prompt="test")
+    claim_task(task["task_id"])
+    set_heartbeat(task["task_id"], stale=True)  # 5 min ago
+    # Restart executor
+    executor.recover_stuck_tasks()
+    status = get_task(task["task_id"])["status"]
+    assert status in ("queued", "failed")  # Not still "claimed"
+
+def test_conflict_rule_same_file_opposite_op():
+    """Same file + opposite operation → rule engine returns 'conflict'."""
+    # Task in queue: add hello to utils.py
+    create_task(prompt="add hello", target_files=["utils.py"], operation_type="add")
+    # New request: delete hello from utils.py
+    decision = rule_engine.check(
+        target_files=["utils.py"], operation_type="delete")
+    assert decision == "conflict"
+
+def test_duplicate_detection():
+    """Same intent within 1 hour → rule engine returns 'duplicate'."""
+    create_task(prompt="add hello function", source_message_hash="abc123")
+    decision = rule_engine.check(source_message_hash="abc123")
+    assert decision == "duplicate"
+
+def test_status_query_no_coordinator():
+    """Status query ('当前状态') must NOT create coordinator task."""
+    initial_count = count_tasks(type="coordinator")
+    gateway.handle_message(chat_id=123, text="当前状态怎么样")
+    after_count = count_tasks(type="coordinator")
+    assert after_count == initial_count  # No new coordinator task
+
+def test_scope_isolation():
+    """Project A memory not visible to Project B query."""
+    write(scope="project-a", content="secret")
+    results = query(scope="project-b")
+    assert not any("secret" in r["content"] for r in results)
+
+def test_scope_global_sharing():
+    """Promoted memory visible to all projects."""
+    write(scope="project-a", content="universal pitfall", ref_id="pit:1")
+    promote(memory_id="...", target_scope="global")
+    results = query(scope="project-b")  # Should include global
+    # query resolver should merge project-b + global
+    assert any("universal pitfall" in r["content"] for r in results)
+
+def test_ref_id_stability():
+    """Same task's updates reuse ref_id, don't create new ones."""
+    write(ref_id="task:001", content="started")
+    write(ref_id="task:001", content="completed")
+    all_refs = set(r["ref_id"] for r in query_all())
+    assert all_refs.count("task:001") == 1  # ref_id not duplicated
+```
+
+**When to run:** After each Phase implementation, before marking Phase complete.
+**CI integration:** Add to `pytest` test suite as `test_spec_invariants.py`.
+
+---
+
+## 13. Summary
 
 The core principle compressed into one sentence:
 
 **Use ref_id to connect semantic recall with relational truth, use a rule layer to harden task governance, use a recoverable Executor to stabilize system operation.**
 
-Five invariants that determine system stability:
+Six invariants that determine system stability:
 
 1. ref_id granularity must be stable
 2. SQLite must be source of truth
 3. Derived index failures must be compensable
 4. Task conflict detection must be rules-first
 5. Executor crash must trigger task recovery
+6. Task metadata (intent_summary, target_files, operation_type) must be mandatory
+
+Each invariant has a corresponding verification test in §12.
 
 These invariants, once fixed, move the system from "good idea" to "real platform skeleton."
