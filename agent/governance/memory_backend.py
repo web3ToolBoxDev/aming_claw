@@ -352,20 +352,75 @@ class DockerBackend(LocalBackend):
 
     def __init__(self):
         self.dbservice_url = os.environ.get("DBSERVICE_URL", "http://localhost:40002")
+        self._dbservice_available: Optional[bool] = None
 
     def write(self, conn: sqlite3.Connection, project_id: str, entry: dict) -> dict:
         result = super().write(conn, project_id, entry)
-        # Phase 6: Forward to dbservice for vector indexing (best-effort)
-        self._index_to_dbservice(result)
+        # Forward to dbservice for vector indexing (best-effort)
+        self._index_to_dbservice(project_id, result)
         return result
 
     def search(self, conn: sqlite3.Connection, project_id: str, query: str, top_k: int = 5) -> list[dict]:
-        # Phase 6: Try semantic search via dbservice first, fallback to FTS5
+        """Try semantic search via dbservice first, fallback to FTS5."""
+        if self._dbservice_available is not False:
+            try:
+                import urllib.request
+                import urllib.parse
+                url = f"{self.dbservice_url}/search"
+                data = json.dumps({
+                    "query": query,
+                    "top_k": top_k,
+                    "project_id": project_id,
+                }).encode()
+                req = urllib.request.Request(url, data=data,
+                    headers={"Content-Type": "application/json"}, method="POST")
+                resp = urllib.request.urlopen(req, timeout=5)
+                body = json.loads(resp.read().decode())
+                self._dbservice_available = True
+                results = body.get("results", [])
+                if results:
+                    return [
+                        {
+                            "memory_id": r.get("memory_id", r.get("id", "")),
+                            "ref_id": r.get("ref_id", r.get("metadata", {}).get("ref_id", "")),
+                            "kind": r.get("kind", r.get("metadata", {}).get("kind", "")),
+                            "module_id": r.get("module_id", r.get("metadata", {}).get("module_id", "")),
+                            "content": r.get("content", r.get("memory", "")),
+                            "summary": r.get("summary", ""),
+                            "metadata": r.get("metadata", {}),
+                            "version": r.get("version", 1),
+                            "score": r.get("score", 0.0),
+                            "search_mode": "semantic",
+                            "created_at": r.get("created_at", ""),
+                        }
+                        for r in results
+                    ]
+            except Exception as e:
+                log.warning("DockerBackend: dbservice search failed, falling back to FTS5: %s", e)
+                self._dbservice_available = False
+
+        # Fallback to local FTS5
         return super().search(conn, project_id, query, top_k)
 
-    def _index_to_dbservice(self, entry: dict) -> None:
-        """Forward to dbservice for semantic indexing (Phase 6 implementation)."""
-        pass  # Stub — will be implemented in Phase 6
+    def _index_to_dbservice(self, project_id: str, entry: dict) -> None:
+        """Forward to dbservice for vector indexing (best-effort)."""
+        try:
+            import urllib.request
+            url = f"{self.dbservice_url}/knowledge/upsert"
+            data = json.dumps({
+                "refId": entry.get("ref_id", entry.get("memory_id", "")),
+                "type": entry.get("kind", "knowledge"),
+                "title": f"{entry.get('module_id', '')}: {entry.get('kind', '')}",
+                "body": entry.get("content", ""),
+                "tags": [entry.get("module_id", ""), entry.get("kind", "")],
+                "scope": project_id,
+                "status": "active",
+            }).encode()
+            req = urllib.request.Request(url, data=data,
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=3)
+        except Exception as e:
+            log.debug("DockerBackend: dbservice index failed (non-fatal): %s", e)
 
 
 # ------------------------------------------------------------------

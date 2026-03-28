@@ -382,14 +382,55 @@ class ExecutorWorker:
 
         elif task_type == "coordinator":
             chat_id = context.get("chat_id", "")
+            rule_decision = context.get("rule_decision", "new")
+            rule_reason = context.get("rule_reason", "")
+
             parts.append(f"\nYou are a Coordinator. Analyze the user message and decide the action.")
             parts.append("User message from Telegram (chat_id=" + str(chat_id) + "):")
             parts.append(f'"{prompt}"')
+
+            # Phase 5: Inject memory search results
+            try:
+                from urllib.parse import quote
+                mem_results = self._api("GET", f"/api/mem/{self.project_id}/search?q={quote(prompt[:100])}&top_k=3")
+                memories = mem_results.get("results", [])
+                if memories:
+                    parts.append("\nRelevant memories from past work:")
+                    for m in memories[:3]:
+                        parts.append(f"  - [{m.get('kind','')}] {m.get('summary', m.get('content',''))[:150]}")
+            except Exception:
+                pass  # Non-fatal
+
+            # Phase 5: Inject active queue state
+            try:
+                task_list = self._api("GET", f"/api/task/{self.project_id}/list")
+                active = [t for t in task_list.get("tasks", []) if t.get("status") in ("queued", "claimed")]
+                if active:
+                    parts.append(f"\nActive task queue ({len(active)} tasks):")
+                    for t in active[:5]:
+                        parts.append(f"  - {t.get('task_id','')}: [{t.get('type','')}] {(t.get('prompt',''))[:80]}")
+            except Exception:
+                pass  # Non-fatal
+
+            # Phase 5: Inject rule engine decision
+            if rule_decision and rule_decision != "new":
+                parts.append(f"\nRule engine decision: {rule_decision}")
+                if rule_reason:
+                    parts.append(f"Reason: {rule_reason}")
+                if rule_decision == "duplicate":
+                    parts.append("Ask the user before re-executing this task.")
+                elif rule_decision == "conflict":
+                    parts.append("Warn the user about the conflict and offer options.")
+                elif rule_decision == "queue":
+                    parts.append("Create the task with lower priority (queued behind active work).")
+                elif rule_decision == "retry":
+                    parts.append("Include past failure context when creating the task.")
+
             parts.append("\nRespond with EXACTLY ONE JSON object (no other text):")
             parts.append('If this is a question → {"action": "reply", "text": "your answer here"}')
-            parts.append('If this needs code changes → {"action": "create_task", "type": "pm", "prompt": "detailed description of what to build/fix"}')
-            parts.append('If this needs testing → {"action": "create_task", "type": "test", "prompt": "what to test"}')
-            parts.append('If this is a status check → {"action": "reply", "text": "status info"}')
+            parts.append('If this needs code changes → {"action": "create_task", "type": "pm", "prompt": "detailed description"}')
+            parts.append('If this is a duplicate → {"action": "reply", "text": "This was done recently in task-xxx. Want me to redo it?"}')
+            parts.append('If there is a conflict → {"action": "reply", "text": "Conflict detected: ... Options: ..."}')
             parts.append('\nIMPORTANT: Output ONLY the JSON object, nothing else.')
 
         elif task_type == "test":

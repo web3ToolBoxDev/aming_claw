@@ -576,9 +576,23 @@ def handle_message(chat_id: int, text: str, msg: dict = None) -> None:
         send_menu(chat_id, text_body, kb)
         return
 
-    # All non-command messages go to coordinator for AI-driven decision
-    # Coordinator decides: reply directly, create task, or escalate
-    log.info("Routing to coordinator: %s", text[:60])
+    # Phase 5: Classify intent before routing — saves AI tokens for greetings/status
+    intent = classify_message(text)
+    log.info("Message classified as '%s': %s", intent, text[:60])
+
+    if intent == "greeting":
+        send_text(chat_id, "👋 Hello! Send a task or question, or type /help for commands.")
+        return
+
+    if intent == "query":
+        handle_query(chat_id, text, route)
+        return
+
+    if intent == "dangerous":
+        handle_dangerous(chat_id, text, route)
+        return
+
+    # "task" or "chat" → route to coordinator for AI-driven decision
     handle_task_dispatch(chat_id, text, route)
 
 
@@ -587,13 +601,26 @@ def handle_message(chat_id: int, text: str, msg: dict = None) -> None:
 import re
 
 def classify_message(text: str) -> str:
-    """Two-stage classifier: rules first, keyword fallback."""
-    # Stage 1: Rules
+    """Two-stage classifier: rules first, keyword fallback.
+
+    Returns one of: "greeting", "query", "dangerous", "task", "chat"
+    """
+    text_lower = text.strip().lower()
+
+    # Stage 0: Greetings (0 tokens — no coordinator task needed)
+    greeting_kw = ["你好", "hi", "hello", "hey", "thanks", "谢谢", "ok", "好的",
+                   "嗯", "哦", "收到", "了解", "明白", "thank", "thx", "bye",
+                   "再见", "晚安", "早安", "morning", "good morning", "good night"]
+    if text_lower in greeting_kw or (len(text_lower) <= 10 and any(kw == text_lower for kw in greeting_kw)):
+        return "greeting"
+
+    # Stage 1: Dangerous operations
     danger_kw = ["rollback", "delete", "revoke", "release", "deploy",
                  "回滚", "删除", "发布", "撤销", "rm -rf"]
-    if any(kw in text.lower() for kw in danger_kw):
+    if any(kw in text_lower for kw in danger_kw):
         return "dangerous"
 
+    # Stage 1b: Status/query — direct API response (0 tokens)
     query_patterns = [
         r"(状态|status|进度|progress)\s*(怎么样|是什么|查|看|？|\?)",
         r"(多少|几个|有没有)\s*(节点|node|任务|task|pending)",
