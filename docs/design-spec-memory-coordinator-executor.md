@@ -277,6 +277,23 @@ Raw search results must be aggregated before feeding to Coordinator:
 
 ## 7. Coordinator Task Governance
 
+### 7.0 Intent Classification (Pre-Coordinator Gate)
+
+Not every user message needs a Coordinator AI session. Before creating any coordinator task, gateway must classify intent using code logic (0 tokens):
+
+| Intent | Detection | Action | Token Cost |
+|--------|-----------|--------|-----------|
+| **greeting** | Keywords: 你好, hi, hello, thanks, 谢谢, ok | Direct reply, no task | 0 |
+| **status_query** | Keywords: 状态, status, 进度, 节点, 多少 | Gateway queries API, replies | 0 |
+| **command** | Starts with `/` | Existing handler | 0 |
+| **dangerous** | Keywords: delete, rollback, 删除, deploy | Confirmation flow | 0 |
+| **task_intent** | Keywords: 帮我, 修, 写, 改, fix, add, build | Create coordinator task | ~500-2000 |
+| **ambiguous** | No keyword match | Create coordinator task (safe default) | ~500-2000 |
+
+**Principle:** Only create a coordinator task when AI judgment is genuinely needed. Greetings, status checks, and commands should never spawn a Claude CLI session.
+
+**Gateway implementation location:** `handle_message()` in gateway.py, before `handle_task_dispatch()`.
+
 ### 7.1 Coordinator Input Requirements
 
 Before making any task decision, Coordinator must have:
