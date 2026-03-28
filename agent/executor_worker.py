@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 import argparse
 import threading
@@ -67,6 +68,7 @@ class ExecutorWorker:
         self._running = False
         self._current_task = None
         self._lifecycle = None
+        self._pid_path = None  # type: str | None
 
     def _api(self, method: str, path: str, data: dict = None) -> dict:
         """Call governance API."""
@@ -616,6 +618,99 @@ class ExecutorWorker:
             "exit_code": getattr(session, "exit_code", None),
         }
 
+    # ------------------------------------------------------------------
+    # Startup helpers: crash recovery + PID lock
+    # ------------------------------------------------------------------
+
+    def _recover_stuck_tasks(self) -> None:
+        """Mark any 'claimed' tasks from a previous crash as failed.
+
+        Called once at the start of ``run_loop`` before the first poll so that
+        tasks which were in-progress when the executor crashed are not left
+        permanently stuck in the 'claimed' state.
+        """
+        try:
+            data = self._api("GET", f"/api/task/{self.project_id}/list")
+            tasks = data.get("tasks", [])
+            claimed = [t for t in tasks if t.get("status") == "claimed"]
+            if not claimed:
+                log.info("_recover_stuck_tasks: no stuck tasks found")
+                return
+            log.warning(
+                "_recover_stuck_tasks: found %d stuck task(s) from previous crash, marking failed",
+                len(claimed),
+            )
+            for task in claimed:
+                task_id = task.get("task_id") or task.get("id")
+                if not task_id:
+                    continue
+                self._api("POST", f"/api/task/{self.project_id}/complete", {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "result": {
+                        "error": "executor_crash_recovery",
+                        "reason": "Executor crashed or restarted while task was claimed",
+                    },
+                })
+                log.info("_recover_stuck_tasks: marked task %s as failed", task_id)
+        except Exception as e:
+            log.warning("_recover_stuck_tasks failed (non-fatal): %s", e)
+
+    def _acquire_pid_lock(self) -> bool:
+        """Write our PID to a temp file, returning False if another instance is alive.
+
+        The PID file path is:
+          ``<tempdir>/aming-claw-executor-<project_id>.pid``
+
+        If an old PID file exists but the process is no longer running (stale
+        lock), the file is overwritten and ``True`` is returned.
+        """
+        pid_path = os.path.join(
+            tempfile.gettempdir(),
+            f"aming-claw-executor-{self.project_id}.pid",
+        )
+
+        if os.path.exists(pid_path):
+            try:
+                with open(pid_path) as fh:
+                    old_pid = int(fh.read().strip())
+                # Check if the old process is still alive (signal 0 = existence check)
+                try:
+                    os.kill(old_pid, 0)
+                    log.warning(
+                        "_acquire_pid_lock: another executor instance appears to be running "
+                        "(PID %d); proceeding anyway",
+                        old_pid,
+                    )
+                    # We log a warning but do NOT abort — in Docker/container restarts the
+                    # old PID may still appear transiently in /proc.
+                except (OSError, ProcessLookupError):
+                    log.info(
+                        "_acquire_pid_lock: stale PID file (PID %d no longer running), overwriting",
+                        old_pid,
+                    )
+            except (ValueError, IOError):
+                log.debug("_acquire_pid_lock: could not read stale PID file, overwriting")
+
+        try:
+            with open(pid_path, "w") as fh:
+                fh.write(str(os.getpid()))
+            self._pid_path = pid_path
+            log.info("_acquire_pid_lock: wrote PID %d to %s", os.getpid(), pid_path)
+        except Exception as exc:
+            log.warning("_acquire_pid_lock: could not write PID file: %s", exc)
+        return True
+
+    def _release_pid_lock(self) -> None:
+        """Remove the PID file created by ``_acquire_pid_lock``."""
+        if self._pid_path and os.path.exists(self._pid_path):
+            try:
+                os.unlink(self._pid_path)
+                log.info("_release_pid_lock: removed PID file %s", self._pid_path)
+            except Exception as exc:
+                log.debug("_release_pid_lock: could not remove PID file: %s", exc)
+        self._pid_path = None
+
     def run_once(self) -> bool:
         """Try to claim and execute one task. Returns True if a task was processed."""
         task = self._claim_task()
@@ -666,35 +761,45 @@ class ExecutorWorker:
                  self.project_id, self.worker_id, POLL_INTERVAL)
         log.info("Governance: %s | Workspace: %s", self.base_url, self.workspace)
 
+        # Acquire PID lock (warn if another instance may be running)
+        self._acquire_pid_lock()
+
         # Verify governance is reachable
         health = self._api("GET", "/api/health")
         if "error" in health:
             log.error("Cannot reach governance at %s", self.base_url)
+            self._release_pid_lock()
             return
         log.info("Governance: v%s (PID %s)", health.get("version", "?"), health.get("pid", "?"))
+
+        # Recover any tasks left in 'claimed' state from a previous crash
+        self._recover_stuck_tasks()
 
         # Initial git sync
         self._sync_git_status()
         self._sync_counter = 0
 
-        while self._running:
-            try:
-                # Sync git every 6th poll (60s) to avoid DB lock contention
-                self._sync_counter += 1
-                if self._sync_counter >= 6:
-                    self._sync_git_status()
-                    self._sync_counter = 0
-                processed = self.run_once()
-                if not processed:
+        try:
+            while self._running:
+                try:
+                    # Sync git every 6th poll (60s) to avoid DB lock contention
+                    self._sync_counter += 1
+                    if self._sync_counter >= 6:
+                        self._sync_git_status()
+                        self._sync_counter = 0
+                    processed = self.run_once()
+                    if not processed:
+                        time.sleep(POLL_INTERVAL)
+                    else:
+                        time.sleep(1)  # Brief pause between tasks
+                except KeyboardInterrupt:
+                    log.info("Shutting down...")
+                    self._running = False
+                except Exception as e:
+                    log.error("Poll loop error: %s", e, exc_info=True)
                     time.sleep(POLL_INTERVAL)
-                else:
-                    time.sleep(1)  # Brief pause between tasks
-            except KeyboardInterrupt:
-                log.info("Shutting down...")
-                self._running = False
-            except Exception as e:
-                log.error("Poll loop error: %s", e, exc_info=True)
-                time.sleep(POLL_INTERVAL)
+        finally:
+            self._release_pid_lock()
 
     _last_git_head = ""
     _last_dirty = []

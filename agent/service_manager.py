@@ -24,6 +24,7 @@ Design notes
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -91,6 +92,14 @@ class ServiceManager:
         self._start_time: Optional[float] = None
         self._lock = threading.Lock()
 
+        # Monitor-thread state
+        self._running: bool = False
+        self._monitor_thread: Optional[threading.Thread] = None
+        self.restart_count: int = 0
+        self.last_crash_at: Optional[float] = None   # wall-clock (time.time())
+        self._restart_times: list = []               # monotonic timestamps for circuit-breaker window
+        self._circuit_breaker_tripped: bool = False
+
     # ------------------------------------------------------------------
     # start / stop
     # ------------------------------------------------------------------
@@ -105,6 +114,8 @@ class ServiceManager:
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 log.info("ServiceManager.start: executor already running (PID %d)", self._process.pid)
+                # Ensure monitor thread is running even if process was already up
+                self._ensure_monitor_running()
                 return False
 
             log.info("ServiceManager.start: launching executor %s", self._executor_cmd)
@@ -115,7 +126,10 @@ class ServiceManager:
             )
             self._start_time = time.monotonic()
             log.info("ServiceManager.start: executor started (PID %d)", self._process.pid)
-            return True
+
+        # Start monitor thread outside the lock to avoid re-entrant lock issues
+        self._ensure_monitor_running()
+        return True
 
     def stop(self) -> bool:
         """Terminate the executor subprocess gracefully (SIGTERM, then SIGKILL after 5 s).
@@ -124,6 +138,7 @@ class ServiceManager:
             ``True`` if a running process was stopped, ``False`` if none was
             running.
         """
+        self._running = False  # Signal monitor loop to exit
         with self._lock:
             return self._stop_locked()
 
@@ -269,13 +284,156 @@ class ServiceManager:
 
         active, queued = self._get_task_counts()
 
+        # Determine health state
+        if self._circuit_breaker_tripped:
+            health = "crash_loop"
+        elif self.restart_count > 0:
+            health = "degraded"
+        else:
+            health = "healthy"
+
         return {
             "pid": pid,
             "running": running,
             "uptime_s": uptime_s,
             "active_tasks": active,
             "queued_tasks": queued,
+            "restart_count": self.restart_count,
+            "last_crash_at": self.last_crash_at,
+            "health": health,
+            "circuit_breaker": self._circuit_breaker_tripped,
         }
+
+    # ------------------------------------------------------------------
+    # Monitor loop
+    # ------------------------------------------------------------------
+
+    _CIRCUIT_BREAKER_MAX = 5
+    _CIRCUIT_BREAKER_WINDOW = 300  # seconds
+
+    def _ensure_monitor_running(self) -> None:
+        """Start monitor thread if it is not already alive."""
+        if self._monitor_thread is None or not self._monitor_thread.is_alive():
+            self._running = True
+            self._monitor_thread = threading.Thread(
+                target=self._monitor_loop,
+                name="executor-monitor",
+                daemon=True,
+            )
+            self._monitor_thread.start()
+            log.info("ServiceManager: monitor thread started")
+
+    def _monitor_loop(self) -> None:
+        """Background thread: checks every 10 s if executor is alive; restarts if dead.
+
+        Circuit breaker: if the executor has been restarted
+        ``_CIRCUIT_BREAKER_MAX`` or more times within the last
+        ``_CIRCUIT_BREAKER_WINDOW`` seconds, stop trying and log an error.
+        """
+        while self._running:
+            time.sleep(10)
+            if not self._running:
+                break
+
+            with self._lock:
+                proc = self._process
+                if proc is None:
+                    # Nothing to monitor
+                    if self._circuit_breaker_tripped:
+                        log.error(
+                            "ServiceManager._monitor_loop: circuit breaker is tripped; "
+                            "executor will not be restarted automatically"
+                        )
+                    continue
+
+                if proc.poll() is None:
+                    # Still alive — nothing to do
+                    continue
+
+                # ---- Process has died ----
+                if self._circuit_breaker_tripped:
+                    log.error(
+                        "ServiceManager._monitor_loop: executor died but circuit breaker is tripped; "
+                        "will not restart"
+                    )
+                    self._process = None
+                    self._start_time = None
+                    continue
+
+                dead_pid = proc.pid
+                log.warning(
+                    "ServiceManager._monitor_loop: executor process (PID %d) died; "
+                    "preparing restart …",
+                    dead_pid,
+                )
+                self.last_crash_at = time.time()
+                self._process = None
+                self._start_time = None
+
+            # Clear pycache outside the lock (I/O operation)
+            self._clear_pycache()
+
+            with self._lock:
+                # Update circuit-breaker state
+                now = time.monotonic()
+                self._restart_times.append(now)
+                self._restart_times = [
+                    t for t in self._restart_times
+                    if now - t < self._CIRCUIT_BREAKER_WINDOW
+                ]
+                self.restart_count = len(self._restart_times)
+
+                if self.restart_count >= self._CIRCUIT_BREAKER_MAX:
+                    log.error(
+                        "ServiceManager._monitor_loop: circuit breaker tripped — %d restarts "
+                        "within %ds; stopping automatic restarts",
+                        self._CIRCUIT_BREAKER_MAX,
+                        self._CIRCUIT_BREAKER_WINDOW,
+                    )
+                    self._circuit_breaker_tripped = True
+                    continue
+
+                # Restart the executor
+                log.info(
+                    "ServiceManager._monitor_loop: restarting executor (restart #%d of %d)",
+                    self.restart_count,
+                    self._CIRCUIT_BREAKER_MAX - 1,
+                )
+                try:
+                    self._process = subprocess.Popen(
+                        self._executor_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                    )
+                    self._start_time = time.monotonic()
+                    log.info(
+                        "ServiceManager._monitor_loop: executor restarted (PID %d)",
+                        self._process.pid,
+                    )
+                except Exception as exc:
+                    log.error(
+                        "ServiceManager._monitor_loop: failed to restart executor: %s", exc
+                    )
+
+    def _clear_pycache(self) -> None:
+        """Walk the workspace and remove every ``__pycache__`` directory found."""
+        workspace = str(Path(__file__).resolve().parent.parent)
+        removed = 0
+        for dirpath, dirnames, _ in os.walk(workspace):
+            if "__pycache__" in dirnames:
+                cache_path = os.path.join(dirpath, "__pycache__")
+                try:
+                    shutil.rmtree(cache_path)
+                    removed += 1
+                    # Prevent os.walk from descending into the (now-deleted) dir
+                    dirnames.remove("__pycache__")
+                except Exception as exc:
+                    log.debug(
+                        "ServiceManager._clear_pycache: could not remove %s: %s",
+                        cache_path, exc,
+                    )
+        if removed:
+            log.info("ServiceManager._clear_pycache: removed %d __pycache__ dir(s)", removed)
 
     # ------------------------------------------------------------------
     # Internal helpers
