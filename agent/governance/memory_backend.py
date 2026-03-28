@@ -353,12 +353,43 @@ class DockerBackend(LocalBackend):
     def __init__(self):
         self.dbservice_url = os.environ.get("DBSERVICE_URL", "http://localhost:40002")
         self._dbservice_available: Optional[bool] = None
+        # Pending retry queue: list of (project_id, entry) tuples
+        self._pending_reindex: list[tuple[str, dict]] = []
 
     def write(self, conn: sqlite3.Connection, project_id: str, entry: dict) -> dict:
         result = super().write(conn, project_id, entry)
-        # Forward to dbservice for vector indexing (best-effort)
-        self._index_to_dbservice(project_id, result)
+        # Flush up to 5 pending retries before processing new entry
+        self._flush_pending(limit=5)
+        # Forward to dbservice for vector indexing; queue on failure
+        ok = self._index_to_dbservice(project_id, result)
+        result["index_status"] = "indexed" if ok else "pending"
+        if not ok:
+            self._pending_reindex.append((project_id, result))
         return result
+
+    def flush_pending_index(self) -> int:
+        """Retry all pending dbservice index entries. Returns number successfully flushed."""
+        return self._flush_pending(limit=len(self._pending_reindex))
+
+    def pending_index_count(self) -> int:
+        return len(self._pending_reindex)
+
+    def _flush_pending(self, limit: int = 5) -> int:
+        """Try to reindex up to `limit` pending entries. Returns count flushed."""
+        if not self._pending_reindex:
+            return 0
+        flushed = 0
+        remaining = []
+        for pid, entry in self._pending_reindex:
+            if flushed >= limit:
+                remaining.append((pid, entry))
+                continue
+            if self._index_to_dbservice(pid, entry):
+                flushed += 1
+            else:
+                remaining.append((pid, entry))
+        self._pending_reindex = remaining
+        return flushed
 
     def search(self, conn: sqlite3.Connection, project_id: str, query: str, top_k: int = 5) -> list[dict]:
         """Try semantic search via dbservice first, fallback to FTS5."""
@@ -402,8 +433,8 @@ class DockerBackend(LocalBackend):
         # Fallback to local FTS5
         return super().search(conn, project_id, query, top_k)
 
-    def _index_to_dbservice(self, project_id: str, entry: dict) -> None:
-        """Forward to dbservice for vector indexing (best-effort)."""
+    def _index_to_dbservice(self, project_id: str, entry: dict) -> bool:
+        """Forward to dbservice for vector indexing. Returns True on success."""
         try:
             import urllib.request
             url = f"{self.dbservice_url}/knowledge/upsert"
@@ -419,8 +450,10 @@ class DockerBackend(LocalBackend):
             req = urllib.request.Request(url, data=data,
                 headers={"Content-Type": "application/json"}, method="POST")
             urllib.request.urlopen(req, timeout=3)
+            return True
         except Exception as e:
             log.debug("DockerBackend: dbservice index failed (non-fatal): %s", e)
+            return False
 
 
 # ------------------------------------------------------------------

@@ -19,6 +19,7 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
+from typing import Dict
 
 from .models import MemoryEntry
 from . import audit_service
@@ -32,23 +33,55 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _get_conflict_policy(conn: sqlite3.Connection, project_id: str, kind: str) -> str:
+    """Look up conflict_policy for a kind from domain_packs table. Returns 'replace' if not found."""
+    try:
+        row = conn.execute(
+            "SELECT conflict_policy FROM domain_packs WHERE project_id=? AND type_name=?",
+            (project_id, kind),
+        ).fetchone()
+        if row:
+            return row["conflict_policy"]
+    except Exception:
+        pass
+    return "replace"
+
+
 def write_memory(
     conn: sqlite3.Connection,
     project_id: str,
     entry: MemoryEntry,
     session: dict = None,
 ) -> dict:
-    """Write a memory entry via the configured backend."""
+    """Write a memory entry via the configured backend, applying domain pack conflict policy."""
     backend = get_backend()
 
     # Convert MemoryEntry to dict for backend
     entry_dict = entry.to_dict()
+    kind = entry_dict.get("kind", "knowledge")
+    module_id = entry_dict.get("module_id", "")
+    content = entry_dict.get("content", "")
+
+    # Look up conflict policy from domain pack
+    conflict_policy = _get_conflict_policy(conn, project_id, kind)
+
+    # --- append_set: skip if identical content for same module+kind already active ---
+    if conflict_policy == "append_set":
+        existing = conn.execute(
+            "SELECT memory_id FROM memories WHERE project_id=? AND module_id=? AND kind=? "
+            "AND status='active' AND content=? LIMIT 1",
+            (project_id, module_id, kind, content),
+        ).fetchone()
+        if existing:
+            log.debug("append_set: dedup skip for %s/%s (existing=%s)", module_id, kind, existing["memory_id"])
+            return {"memory_id": existing["memory_id"], "skipped": True, "conflict_policy": "append_set"}
+
     # Map old field names to new backend expectations
     backend_entry = {
         "ref_id": entry_dict.get("id", ""),
-        "kind": entry_dict.get("kind", "knowledge"),
-        "module": entry_dict.get("module_id", ""),
-        "content": entry_dict.get("content", ""),
+        "kind": kind,
+        "module": module_id,
+        "content": content,
         "summary": entry_dict.get("applies_when", ""),
         "tags": ",".join(entry_dict.get("related_nodes", [])),
         "structured": {
@@ -58,14 +91,33 @@ def write_memory(
         },
     }
 
+    # --- append / append_set: do NOT supersede existing entries, always create new ---
+    if conflict_policy in ("append", "append_set"):
+        backend_entry["ref_id"] = ""  # Force new ref_id generation
+
+    # --- merge_object: merge structured JSON with latest active entry for same ref_id ---
+    elif conflict_policy == "merge_object" and backend_entry.get("ref_id"):
+        old = backend.get_latest(conn, project_id, backend_entry["ref_id"])
+        if old:
+            old_structured = old.get("structured") or {}
+            if isinstance(old_structured, str):
+                try:
+                    old_structured = json.loads(old_structured)
+                except Exception:
+                    old_structured = {}
+            new_structured = backend_entry.get("structured") or {}
+            if isinstance(new_structured, dict):
+                merged = {**old_structured, **new_structured}
+                backend_entry["structured"] = merged
+
     # If supersedes is set, use it as ref_id to trigger version chain
-    if entry.supersedes:
-        # Look up the ref_id of the superseded memory
+    if entry.supersedes and conflict_policy not in ("append", "append_set"):
         old = backend.get_latest(conn, project_id, entry.supersedes)
         if old and old.get("ref_id"):
             backend_entry["ref_id"] = old["ref_id"]
 
     result = backend.write(conn, project_id, backend_entry)
+    result["conflict_policy"] = conflict_policy
 
     # Audit
     audit_service.record(
@@ -296,3 +348,59 @@ def register_domain_pack(
 
     log.info("domain pack registered: %s/%s (%d types)", project_id, domain, registered)
     return {"domain": domain, "types_registered": registered, "registered_at": now}
+
+
+# ------------------------------------------------------------------
+# TTL auto-archive
+# ------------------------------------------------------------------
+
+# Duration thresholds (seconds) per durability level
+_TTL_SECONDS: Dict[str, int] = {
+    "transient": 3_600,        # 1 hour
+    "session":   86_400,       # 24 hours
+    "durable":   7_776_000,    # 90 days
+    # "permanent" → never archived
+}
+
+
+def archive_expired_memories(conn: sqlite3.Connection, project_id: str) -> dict:
+    """Archive active memories whose durability TTL has elapsed.
+
+    Reads domain_packs to find per-kind durability, then archives memories
+    of matching kinds that were created before the TTL cutoff.
+
+    Returns {"archived": N, "checked_kinds": N}
+    """
+    now_dt = datetime.now(timezone.utc)
+    archived = 0
+    checked_kinds = 0
+
+    try:
+        packs = conn.execute(
+            "SELECT type_name, durability FROM domain_packs WHERE project_id=?",
+            (project_id,),
+        ).fetchall()
+    except Exception:
+        packs = []
+
+    for row in packs:
+        kind = row["type_name"]
+        durability = row["durability"]
+        ttl_secs = _TTL_SECONDS.get(durability)
+        if ttl_secs is None:  # permanent — skip
+            continue
+        checked_kinds += 1
+        from datetime import timedelta
+        cutoff = (now_dt - timedelta(seconds=ttl_secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        result = conn.execute(
+            "UPDATE memories SET status='archived', updated_at=? "
+            "WHERE project_id=? AND kind=? AND status='active' AND created_at < ?",
+            (_utc_iso(), project_id, kind, cutoff),
+        )
+        archived += result.rowcount
+
+    if archived:
+        conn.commit()
+        log.info("TTL cleanup: archived %d memories for project %s", archived, project_id)
+
+    return {"archived": archived, "checked_kinds": checked_kinds}

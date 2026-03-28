@@ -394,11 +394,25 @@ class ExecutorWorker:
         except Exception as e:
             return {"status": "failed", "error": str(e)}
 
+    def _fetch_memories(self, query: str, top_k: int = 3) -> list:
+        """Search memory backend for relevant past work (best-effort, returns list)."""
+        try:
+            from urllib.parse import quote
+            result = self._api("GET", f"/api/mem/{self.project_id}/search?q={quote(query[:120])}&top_k={top_k}")
+            return result.get("results", [])
+        except Exception:
+            return []
+
     def _build_prompt(self, prompt: str, task_type: str, context: dict) -> str:
         """Enhance task prompt with governance context."""
         parts = [prompt]
 
         if task_type == "pm":
+            memories = self._fetch_memories(prompt)
+            if memories:
+                parts.append("\nRelevant memories from past work:")
+                for m in memories:
+                    parts.append(f"  - [{m.get('kind','')}] {m.get('summary', m.get('content',''))[:150]}")
             parts.append(
                 "\nAnalyze the request and output a PRD as JSON with the following fields: "
                 "{\"target_files\": [\"...\"], \"verification\": {\"method\": \"...\", \"command\": \"...\"}, "
@@ -415,16 +429,11 @@ class ExecutorWorker:
             parts.append(f'"{prompt}"')
 
             # Phase 5: Inject memory search results
-            try:
-                from urllib.parse import quote
-                mem_results = self._api("GET", f"/api/mem/{self.project_id}/search?q={quote(prompt[:100])}&top_k=3")
-                memories = mem_results.get("results", [])
-                if memories:
-                    parts.append("\nRelevant memories from past work:")
-                    for m in memories[:3]:
-                        parts.append(f"  - [{m.get('kind','')}] {m.get('summary', m.get('content',''))[:150]}")
-            except Exception:
-                pass  # Non-fatal
+            memories = self._fetch_memories(prompt)
+            if memories:
+                parts.append("\nRelevant memories from past work:")
+                for m in memories:
+                    parts.append(f"  - [{m.get('kind','')}] {m.get('summary', m.get('content',''))[:150]}")
 
             # Phase 5: Inject active queue state
             try:
@@ -460,10 +469,26 @@ class ExecutorWorker:
 
         elif task_type == "test":
             changed = context.get("changed_files", [])
+            # Inject past failure patterns for these files
+            if changed:
+                memories = self._fetch_memories(", ".join(changed[:3]))
+                failures = [m for m in memories if m.get("kind") in ("failure_pattern", "test_result")]
+                if failures:
+                    parts.append("\nPast test failures for these files:")
+                    for m in failures:
+                        parts.append(f"  - {m.get('summary', m.get('content',''))[:150]}")
             parts.append(f"\nRun tests. Changed files: {json.dumps(changed)}")
             parts.append("Report result as JSON: {\"test_report\": {\"passed\": N, \"failed\": N, \"tool\": \"pytest\"}}")
 
         elif task_type == "qa":
+            changed = context.get("changed_files", [])
+            if changed:
+                memories = self._fetch_memories(", ".join(changed[:3]))
+                decisions = [m for m in memories if m.get("kind") in ("decision", "task_result")]
+                if decisions:
+                    parts.append("\nPast decisions for these files:")
+                    for m in decisions:
+                        parts.append(f"  - [{m.get('kind','')}] {m.get('summary', m.get('content',''))[:150]}")
             parts.append("\nYou are a QA reviewer. Review the test results and changed files above.")
             parts.append("If tests passed and changes look reasonable, respond ONLY with this exact JSON:")
             parts.append('{"recommendation": "qa_pass", "review_summary": "Tests pass, changes approved"}')
@@ -477,6 +502,13 @@ class ExecutorWorker:
             target = context.get("target_files", [])
             if target:
                 parts.append(f"\nTarget files: {json.dumps(target)}")
+            # Inject memories relevant to target files and prompt
+            mem_query = prompt if len(prompt) <= 120 else (", ".join(target[:3]) if target else prompt[:120])
+            memories = self._fetch_memories(mem_query)
+            if memories:
+                parts.append("\nRelevant memories from past work:")
+                for m in memories:
+                    parts.append(f"  - [{m.get('kind','')}] {m.get('summary', m.get('content',''))[:150]}")
             attempt = context.get("attempt_num", 1)
             gate_reason = context.get("previous_gate_reason", "") or context.get("rejection_reason", "")
             if attempt and int(attempt) > 1 and gate_reason:
@@ -688,6 +720,26 @@ class ExecutorWorker:
     # Startup helpers: crash recovery + PID lock
     # ------------------------------------------------------------------
 
+    def _run_ttl_cleanup(self) -> None:
+        """Archive memories with expired TTL (per domain pack durability)."""
+        try:
+            result = self._api("POST", f"/api/mem/{self.project_id}/ttl-cleanup")
+            archived = result.get("archived", 0)
+            if archived:
+                log.info("_run_ttl_cleanup: archived %d expired memories", archived)
+        except Exception as e:
+            log.debug("_run_ttl_cleanup failed (non-fatal): %s", e)
+
+    def _recover_stale_leases(self) -> None:
+        """Periodically re-queue claimed tasks whose lease has expired (runtime orphan recovery)."""
+        try:
+            result = self._api("POST", f"/api/task/{self.project_id}/recover")
+            recovered = result.get("recovered", 0)
+            if recovered:
+                log.warning("_recover_stale_leases: re-queued %d orphaned task(s) with expired leases", recovered)
+        except Exception as e:
+            log.debug("_recover_stale_leases failed (non-fatal): %s", e)
+
     def _recover_stuck_tasks(self) -> None:
         """Mark any 'claimed' tasks from a previous crash as failed.
 
@@ -844,6 +896,8 @@ class ExecutorWorker:
         # Initial git sync
         self._sync_git_status()
         self._sync_counter = 0
+        self._recover_counter = 0   # Stale lease recovery every ~5 min
+        self._ttl_counter = 0       # TTL cleanup every ~6h
 
         try:
             while self._running:
@@ -853,6 +907,16 @@ class ExecutorWorker:
                     if self._sync_counter >= 6:
                         self._sync_git_status()
                         self._sync_counter = 0
+                    # Recover stale claimed tasks every 30th poll (~5 min)
+                    self._recover_counter += 1
+                    if self._recover_counter >= 30:
+                        self._recover_stale_leases()
+                        self._recover_counter = 0
+                    # TTL memory cleanup every 2160th poll (~6h)
+                    self._ttl_counter += 1
+                    if self._ttl_counter >= 2160:
+                        self._run_ttl_cleanup()
+                        self._ttl_counter = 0
                     processed = self.run_once()
                     if not processed:
                         time.sleep(POLL_INTERVAL)

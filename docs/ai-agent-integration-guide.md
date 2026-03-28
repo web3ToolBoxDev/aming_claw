@@ -4,6 +4,18 @@ This guide is for **AI agents and developers** integrating with the aming-claw
 auto-chain workflow. It covers project registration, config format, API usage,
 and role-based permissions.
 
+## Role-Specific Guides
+
+Start with the guide for your role — each is scoped to only what that role needs:
+
+| Role | Guide | Responsibility |
+|------|-------|---------------|
+| **Dev** | [guide-dev-agent.md](guide-dev-agent.md) | Write code, fix bugs, write memory |
+| **Tester / QA** | [guide-tester-qa.md](guide-tester-qa.md) | Run tests, mark T2-pass / QA-pass |
+| **Coordinator** | [guide-coordinator.md](guide-coordinator.md) | Orchestrate, assign roles, release gate |
+
+The rest of this file documents the full system for reference.
+
 ---
 
 ## Quick Start: Register a New Project

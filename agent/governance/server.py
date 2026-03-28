@@ -1243,6 +1243,28 @@ def handle_mem_write(ctx: RequestContext):
     return 201, result
 
 
+@route("POST", "/api/mem/{project_id}/ttl-cleanup")
+def handle_mem_ttl_cleanup(ctx: RequestContext):
+    """Archive active memories whose durability TTL has elapsed (per domain pack)."""
+    project_id = ctx.get_project_id()
+    with DBContext(project_id) as conn:
+        result = memory_service.archive_expired_memories(conn, project_id)
+    return result
+
+
+@route("POST", "/api/mem/{project_id}/flush-index")
+def handle_mem_flush_index(ctx: RequestContext):
+    """Flush pending dbservice reindex queue (DockerBackend only)."""
+    from .memory_backend import get_backend
+    backend = get_backend()
+    if hasattr(backend, "flush_pending_index"):
+        flushed = backend.flush_pending_index()
+        remaining = backend.pending_index_count()
+    else:
+        flushed, remaining = 0, 0
+    return {"flushed": flushed, "remaining": remaining}
+
+
 @route("GET", "/api/mem/{project_id}/query")
 def handle_mem_query(ctx: RequestContext):
     project_id = ctx.get_project_id()
