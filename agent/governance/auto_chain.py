@@ -50,7 +50,15 @@ def on_task_completed(conn, project_id, task_id, task_type, status, result, meta
         log.error("auto_chain: failed to get independent connection for %s", project_id)
         return None
     try:
-        return _do_chain(conn, project_id, task_id, task_type, result, metadata)
+        result_val = _do_chain(conn, project_id, task_id, task_type, result, metadata)
+        conn.commit()
+        return result_val
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         try:
             conn.close()

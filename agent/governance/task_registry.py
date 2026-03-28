@@ -273,6 +273,10 @@ def complete_task(
             type_row = conn.execute(
                 "SELECT type FROM tasks WHERE task_id = ?", (task_id,)
             ).fetchone()
+            # Commit before auto_chain opens its independent connection.
+            # Without this, the caller's open transaction holds a write lock and
+            # auto_chain's separate conn fails with "database is locked".
+            conn.commit()
             chain_result = auto_chain.on_task_completed(
                 conn, project_id, task_id,
                 task_type=type_row["type"] if type_row else "task",

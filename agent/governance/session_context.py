@@ -189,14 +189,18 @@ def archive_context(project_id: str) -> dict:
     # Write to memory service
     try:
         from . import memory_service
+        from .models import MemoryEntry
+        from .db import get_connection
+        conn = get_connection(project_id)
         for item in archived:
-            memory_service.write_entry(
-                project_id,
-                module="session",
+            entry = MemoryEntry(
+                module_id="session",
                 kind=item["kind"],
                 content=item["content"],
-                metadata={"source": item["source"], "archived_at": _utc_iso()},
+                created_by="session_archive",
             )
+            memory_service.write_memory(conn, project_id, entry)
+        conn.close()
     except Exception:
         log.exception("Failed to archive context to memory service")
 

@@ -158,11 +158,21 @@ class ChainContextStore:
         task_id = payload.get("task_id", "")
         result = payload.get("result", {})
         project_id = payload.get("project_id", "")
+        task_type = payload.get("type", "pm")
 
         with self._lock:
             root_id = self._task_to_root.get(task_id)
             if not root_id:
-                return
+                # Bootstrap: task was created externally (e.g. initial PM task via user API,
+                # not by auto-chain), so task.created was never published for it.
+                # Treat it as chain root so events are persisted going forward.
+                root_id = task_id
+                chain = ChainContext(root_id, project_id)
+                stage = StageSnapshot(task_id, task_type, "", None)
+                chain.stages[task_id] = stage
+                self._chains[root_id] = chain
+                self._task_to_root[task_id] = root_id
+                log.debug("chain_context: bootstrapped root chain for %s (%s)", task_id, task_type)
             chain = self._chains.get(root_id)
             if not chain or task_id not in chain.stages:
                 return
