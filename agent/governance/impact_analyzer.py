@@ -73,6 +73,16 @@ CODE_DOC_MAP = {
         "docs/prd-memory-coordinator-executor.md",
         "docs/ai-agent-integration-guide.md",
     ],
+    "agent/governance/db.py": [
+        "docs/p0-3-design.md",
+        "docs/ai-agent-integration-guide.md",
+    ],
+    "agent/governance/impact_analyzer.py": [
+        "docs/ai-agent-integration-guide.md",
+    ],
+    "agent/governance/observability.py": [
+        "docs/ai-agent-integration-guide.md",
+    ],
 }
 
 
