@@ -18,7 +18,7 @@ if _agent_dir not in sys.path:
 from utils import tasks_root
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 -- Node runtime state
@@ -419,7 +419,94 @@ def _run_migrations(conn: sqlite3.Connection, from_version: int, to_version: int
             except Exception:
                 pass  # column already exists
 
-    MIGRATIONS = {2: _migrate_v1_to_v2, 3: _migrate_v2_to_v3, 4: _migrate_v3_to_v4, 5: _migrate_v4_to_v5, 6: _migrate_v5_to_v6}
+    def _migrate_v6_to_v7(c):
+        """Add memories table with FTS5 full-text search for Phase 2 memory backend."""
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS memories (
+                memory_id   TEXT PRIMARY KEY,
+                project_id  TEXT NOT NULL,
+                ref_id      TEXT NOT NULL DEFAULT '',
+                kind        TEXT NOT NULL DEFAULT 'knowledge',
+                module_id   TEXT NOT NULL DEFAULT '',
+                scope       TEXT NOT NULL DEFAULT 'project',
+                content     TEXT NOT NULL DEFAULT '',
+                summary     TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT,
+                tags        TEXT NOT NULL DEFAULT '',
+                version     INTEGER NOT NULL DEFAULT 1,
+                status      TEXT NOT NULL DEFAULT 'active',
+                superseded_by_memory_id TEXT,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memories_project_ref ON memories(project_id, ref_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memories_project_status ON memories(project_id, status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memories_module ON memories(project_id, module_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(project_id, kind)")
+
+        # FTS5 virtual table for full-text search
+        c.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                content, summary, module_id, kind,
+                content='memories',
+                content_rowid='rowid'
+            )
+        """)
+
+        # FTS5 sync triggers: keep FTS index in sync with memories table
+        c.execute("""
+            CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, content, summary, module_id, kind)
+                VALUES (new.rowid, new.content, new.summary, new.module_id, new.kind);
+            END
+        """)
+        c.execute("""
+            CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER DELETE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content, summary, module_id, kind)
+                VALUES ('delete', old.rowid, old.content, old.summary, old.module_id, old.kind);
+            END
+        """)
+        c.execute("""
+            CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, content, summary, module_id, kind)
+                VALUES ('delete', old.rowid, old.content, old.summary, old.module_id, old.kind);
+                INSERT INTO memories_fts(rowid, content, summary, module_id, kind)
+                VALUES (new.rowid, new.content, new.summary, new.module_id, new.kind);
+            END
+        """)
+
+        # Memory relations table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS memory_relations (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_ref_id TEXT NOT NULL,
+                relation    TEXT NOT NULL,
+                to_ref_id   TEXT NOT NULL,
+                project_id  TEXT NOT NULL,
+                metadata_json TEXT,
+                created_at  TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memrel_from ON memory_relations(project_id, from_ref_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memrel_to ON memory_relations(project_id, to_ref_id)")
+
+        # Memory events table (audit trail for memory lifecycle)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS memory_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ref_id      TEXT NOT NULL,
+                project_id  TEXT NOT NULL,
+                event_type  TEXT NOT NULL,
+                actor_id    TEXT NOT NULL DEFAULT '',
+                detail      TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT,
+                created_at  TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memevt_ref ON memory_events(project_id, ref_id)")
+
+    MIGRATIONS = {2: _migrate_v1_to_v2, 3: _migrate_v2_to_v3, 4: _migrate_v3_to_v4, 5: _migrate_v4_to_v5, 6: _migrate_v5_to_v6, 7: _migrate_v6_to_v7}
     for version in range(from_version + 1, to_version + 1):
         if version in MIGRATIONS:
             MIGRATIONS[version](conn)

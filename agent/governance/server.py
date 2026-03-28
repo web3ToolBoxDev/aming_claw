@@ -1209,6 +1209,19 @@ def handle_mem_query(ctx: RequestContext):
     return {"entries": entries, "count": len(entries)}
 
 
+@route("GET", "/api/mem/{project_id}/search")
+def handle_mem_search(ctx: RequestContext):
+    """Full-text search across memories (FTS5 or semantic depending on backend)."""
+    project_id = ctx.get_project_id()
+    q = ctx.query.get("q", "")
+    top_k = int(ctx.query.get("top_k", "5"))
+    if not q:
+        return {"error": "MISSING_QUERY", "message": "q parameter required"}, 400
+    with DBContext(project_id) as conn:
+        results = memory_service.search_memories(conn, project_id, q, top_k)
+    return {"results": results, "count": len(results), "query": q}
+
+
 # --- Audit ---
 
 @route("GET", "/api/audit/{project_id}/log")
