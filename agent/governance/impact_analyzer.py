@@ -51,6 +51,28 @@ CODE_DOC_MAP = {
     "agent/deploy_chain.py": [
         "docs/deployment-guide.md",
     ],
+    "agent/service_manager.py": [
+        "docs/ai-agent-integration-guide.md",
+    ],
+    "agent/executor_worker.py": [
+        "docs/ai-agent-integration-guide.md",
+        "docs/p0-3-design.md",
+    ],
+    "agent/governance/memory_backend.py": [
+        "docs/ai-agent-integration-guide.md",
+        "docs/prd-memory-coordinator-executor.md",
+    ],
+    "agent/governance/memory_service.py": [
+        "docs/ai-agent-integration-guide.md",
+    ],
+    "agent/governance/conflict_rules.py": [
+        "docs/ai-agent-integration-guide.md",
+        "docs/human-intervention-guide.md",
+    ],
+    "agent/governance/chain_context.py": [
+        "docs/prd-memory-coordinator-executor.md",
+        "docs/ai-agent-integration-guide.md",
+    ],
 }
 
 
