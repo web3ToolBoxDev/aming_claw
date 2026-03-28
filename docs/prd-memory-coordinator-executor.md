@@ -27,8 +27,15 @@ Three interconnected improvements to make the workflow system production-ready:
 - dbservice (Docker) has mem0 semantic search but is tightly coupled
 - Going Docker-less loses semantic search
 - Future cloud service needs same interface
+- Governance and gateway currently run inside Docker — need to support
+  Docker-free deployment to lower adoption cost for other users
 
 ### 2.2 Architecture
+
+Two-tier design: **LocalBackend** for zero-dependency mode (no Docker, no network),
+**RemoteBackend** for any HTTP-based memory service (Docker dbservice, cloud, or
+third-party). Nginx acts as the routing layer for remote backends — switching
+from Docker to cloud is a nginx upstream change, zero code modification.
 
 ```
 memory_service.py
@@ -39,36 +46,74 @@ memory_service.py
     │       ├── query(module, kind, ref_id) → structured query
     │       └── delete(memory_id) → remove
     │
-    ├── LocalBackend (default, zero dependency)
-    │       ├── SQLite `memories` table (structured)
+    ├── LocalBackend (default, zero dependency, no Docker required)
+    │       ├── SQLite `memories` table (structured, source of truth)
     │       └── SQLite FTS5 (full-text search, keyword matching)
+    │       └── Runs in-process, no network calls
     │
-    ├── DockerBackend (current dbservice)
-    │       ├── SQLite `memories` table (structured, same as local)
-    │       └── dbservice :40002 (mem0 semantic search via HTTP)
-    │           ├── /store → mem0 Memory.add (vector index)
-    │           ├── /search → mem0 Memory.search (semantic query)
-    │           └── /knowledge/upsert → knowledge store (SQLite + audit)
-    │
-    └── CloudBackend (future)
+    └── RemoteBackend (Docker dbservice / cloud / third-party)
             ├── SQLite `memories` table (structured, local cache)
-            └── Cloud API (shared semantic search across users)
+            └── HTTP via nginx reverse proxy:
+                │
+                ├── nginx upstream: dbservice:40002 (Docker mode)
+                │     ├── /store → mem0 Memory.add (vector index)
+                │     ├── /search → mem0 Memory.search (semantic)
+                │     └── /knowledge/upsert → knowledge store
+                │
+                └── nginx upstream: cloud-api (cloud mode, future)
+                      └── same endpoint contract, different upstream
 ```
+
+**Key design decision:** RemoteBackend code never changes when switching
+Docker↔Cloud. Only nginx upstream configuration changes.
+
+**Docker-free deployment path:** When governance and gateway move out of Docker
+(Phase 10), the system runs with `MEMORY_BACKEND=local` by default. Users who
+want semantic search can either:
+1. Run dbservice standalone (`node dbservice/index.js`) + nginx
+2. Use a cloud memory service (future Phase 9)
 
 ### 2.3 Configuration
 
 ```bash
 # Environment variable selects backend
-MEMORY_BACKEND=local    # Default: SQLite + FTS5, zero dependency
-MEMORY_BACKEND=docker   # dbservice mem0 (requires Docker)
-MEMORY_BACKEND=cloud    # Future cloud service
+MEMORY_BACKEND=local    # Default: SQLite + FTS5, zero dependency, no Docker
+MEMORY_BACKEND=remote   # HTTP-based backend via nginx (Docker dbservice or cloud)
 
-# Docker backend config
-DBSERVICE_URL=http://localhost:40002   # or http://dbservice:40002 inside Docker
+# Remote backend config (nginx routes to actual upstream)
+MEMORY_SERVICE_URL=http://localhost:40000/memory  # nginx reverse proxy entry point
+                                                  # nginx decides upstream:
+                                                  #   Docker → dbservice:40002
+                                                  #   Cloud  → cloud-api.xxx:443
 
-# Cloud backend config (future)
-MEMORY_CLOUD_URL=https://memory.aming-claw.com
-MEMORY_CLOUD_API_KEY=xxx
+# Legacy direct access (still works, not recommended for new code)
+# DBSERVICE_URL=http://dbservice:40002   # Docker internal DNS, bypasses nginx
+```
+
+**Nginx upstream switching (zero code change):**
+
+```nginx
+# Docker mode (current):
+upstream memory_backend {
+    server dbservice:40002;
+}
+
+# Cloud mode (future, just change upstream):
+upstream memory_backend {
+    server cloud-memory.aming-claw.com:443;
+}
+
+# Standalone mode (dbservice without Docker):
+upstream memory_backend {
+    server localhost:40002;
+}
+
+location /memory/ {
+    proxy_pass http://memory_backend/;
+    proxy_set_header Host $host;
+    proxy_read_timeout 30s;
+    proxy_connect_timeout 5s;
+}
 ```
 
 ### 2.4 Interface
@@ -101,11 +146,11 @@ class MemoryBackend:
 
 
 class LocalBackend(MemoryBackend):
-    """SQLite + FTS5. Zero external dependency."""
+    """SQLite + FTS5. Zero external dependency, no Docker required."""
 
     def write(self, project_id, entry):
         # 1. INSERT into memories table
-        # 2. INSERT into memories_fts (FTS5 virtual table)
+        # 2. FTS5 auto-synced via triggers (INSERT/UPDATE/DELETE)
         pass
 
     def search(self, project_id, query, top_k=5):
@@ -114,25 +159,29 @@ class LocalBackend(MemoryBackend):
         pass
 
 
-class DockerBackend(MemoryBackend):
-    """SQLite (structured) + dbservice mem0 (semantic)."""
+class RemoteBackend(MemoryBackend):
+    """SQLite (local structured truth) + HTTP remote service (semantic search).
+
+    Remote service accessed via MEMORY_SERVICE_URL (nginx reverse proxy).
+    Backend-agnostic: nginx routes to Docker dbservice, cloud API, or
+    standalone dbservice — RemoteBackend code never changes.
+    Fallback: if remote unavailable, degrades to FTS5 (same as LocalBackend).
+    """
+
+    def __init__(self):
+        self.url = os.environ.get("MEMORY_SERVICE_URL",
+                                   "http://localhost:40000/memory")
 
     def write(self, project_id, entry):
-        # 1. INSERT into memories table (same as local)
-        # 2. POST dbservice /store (mem0 vector index)
-        # 3. POST dbservice /knowledge/upsert (knowledge store)
+        # 1. INSERT into memories table (local SQLite, same as LocalBackend)
+        # 2. POST {self.url}/knowledge/upsert (remote semantic index)
+        # Failure on step 2 is non-fatal: local data is truth, remote is recall
         pass
 
     def search(self, project_id, query, top_k=5):
-        # POST dbservice /search (mem0 semantic search)
-        # Fallback to FTS5 if dbservice unavailable
+        # POST {self.url}/search (remote semantic search)
+        # Fallback to FTS5 if remote unavailable (graceful degradation)
         pass
-
-
-class CloudBackend(MemoryBackend):
-    """SQLite (local cache) + Cloud API (shared semantic search)."""
-    # Future implementation
-    pass
 ```
 
 ### 2.5 DB Schema Addition
@@ -188,12 +237,41 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content=memories, content_rowid=id
 );
 
--- FTS5 triggers to keep in sync
+-- FTS5 triggers: INSERT + UPDATE + DELETE to keep index in sync.
+-- Without UPDATE/DELETE triggers, archived/superseded/modified memories
+-- produce stale search results over time.
+
 CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
     INSERT INTO memories_fts(rowid, content, module_id, kind)
     VALUES (new.id, new.content, new.module_id, new.kind);
 END;
+
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, module_id, kind)
+    VALUES ('delete', old.id, old.content, old.module_id, old.kind);
+    INSERT INTO memories_fts(rowid, content, module_id, kind)
+    VALUES (new.id, new.content, new.module_id, new.kind);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, module_id, kind)
+    VALUES ('delete', old.id, old.content, old.module_id, old.kind);
+END;
 ```
+
+**FTS5 sync coverage:**
+
+| Memory operation | FTS5 action | Trigger |
+|-----------------|-------------|---------|
+| INSERT (new memory) | Index new content | `memories_ai` |
+| UPDATE (version bump, content edit, status change) | Delete old + index new | `memories_au` |
+| DELETE (hard delete) | Remove from index | `memories_ad` |
+| Supersede (status→inactive, superseded_by set) | Re-index with new status via UPDATE trigger | `memories_au` |
+| Archive (status→archived) | Re-index via UPDATE trigger | `memories_au` |
+
+**Note:** FTS5 `content=memories` external content tables require the
+delete-then-reinsert pattern for updates (FTS5 limitation).
+The `memories_au` trigger handles this correctly.
 
 ### 2.6 API Changes
 
@@ -481,25 +559,53 @@ When to clear __pycache__:
   4. MCP executor_scale(0 → 1) → clear before start
 ```
 
-### 4.4 PID Lock
+### 4.4 PID Lock (aligned with spec §8.2)
+
+Single-instance enforcement uses a layered approach per spec:
+
+1. **File lock (primary)** — OS-level `fcntl.flock()` / `msvcrt.locking()`.
+   Guarantees mutual exclusion even across unrelated processes.
+2. **PID file (supplementary)** — Written after acquiring file lock.
+   Used for status display and health check, not for exclusion.
+3. **Kill old process** — Only permitted when ALL three conditions are met:
+   - Same project_id
+   - Health check on old PID failed (heartbeat stale > 120s)
+   - Grace period exceeded (SIGTERM sent, waited 5s, still alive → SIGKILL)
 
 ```python
 # executor_worker.py startup:
 
 def _acquire_pid_lock(self):
-    """Ensure only one executor per project."""
+    """Ensure only one executor per project (spec §8.2)."""
     lock_path = os.path.join(tempfile.gettempdir(),
-                            f"aming-claw-executor-{self.project_id}.pid")
-    if os.path.exists(lock_path):
-        old_pid = int(open(lock_path).read().strip())
-        if _is_process_alive(old_pid):
-            log.warning("Executor already running (PID %d). Killing old.", old_pid)
+                            f"aming-claw-executor-{self.project_id}.lock")
+    pid_path = lock_path.replace(".lock", ".pid")
+
+    # Step 1: Try file lock (non-blocking)
+    self._lock_fd = open(lock_path, "w")
+    try:
+        _try_flock(self._lock_fd)  # platform-specific flock
+    except BlockingIOError:
+        # Lock held — check if old process is actually healthy
+        old_pid = _read_pid(pid_path)
+        if old_pid and _is_process_alive(old_pid):
+            if not _is_heartbeat_stale(old_pid, self.project_id, timeout=120):
+                raise RuntimeError(f"Healthy executor already running (PID {old_pid})")
+            # Old process alive but stale heartbeat → kill
+            log.warning("Stale executor PID %d, sending SIGTERM", old_pid)
             os.kill(old_pid, signal.SIGTERM)
-            time.sleep(2)
-    with open(lock_path, "w") as f:
+            time.sleep(5)
+            if _is_process_alive(old_pid):
+                os.kill(old_pid, signal.SIGKILL)
+        _try_flock(self._lock_fd)  # retry after kill
+
+    # Step 2: Write PID file (supplementary info)
+    with open(pid_path, "w") as f:
         f.write(str(os.getpid()))
     return lock_path
 ```
+
+**Prohibited:** Killing a healthy executor just because a PID file exists.
 
 ### 4.5 Heartbeat (spec §8.3)
 
@@ -575,15 +681,34 @@ Called at executor startup, before entering poll loop.
 
 ## 5. Implementation Priority
 
-| Phase | Scope | Files | Dependency |
-|-------|-------|-------|------------|
-| **Phase 1** | Executor lifecycle (crash recovery + pycache) | service_manager, executor_worker, deploy_chain | None |
-| **Phase 2** | Memory backend interface + local SQLite FTS5 | memory_backend, memory_service, db, server | None |
-| **Phase 3** | Docker backend (wire existing dbservice) | memory_backend | Phase 2 |
-| **Phase 4** | Coordinator task awareness | executor_worker | Phase 2 |
-| **Phase 5** | Cloud backend stub | memory_backend | Phase 2 |
+> **Authoritative ordering.** This table is the single source of truth for
+> implementation sequence. It aligns with design-spec §11 (Implementation Order).
+> Previous versions of this PRD used a different Phase numbering; this version
+> supersedes all prior orderings.
 
-Phase 1 and 2 can be done in parallel. Phase 4 depends on Phase 2 (search API).
+| Phase | Scope | Files | Dependency | Status |
+|-------|-------|-------|------------|--------|
+| **Phase 1** | Executor lifecycle (crash recovery, PID lock, circuit breaker) | service_manager, executor_worker, deploy_chain | None | DONE |
+| **Phase 2** | Memory backend interface + local SQLite FTS5 | memory_backend, memory_service, db, server | None | DONE |
+| **Phase 3** | ref_id lifecycle, entity mapping, relation graph | memory_backend, db, server | Phase 2 | DONE |
+| **Phase 4** | Task metadata enrichment + conflict rule engine | conflict_rules, server | Phase 2 | DONE |
+| **Phase 5** | Coordinator awareness (intent classifier, prompt injection) | executor_worker, gateway | Phase 4 | DONE |
+| **Phase 6** | Docker mem0 backend (semantic search + FTS5 fallback) | memory_backend | Phase 2 | DONE |
+| **Phase 7** | Spec invariant verification tests | tests/test_verify_spec | Phase 1-6 | DONE |
+| **Phase 8** | Chain Context (event-sourced runtime context) | chain_context, auto_chain, server, task_registry, db | None | TODO |
+| **Phase 9** | Cloud RemoteBackend (nginx upstream switch) | nginx.conf, memory_backend | Phase 6 | Future |
+
+**Dependency rules:**
+- Phase 1 and 2 can run in parallel (no shared files).
+- Phase 3-6 depend on Phase 2 (memory backend interface).
+- Phase 5 depends on Phase 4 (conflict rules feed coordinator prompt).
+- Phase 8 has zero dependency — can be implemented at any time.
+- Phase 9: RemoteBackend code already exists from Phase 6. Cloud enablement is
+  nginx upstream config + cloud API key — no Python code change.
+
+**Out of scope (future PRD):**
+- De-Dockerize governance + gateway (native Python deployment)
+- Message layer abstraction (pluggable: Redis pub/sub vs Python queue)
 
 ---
 
@@ -591,7 +716,7 @@ Phase 1 and 2 can be done in parallel. Phase 4 depends on Phase 2 (search API).
 
 | File | Action | Phases |
 |------|--------|--------|
-| `agent/governance/memory_backend.py` | **New** | 2,3,5 |
+| `agent/governance/memory_backend.py` | **New** | 2,3,6 (LocalBackend + RemoteBackend) |
 | `agent/governance/memory_service.py` | **Modify** | 2 |
 | `agent/governance/db.py` | **Modify** | 2 |
 | `agent/governance/server.py` | **Modify** | 2,4 |
@@ -599,6 +724,7 @@ Phase 1 and 2 can be done in parallel. Phase 4 depends on Phase 2 (search API).
 | `agent/executor_worker.py` | **Modify** | 1,4 |
 | `agent/deploy_chain.py` | **Modify** | 1 |
 | `agent/mcp/tools.py` | **Modify** | 1 |
+| `agent/governance/chain_context.py` | **New** | 8 |
 
 ## 7. Affected Nodes
 
@@ -624,7 +750,8 @@ Phase 1 and 2 can be done in parallel. Phase 4 depends on Phase 2 (search API).
 - [ ] ServiceManager monitors executor, auto-restarts on crash (max 5 per 5 min)
 - [ ] pycache cleared before every executor restart
 - [ ] deploy_chain clears pycache after merge
-- [ ] PID lock prevents duplicate executors
+- [ ] File lock (OS-level) prevents duplicate executors; PID file is supplementary only (spec §8.2)
+- [ ] Old executor killed ONLY when: same project + heartbeat stale >120s + grace period exceeded
 - [ ] executor_status shows health/restart_count/last_crash
 - [ ] Circuit breaker stops restart loop, sends Telegram alert
 
@@ -635,10 +762,12 @@ Phase 1 and 2 can be done in parallel. Phase 4 depends on Phase 2 (search API).
 - [ ] `/api/mem/{pid}/search?q=...` endpoint works
 - [ ] Existing `/api/mem/{pid}/write` and `/query` still work
 
-### Phase 3: Docker Backend
-- [ ] `MEMORY_BACKEND=docker` routes search to dbservice :40002
-- [ ] Fallback to FTS5 if dbservice unavailable
-- [ ] Existing 10 knowledge entries accessible via new interface
+### Phase 3: ref_id Lifecycle
+- [ ] entity_id ↔ ref_id stable mapping
+- [ ] Version chain tracking (memory_id chain per ref_id)
+- [ ] `search_and_aggregate` returns latest version per ref_id
+- [ ] Relation graph (memory_relations table) with PRODUCED/CAUSED_BY/RELATED_TO
+- [ ] `/api/mem/{pid}/expand?ref_id=X&depth=2` graph traversal works
 
 ### Phase 4: Coordinator Awareness
 - [ ] Coordinator prompt includes semantic memory search results
@@ -647,6 +776,561 @@ Phase 1 and 2 can be done in parallel. Phase 4 depends on Phase 2 (search API).
 - [ ] Conflicting queue task detected → warns user with options
 - [ ] Past failure detected → injects failure context into new task
 
-### Phase 5: Cloud Backend (Future)
-- [ ] `MEMORY_BACKEND=cloud` stub exists
-- [ ] Interface defined, not implemented
+**Task metadata quality (hard requirements per spec §7.2):**
+- [ ] Every new task has `source_message_hash` (auto-generated by gateway from user message)
+- [ ] File/module-aware tasks MUST have `target_files` or `target_modules` (gate rejects if empty)
+- [ ] `operation_type` MUST NOT be empty (fallback: keyword extraction from prompt, default "modify")
+- [ ] `intent_summary` MUST NOT be empty (fallback: first 100 chars of prompt)
+- [ ] Conflict rule engine MUST use structured metadata fields for same-file detection, NOT raw prompt text matching
+- [ ] Post-PM gate MUST reject tasks with empty `target_files` AND empty `intent_summary`
+
+### Phase 6: Docker RemoteBackend
+- [ ] `MEMORY_BACKEND=remote` routes search through nginx to dbservice
+- [ ] RemoteBackend uses `MEMORY_SERVICE_URL` (nginx proxy), not direct dbservice URL
+- [ ] Fallback to FTS5 if remote unavailable
+- [ ] Existing knowledge entries accessible via RemoteBackend
+
+### Phase 9: Cloud RemoteBackend (Future)
+- [ ] Cloud upstream configured in nginx.conf
+- [ ] Same RemoteBackend code works with cloud (zero Python change)
+- [ ] API key auth injected by nginx (`proxy_set_header Authorization`)
+
+### Future (separate PRD)
+- De-Dockerize governance + gateway (native Python deployment)
+- Message layer abstraction: pluggable transport (Redis pub/sub vs Python `queue.Queue`)
+  to decouple EventBus from Redis dependency
+
+---
+
+## 10. Chain Context — Task Chain Runtime Context (Phase 8)
+
+> **Spec Reference:** §4 Memory Data Model (`task_result`, `task_snapshot` kinds),
+> §7.1 Coordinator Input Requirements, §8.4 Crash Recovery.
+>
+> **Consistency Boundary:** ChainContextStore is authoritative within a single
+> governance process. Multi-instance deployments require a shared event store
+> (out of scope for this phase).
+
+### 10.1 Problem
+
+Context passing between auto-chain stages has critical defects:
+
+1. **Retry context loss** — When a gate blocks and creates a retry task,
+   `_original_prompt` is uninitialized, producing `"Original task: "` (empty).
+   The executor cannot know the original task intent.
+   *Observed:* PM doc-update task retried 3 times; all failed due to lost context.
+
+2. **No chain-level context** — `_build_dev_prompt()` extracts `target_files`/`verification`
+   from PM result, but if PM result format is non-standard, dev task creation fails.
+   Stages only have scattered metadata fields, no coherent chain context.
+
+3. **`/api/context-snapshot?task_id=xxx` ignores task_id** — The parameter is accepted
+   but unused in the handler. Every task receives the same project-level snapshot,
+   unable to see its own chain position or parent task output.
+
+4. **No real-time gate state** — Gate block events are broadcast via EventBus
+   but never persisted. Subsequent retry tasks and context-snapshot queries
+   cannot access gate block history.
+
+5. **Parallel safety** — Querying task chains requires DB reads (tasks table JOIN).
+   SQLite write locks under parallel executor scenarios cause timeouts.
+   Spec §4 `task_result`/`task_snapshot` memory writes were never implemented.
+
+### 10.2 Design: Event-Sourced Chain Context
+
+Event sourcing pattern: in-memory dict for hot-path reads/writes, every event
+persisted synchronously to DB, crash recovery via event replay.
+
+#### Architecture
+
+```
+EventBus (in-process, existing)
+    │
+    ├── task.created ────┐
+    ├── task.completed ──┤
+    ├── gate.blocked ────┤──→ ChainContextStore (in-memory dict)
+    ├── task.retry ──────┤         │
+    ├── task.failed ─────┘         ├── read: O(1) dict lookup (lock-free snapshot)
+    │                              ├── write: event-driven, threading.Lock
+    │                              └── persist: sync INSERT to chain_events table
+    │
+    └── chain.archived ──→ release memory, DB data retained for audit
+```
+
+#### Chain State Machine
+
+```
+                ┌─────────────┐
+                │   running   │ ← initial state
+                └──────┬──────┘
+                       │
+              ┌────────┼────────┐
+              ▼        ▼        ▼
+         ┌─────────┐ ┌──────┐ ┌────────┐
+         │ blocked │ │failed│ │cancelled│
+         └────┬────┘ └──┬───┘ └────┬────┘
+              │         │          │
+              ▼         │          │
+         ┌─────────┐   │          │
+         │retrying │   │          │
+         └────┬────┘   │          │
+              │        │          │
+              ▼        │          │
+         ┌─────────┐   │          │
+         │ running │   │          │
+         └────┬────┘   │          │
+              │        │          │
+              ▼        ▼          ▼
+         ┌──────────────────────────┐
+         │       completed          │
+         └────────────┬─────────────┘
+                      ▼
+         ┌──────────────────────────┐
+         │       archived           │
+         └──────────────────────────┘
+```
+
+**State transitions:**
+
+| From | To | Trigger |
+|------|----|---------|
+| `running` | `blocked` | gate.blocked event |
+| `running` | `completed` | merge task succeeded |
+| `running` | `failed` | max retries exhausted OR task failed with no retry |
+| `blocked` | `retrying` | task.retry event (auto-chain creates retry) |
+| `retrying` | `running` | retry task claimed by executor |
+| `retrying` | `failed` | retry exhausted (attempt >= max_retries) |
+| `blocked` | `failed` | no retry created (gate_retry_count >= 2) |
+| any | `cancelled` | manual cancellation via API |
+| `completed` | `archived` | archive_chain() called |
+| `failed` | `archived` | archive_chain() called (cleanup) |
+| `cancelled` | `archived` | archive_chain() called (cleanup) |
+
+**Archive triggers (memory release):**
+- merge succeeded → immediate archive
+- chain in `failed` state → archive after 60s delay (allow inspection)
+- chain in `cancelled` state → immediate archive
+- stale chain watchdog: any chain with `updated_at` > 1 hour old → force archive
+
+#### Data Model
+
+**In-memory structures:**
+
+```python
+ChainContextStore
+  ├── _chains: dict[root_task_id → ChainContext]
+  └── _task_to_root: dict[any_task_id → root_task_id]
+
+ChainContext
+  ├── root_task_id: str
+  ├── project_id: str
+  ├── state: "running" | "blocked" | "retrying" | "completed"
+  │          | "failed" | "cancelled" | "archived"
+  ├── current_stage: task_id
+  ├── stages: dict[task_id → StageSnapshot]
+  ├── created_at: str
+  └── updated_at: str
+
+StageSnapshot
+  ├── task_id: str
+  ├── task_type: str           # pm | dev | test | qa | merge
+  ├── prompt: str              # full original prompt
+  ├── result_core: dict | None # structured key fields (see §10.2.2)
+  ├── result_raw: dict | None  # full result (truncated on serialize)
+  ├── gate_reason: str | None
+  ├── attempt: int
+  ├── parent_task_id: str | None
+  └── ts: str
+```
+
+##### 10.2.1 Root Task ID Assignment Rules
+
+| Scenario | root_task_id | Rule |
+|----------|-------------|------|
+| First task in chain (PM or standalone dev) | `self.task_id` | No parent → becomes root |
+| Auto-chained stage (dev, test, qa, merge) | inherited from parent | `_task_to_root[parent_task_id]` |
+| Retry of any stage | same root as original | `_task_to_root[original_task_id]` |
+| Observer manual intervention task | `self.task_id` | New chain (observer is a different flow) |
+| Unlinked task (no parent_task_id in payload) | `self.task_id` | Standalone chain of length 1 |
+
+**Invariant:** Once assigned, a task's root_task_id MUST NOT change.
+
+##### 10.2.2 Result Storage: Core vs Raw
+
+Not all result fields are equally important. Chain context stores results in two tiers:
+
+**`result_core`** — Structured key fields, always preserved in full:
+
+```python
+RESULT_CORE_FIELDS = [
+    "target_files",          # list[str] — files to modify
+    "changed_files",         # list[str] — files actually modified (from git diff)
+    "verification",          # dict — test/QA verification plan
+    "requirements",          # list[str] — implementation requirements
+    "acceptance_criteria",   # list[str] — criteria for success
+    "test_report",           # dict — {passed, failed, tool, duration_sec}
+    "prd",                   # dict — PM output (target_files, verification, etc.)
+    "proposed_nodes",        # list[str] — new acceptance graph nodes
+    "summary",               # str — one-line summary of what was done
+    "related_nodes",         # list[str] — affected workflow nodes
+]
+```
+
+**`result_raw`** — Full result dict. Preserved in memory during chain lifetime,
+truncated on DB serialization (max 10KB per stage).
+
+**Extraction logic:**
+
+```python
+def _extract_core(result: dict) -> dict:
+    core = {}
+    for field in RESULT_CORE_FIELDS:
+        val = result.get(field)
+        if val is None and "prd" in result:
+            val = result["prd"].get(field)  # fallback to nested prd
+        if val is not None:
+            core[field] = val
+    return core
+```
+
+**Consumer contract:** `_build_dev_prompt()`, `_build_test_prompt()`, etc. MUST
+be able to reconstruct their prompts from `result_core` alone.
+
+#### DB Table (event log)
+
+```sql
+CREATE TABLE IF NOT EXISTS chain_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    root_task_id  TEXT NOT NULL,
+    task_id       TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    payload_json  TEXT NOT NULL,
+    ts            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chain_events_root
+    ON chain_events(root_task_id, ts);
+CREATE INDEX IF NOT EXISTS idx_chain_events_task
+    ON chain_events(task_id, event_type, ts);
+```
+
+**No UNIQUE constraint.** Events are append-only. The same `(task_id, event_type)`
+may appear multiple times (e.g., multiple `gate.blocked` with different reasons).
+
+##### Event Categories
+
+| Category | Events | DB behavior | Rationale |
+|----------|--------|-------------|-----------|
+| **State events** (latest wins) | `task.completed`, `chain.archived` | Append; replay takes latest | Only the final result matters |
+| **Audit events** (full history) | `gate.blocked`, `task.retry`, `task.failed` | Append; replay processes all | Multiple blocks with different reasons must be preserved for debugging |
+| **Init events** (once per task) | `task.created` | Append; replay skips duplicates via `_task_to_root` check | Idempotent by design |
+
+On replay, the handler methods are idempotent:
+- `on_task_created`: skips if `task_id` already in `_task_to_root`
+- `on_gate_blocked`: always updates (latest reason wins in memory, all preserved in DB)
+- `on_task_completed`: overwrites result (latest wins)
+- `on_task_retry`: creates new stage entry (retry_id is always unique)
+
+#### Event Handlers
+
+| Event | Memory operation | DB operation | Trigger point |
+|-------|-----------------|--------------|---------------|
+| `task.created` | Create chain or join existing; store prompt | INSERT | `task_registry.create_task` / `auto_chain` next stage |
+| `task.completed` | Update stage.result_core + result_raw | INSERT | `auto_chain.on_task_completed` |
+| `gate.blocked` | chain.state="blocked"; store gate_reason | INSERT (append, not replace) | `auto_chain` gate check |
+| `task.retry` | Inherit original prompt; attempt+1; state="retrying" | INSERT (append) | `auto_chain` retry creation |
+| `task.failed` | chain.state="failed" if max retries | INSERT | `auto_chain` retry exhausted |
+| `chain.archived` | Release memory | INSERT | merge complete / failed+timeout / cancelled |
+
+#### Read API
+
+| Method | Purpose | Caller |
+|--------|---------|--------|
+| `get_chain(task_id, role=None) → dict` | Chain context (role-filtered if role set) | `/api/context-snapshot?task_id=xxx&role=dev` |
+| `get_original_prompt(task_id) → str` | Root task prompt (no role filter) | `auto_chain` retry prompt builder |
+| `get_parent_result(task_id) → dict` | Parent stage result_core (no role filter) | `_build_dev_prompt` fallback |
+| `get_state(task_id) → str` | Current chain state | Gate decisions, monitoring |
+
+All reads from in-memory dict, O(1), no DB access.
+
+#### Role-Based Context Projection
+
+Not every role should see the full chain. Each role has a token budget
+(spec: coordinator ~6000, dev ~4000) and a responsibility boundary
+(spec §8.1: executor "Does NOT make product decisions").
+
+`get_chain(task_id, role=None)` applies a projection filter when `role` is set:
+
+| Field | pm | dev | test | qa | merge | coordinator |
+|-------|:--:|:---:|:----:|:--:|:-----:|:-----------:|
+| `chain.state` | - | current only | current only | current only | current only | full |
+| `chain.stages` (which) | own | own + parent PM | own + parent dev | own + parent test | own + parent qa | all |
+| `stage.prompt` | full | full | - | - | - | truncated (200 chars) |
+| `stage.result_core` | - | parent's core | parent's changed_files + test config | parent's test_report + changed_files | parent's qa pass + changed_files | all (summary only) |
+| `stage.result_raw` | - | - | - | - | - | - |
+| `stage.gate_reason` | - | own (if retry) | - | - | - | all |
+| `root prompt` | full | full (for retry) | - | - | - | truncated |
+
+**Projection rules:**
+
+```python
+ROLE_VISIBLE_STAGES = {
+    "pm":          lambda s: s.task_type == "pm",
+    "dev":         lambda s: s.task_type in ("pm", "dev"),
+    "test":        lambda s: s.task_type in ("dev", "test"),
+    "qa":          lambda s: s.task_type in ("test", "qa"),
+    "merge":       lambda s: s.task_type in ("qa", "merge"),
+    "coordinator": lambda s: True,  # sees all stages
+}
+
+ROLE_RESULT_FIELDS = {
+    "pm":          [],
+    "dev":         ["target_files", "requirements", "acceptance_criteria",
+                    "verification", "prd"],
+    "test":        ["changed_files", "target_files"],
+    "qa":          ["test_report", "changed_files", "acceptance_criteria"],
+    "merge":       ["changed_files", "test_report"],
+    "coordinator": ["target_files", "changed_files", "summary",
+                    "test_report", "related_nodes"],
+}
+```
+
+**Rationale:**
+1. **Token savings** — dev does not see QA history, test does not see full PRD.
+   Reduces injected context by ~40-60% per role.
+2. **Responsibility isolation** — dev cannot see coordinator decisions or QA
+   judgment rationale, preventing scope creep.
+3. **Retry context** — dev in retry mode sees own `gate_reason` and root `prompt`
+   (needed to fix the issue), but not other stages' internals.
+
+**Implementation:** Projection is applied in `get_chain()` serialization, not in
+the storage layer. In-memory data remains complete for internal use
+(e.g., `get_original_prompt` always returns full prompt regardless of role).
+
+#### Crash Recovery
+
+```python
+def recover_from_db(self, project_id):
+    """Replay chain_events on startup to rebuild active chains."""
+    from .db import get_connection
+    conn = get_connection(project_id)
+    rows = conn.execute(
+        "SELECT root_task_id, task_id, event_type, payload_json, ts "
+        "FROM chain_events "
+        "WHERE root_task_id NOT IN ("
+        "  SELECT root_task_id FROM chain_events "
+        "  WHERE event_type = 'chain.archived'"
+        ") ORDER BY ts"
+    ).fetchall()
+
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        handler = EVENT_HANDLERS.get(row["event_type"])
+        if handler:
+            handler(payload)  # reuse same on_xxx methods (idempotent)
+```
+
+**Recovery sequence:**
+1. Governance server starts
+2. `register_events()` subscribes handlers to EventBus
+3. `recover_from_db(project_id)` replays non-archived events
+4. In-memory state rebuilt, normal service resumes
+
+**Idempotency:** `on_task_created` checks `_task_to_root` before creating;
+duplicate events produce no side effects.
+
+### 10.3 Integration Points (changes to existing files)
+
+#### 10.3.1 `auto_chain.py` — Retry fetches original prompt from memory
+
+```python
+# Existing code line 110-114, replace retry_prompt construction
+original_prompt = metadata.get("_original_prompt", "")
+if not original_prompt:
+    from .chain_context import get_store
+    original_prompt = get_store().get_original_prompt(task_id)
+
+retry_prompt = (
+    f"Previous attempt ({task_id}) was blocked by gate.\n"
+    f"Gate reason: {reason}\n\n"
+    f"Fix the issue described above and retry.\n"
+    f"Original task: {original_prompt}"
+)
+```
+
+#### 10.3.2 `auto_chain.py` — Emit task.completed event; archive on merge
+
+Before gate check in `on_task_completed`:
+
+```python
+_publish_event("task.completed", {
+    "project_id": project_id, "task_id": task_id,
+    "result": result, "type": task_type,
+})
+```
+
+After merge succeeds:
+
+```python
+from .chain_context import get_store
+get_store().archive_chain(task_id)
+```
+
+After retry exhausted (gate_retries >= 2, no retry created):
+
+```python
+_publish_event("task.failed", {
+    "project_id": project_id, "task_id": task_id,
+    "reason": "gate_retry_exhausted", "gate_reason": reason,
+})
+```
+
+#### 10.3.3 `auto_chain.py` — `_build_dev_prompt` parent result fallback
+
+```python
+def _build_dev_prompt(task_id, result, metadata):
+    prd = result.get("prd", {})
+    target_files = result.get("target_files",
+                     prd.get("target_files",
+                     metadata.get("target_files", [])))
+
+    # Fallback: if PM result lacks expected structure, read from chain context
+    if not target_files:
+        from .chain_context import get_store
+        parent_result = get_store().get_parent_result(task_id)
+        if parent_result:
+            target_files = parent_result.get("target_files", [])
+            # same for verification, requirements, acceptance_criteria
+    ...
+```
+
+#### 10.3.4 `server.py` — context-snapshot uses task_id
+
+```python
+# handle_context_snapshot: task_id and role parameters exist but task_id is unused
+task_chain = None
+if task_id:
+    from .chain_context import get_store
+    task_chain = get_store().get_chain(task_id, role=role)
+
+return {
+    ...existing fields...,
+    "task_chain": task_chain,  # role-filtered chain context
+}
+```
+
+#### 10.3.5 `server.py` — Register events + recover on startup
+
+```python
+# In server startup logic
+from .chain_context import register_events, get_store
+register_events()
+for pid in registered_projects:
+    get_store().recover_from_db(pid)
+```
+
+#### 10.3.6 `task_registry.py` — Auto-store `_original_prompt` on create
+
+```python
+def create_task(conn, project_id, prompt, ..., metadata=None):
+    meta = metadata or {}
+    if "_original_prompt" not in meta:
+        meta["_original_prompt"] = prompt
+    ...
+```
+
+#### 10.3.7 `db.py` — Add chain_events table DDL
+
+```python
+SCHEMA_SQL += """
+CREATE TABLE IF NOT EXISTS chain_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    root_task_id  TEXT NOT NULL,
+    task_id       TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    payload_json  TEXT NOT NULL,
+    ts            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chain_events_root
+    ON chain_events(root_task_id, ts);
+CREATE INDEX IF NOT EXISTS idx_chain_events_task
+    ON chain_events(task_id, event_type, ts);
+"""
+```
+
+### 10.4 Data Lifecycle
+
+```
+Event fires → in-memory dict O(1) update + DB chain_events INSERT (<1ms)
+Runtime read → in-memory dict O(1) (no DB)
+Crash        → restart → recover_from_db() replays events → rebuild memory
+Chain done   → chain.archived event → memory released → DB retained for audit
+Failed chain → 60s delay → archive (allow inspection window)
+Stale chain  → watchdog: updated_at > 1h → force archive + log warning
+Old data     → optional: purge chain_events older than N days where archived
+```
+
+### 10.5 Files Changed
+
+| File | Action | Description |
+|------|--------|-------------|
+| `agent/governance/chain_context.py` | **New** | ChainContextStore + EventBus subscribers + recover + archive |
+| `agent/governance/auto_chain.py` | **Modify** | Retry reads original prompt from store; emit task.completed/task.failed; archive on merge; _build_dev_prompt fallback |
+| `agent/governance/server.py` | **Modify** | context-snapshot injects task_chain; register events + recover on startup |
+| `agent/governance/task_registry.py` | **Modify** | create_task auto-stores `_original_prompt` in metadata |
+| `agent/governance/db.py` | **Modify** | chain_events table DDL |
+
+### 10.6 NOT Changed
+
+| File | Reason |
+|------|--------|
+| `VERSION` | Never touched; updated by merge stage only |
+| `agent/governance/memory_backend.py` | Memory system not involved |
+| `agent/ai_lifecycle.py` | context-snapshot returns extra `task_chain` field; `_build_system_prompt` auto-injects |
+| `agent/executor_worker.py` | No change; context flows through snapshot API |
+| `agent/governance/event_bus.py` | Existing functionality sufficient |
+
+### 10.7 Documentation Updates
+
+| Document | Change |
+|----------|--------|
+| `docs/ai-agent-integration-guide.md` | context-snapshot: new `task_chain` field |
+| `docs/p0-3-design.md` | auto-chain retry context recovery mechanism |
+| `docs/architecture-v6-executor-driven.md` | Gate Retry section: add event-sourcing |
+
+### 10.8 Risks
+
+| Risk | Mitigation |
+|------|------------|
+| Process crash loses in-memory state | `recover_from_db` replays events; `_original_prompt` in metadata as fallback |
+| chain_events INSERT write lock | Single-row append-only, WAL mode <1ms; lower write frequency than tasks table |
+| Memory leak (chains never archived) | State machine: failed/cancelled → archive; stale watchdog (1h) → force archive |
+| payload_json too large | `result_core` extracts only key fields; `result_raw` truncated to 10KB on DB write |
+| Multi-gate.blocked overwrites history | No UNIQUE constraint; append-only; all events preserved for audit |
+| Multi-process inconsistency | Explicit boundary: single governance process is authority. Future: shared event store |
+
+### 10.9 Acceptance Criteria
+
+- [ ] PM task retry prompt contains full original PRD (no more empty `"Original task: "`)
+- [ ] PM succeed → dev task target_files correct even when PM result format is non-standard
+- [ ] `/api/context-snapshot?task_id=xxx` returns `task_chain` field with full chain context
+- [ ] After gate.blocked, `get_chain()` immediately returns `state="blocked"` + `gate_reason`
+- [ ] After governance restart, `recover_from_db()` correctly rebuilds active chain state
+- [ ] After merge, chain released from memory; chain_events data preserved in DB
+- [ ] Two parallel chains execute without DB lock timeout
+- [ ] Multiple gate.blocked events on same task all preserved in chain_events (no overwrite)
+- [ ] Failed chain (retry exhausted) transitions to `failed` → archived within 60s
+- [ ] **Integration test:** Chain A blocked→retry + Chain B normal progress + governance restart → A retains original_prompt and gate_reason, B continues to completion
+- [ ] pytest full suite passes, 0 new failures
+
+### 10.10 Future: Align with Spec §4
+
+This phase solves runtime context passing. A future phase can write `task_result`
+kind to the memory system on chain archive (Spec §4), enabling cross-chain
+knowledge recall:
+
+```
+chain.archived → memory.write(kind="task_result", ref_id=root_task_id, content=chain_summary)
+```
+
+This would allow Coordinator to recall historical chain outcomes via `/api/mem/search`
+when creating new tasks.
