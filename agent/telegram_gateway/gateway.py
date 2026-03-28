@@ -692,8 +692,9 @@ def handle_task_dispatch(chat_id: int, text: str, route: dict) -> None:
         send_text(chat_id, f"Processing failed: {result['error']}")
         return
 
-    # Coordinator task is transparent to user — no "Task created" notification
-    # Coordinator AI will decide whether to reply, create subtask, etc.
+    # Send processing indicator so user knows system received message
+    send_text(chat_id, "⏳ Processing...")
+
     log.info("Coordinator task queued: %s", result.get("task_id", "?"))
 
 
