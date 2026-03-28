@@ -18,7 +18,9 @@ if _agent_dir not in sys.path:
     sys.path.insert(0, _agent_dir)
 
 from .errors import GovernanceError
-from .db import get_connection, DBContext
+import sqlite3
+import time
+from .db import get_connection, DBContext, independent_connection
 from . import role_service
 from . import state_service
 from . import project_service
@@ -55,6 +57,47 @@ SERVER_PID = os.getpid()
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------------------
+# SQLite BUSY retry helper
+# ---------------------------------------------------------------------------
+_BUSY_RETRY_DELAYS = (0.5, 1.0, 2.0)  # seconds between attempts 1→2, 2→3
+
+
+def _retry_on_busy(fn, *args, **kwargs):
+    """Call *fn* up to 3 times, retrying on SQLITE_BUSY / 'database is locked'.
+
+    Uses an exponential-style back-off: 0.5 s → 1 s → 2 s between attempts.
+    Intended for short write transactions (version-update, version-sync).
+
+    Args:
+        fn: Callable that performs the SQLite operation.  It must be
+            idempotent or use INSERT OR REPLACE semantics so retries are safe.
+        *args / **kwargs: Forwarded verbatim to *fn*.
+
+    Returns:
+        The return value of *fn* on success.
+
+    Raises:
+        sqlite3.OperationalError: Re-raised after all 3 attempts are exhausted.
+    """
+    last_exc = None
+    for attempt, delay in enumerate(_BUSY_RETRY_DELAYS, start=1):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as exc:
+            if "database is locked" in str(exc).lower():
+                last_exc = exc
+                time.sleep(delay)
+            else:
+                raise
+    # Final attempt (no sleep after this one)
+    try:
+        return fn(*args, **kwargs)
+    except sqlite3.OperationalError:
+        raise last_exc
+
 
 def _acquire_pid_lock():
     """Write PID lockfile. Kill old process if still alive."""
@@ -1577,7 +1620,6 @@ def handle_version_check(ctx: RequestContext):
 def handle_version_sync(ctx: RequestContext):
     """Executor syncs git status from host machine. Lightweight, no auth."""
     pid = ctx.get_project_id()
-    conn = get_connection(pid)
     body = ctx.body or {}
 
     git_head = body.get("git_head", "")
@@ -1586,14 +1628,20 @@ def handle_version_sync(ctx: RequestContext):
         return {"error": "missing git_head"}, 400
 
     now = _utc_now()
-    conn.execute("""
-        UPDATE project_version
-        SET git_head = ?, dirty_files = ?, git_synced_at = ?
-        WHERE project_id = ?
-    """, (git_head, json.dumps(dirty_files), now, pid))
-    conn.commit()
-    conn.close()
 
+    def _do_sync():
+        conn = independent_connection(pid)
+        try:
+            conn.execute("""
+                UPDATE project_version
+                SET git_head = ?, dirty_files = ?, git_synced_at = ?
+                WHERE project_id = ?
+            """, (git_head, json.dumps(dirty_files), now, pid))
+            conn.commit()
+        finally:
+            conn.close()
+
+    _retry_on_busy(_do_sync)
     return {"ok": True, "git_head": git_head, "dirty_files": dirty_files, "synced_at": now}
 
 
@@ -1601,72 +1649,111 @@ def handle_version_sync(ctx: RequestContext):
 def handle_version_update(ctx: RequestContext):
     """Update chain_version. 5-step validation: token + fields + lifecycle + version + audit."""
     pid = ctx.get_project_id()
-    conn = get_connection(pid)
     body = ctx.body or {}
 
-    # Step 1: Internal token check
+    # Validation uses a short-lived independent connection to avoid WAL lock
+    # contention with the shared server connection.  The final write is wrapped
+    # with _retry_on_busy for resilience against concurrent merges.
+
+    def _open():
+        return independent_connection(pid)
+
+    # Step 1: Internal token check (validation — no DB needed yet)
     expected_token = os.environ.get("VERSION_UPDATE_TOKEN", "")
     provided_token = (ctx.handler.headers.get("X-Internal-Token", "") if ctx.handler else "") or body.get("internal_token", "")
     if expected_token and provided_token != expected_token:
-        _audit_version_update(conn, pid, body, "rejected", "INVALID_TOKEN")
+        conn = _open()
+        try:
+            _audit_version_update(conn, pid, body, "rejected", "INVALID_TOKEN")
+        finally:
+            conn.close()
         return {"error": "INVALID_TOKEN", "message": "Internal token mismatch"}, 403
 
     # Step 2: Field completeness
     required = ("chain_version", "updated_by")
     missing = [f for f in required if not body.get(f)]
     if missing:
-        _audit_version_update(conn, pid, body, "rejected", "MISSING_FIELDS")
+        conn = _open()
+        try:
+            _audit_version_update(conn, pid, body, "rejected", "MISSING_FIELDS")
+        finally:
+            conn.close()
         return {"error": "MISSING_FIELDS", "message": f"Missing: {missing}"}, 400
 
     # Step 3: Lifecycle validation
     updated_by = body["updated_by"]
     if updated_by not in ("auto-chain", "init", "register", "merge-service"):
-        _audit_version_update(conn, pid, body, "rejected", "INVALID_UPDATED_BY")
+        conn = _open()
+        try:
+            _audit_version_update(conn, pid, body, "rejected", "INVALID_UPDATED_BY")
+        finally:
+            conn.close()
         return {"error": "INVALID_UPDATED_BY", "message": f"updated_by '{updated_by}' not allowed"}, 403
 
     task_id = body.get("task_id", "")
     chain_stage = body.get("chain_stage", "")
     if updated_by == "auto-chain" and chain_stage and chain_stage != "merge":
-        _audit_version_update(conn, pid, body, "rejected", "INVALID_CHAIN_STAGE")
+        conn = _open()
+        try:
+            _audit_version_update(conn, pid, body, "rejected", "INVALID_CHAIN_STAGE")
+        finally:
+            conn.close()
         return {"error": "INVALID_CHAIN_STAGE", "message": f"Expected merge, got {chain_stage}"}, 400
 
     # Step 3b: Chain link validation — verify task_id references a succeeded merge task
     if updated_by in ("auto-chain", "merge-service") and task_id:
-        task_row = conn.execute(
-            "SELECT status, type FROM tasks WHERE task_id = ?", (task_id,)
-        ).fetchone()
-        if task_row:
-            if task_row["status"] != "succeeded":
+        conn = _open()
+        try:
+            task_row = conn.execute(
+                "SELECT status, type FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if task_row and task_row["status"] != "succeeded":
                 _audit_version_update(conn, pid, body, "rejected", "TASK_NOT_SUCCEEDED")
                 return {"error": "TASK_NOT_SUCCEEDED",
                         "message": f"Task {task_id} status is {task_row['status']}, expected succeeded"}, 400
-        # Note: task_row could be None if task is in a different DB or not found — allow (backward compat)
+            # Note: task_row could be None if task is in a different DB or not found — allow (backward compat)
+        finally:
+            conn.close()
 
     # Step 4: Version consistency (optional — old_version check)
     old_version = body.get("old_version")
     if old_version:
-        row = conn.execute("SELECT chain_version FROM project_version WHERE project_id=?", (pid,)).fetchone()
-        current = row["chain_version"] if row else None
+        conn = _open()
+        try:
+            row = conn.execute("SELECT chain_version FROM project_version WHERE project_id=?", (pid,)).fetchone()
+            current = row["chain_version"] if row else None
+        finally:
+            conn.close()
         if current and old_version != current:
-            _audit_version_update(conn, pid, body, "rejected", "OLD_VERSION_MISMATCH")
+            conn2 = _open()
+            try:
+                _audit_version_update(conn2, pid, body, "rejected", "OLD_VERSION_MISMATCH")
+            finally:
+                conn2.close()
             return {"error": "OLD_VERSION_MISMATCH",
                     "message": f"Expected {old_version}, DB has {current}"}, 409
 
-    # Step 5: Update + audit
+    # Step 5: Update + audit — wrapped with retry for SQLITE_BUSY resilience
     new_version = body["chain_version"]
     now = _utc_now()
-    conn.execute("""
-        INSERT INTO project_version (project_id, chain_version, updated_at, updated_by)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(project_id) DO UPDATE SET
-            chain_version=excluded.chain_version,
-            updated_at=excluded.updated_at,
-            updated_by=excluded.updated_by
-    """, (pid, new_version, now, updated_by))
-    conn.commit()
 
-    _audit_version_update(conn, pid, body, "success", "")
-    conn.close()
+    def _do_update():
+        conn = independent_connection(pid)
+        try:
+            conn.execute("""
+                INSERT INTO project_version (project_id, chain_version, updated_at, updated_by)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    chain_version=excluded.chain_version,
+                    updated_at=excluded.updated_at,
+                    updated_by=excluded.updated_by
+            """, (pid, new_version, now, updated_by))
+            conn.commit()
+            _audit_version_update(conn, pid, body, "success", "")
+        finally:
+            conn.close()
+
+    _retry_on_busy(_do_update)
     return {"ok": True, "chain_version": new_version, "updated_at": now}
 
 

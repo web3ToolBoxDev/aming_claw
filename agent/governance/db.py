@@ -532,6 +532,40 @@ def _run_migrations(conn: sqlite3.Connection, from_version: int, to_version: int
             MIGRATIONS[version](conn)
 
 
+def independent_connection(project_id: str, busy_timeout: int = 5000) -> sqlite3.Connection:
+    """Open a *fresh* SQLite connection that bypasses any shared-connection pool.
+
+    This is the preferred helper for write-heavy, latency-sensitive paths such
+    as ``handle_version_update`` and ``handle_version_sync`` where a long-lived
+    shared connection may already hold a WAL read-lock that causes the incoming
+    write to block indefinitely.
+
+    Key differences from ``get_connection``:
+    * ``busy_timeout`` defaults to **5 000 ms** (vs 10 000 ms for the shared
+      connection).  The tighter budget prevents a stalled write from blocking
+      the HTTP worker thread for too long; callers are expected to wrap the call
+      with the :func:`retry_on_busy` helper.
+    * ``_ensure_schema`` is **not** called — the database is assumed to be
+      fully migrated already.  This makes the helper cheap: no schema introspection,
+      no migration logic, just open → configure → return.
+
+    Args:
+        project_id: Governance project identifier (used to locate the DB file).
+        busy_timeout: SQLite busy_timeout in milliseconds (default 5000).
+
+    Returns:
+        An open, fully-configured ``sqlite3.Connection`` with WAL mode,
+        foreign-key enforcement, the given busy_timeout, and ``Row`` factory.
+    """
+    db_path = _project_db_path(project_id)
+    conn = sqlite3.connect(str(db_path), timeout=busy_timeout / 1000.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(f"PRAGMA busy_timeout={busy_timeout}")
+    return conn
+
+
 def close_connection(conn: sqlite3.Connection):
     """Close a database connection."""
     if conn:
