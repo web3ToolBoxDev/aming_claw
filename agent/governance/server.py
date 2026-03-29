@@ -207,7 +207,11 @@ class GovernanceHandler(BaseHTTPRequestHandler):
             if isinstance(result, tuple) and len(result) == 3:
                 code, body, extra_headers = result
             elif isinstance(result, tuple):
-                code, body = result
+                # Support both (code, body) and (body, code) return styles
+                if isinstance(result[0], int):
+                    code, body = result[0], result[1]
+                else:
+                    body, code = result[0], result[1]
                 extra_headers = None
             else:
                 code, body = 200, result
