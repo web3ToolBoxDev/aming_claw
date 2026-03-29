@@ -170,21 +170,24 @@ def archive_context(project_id: str) -> dict:
                 "ts": entry.get("ts"),
             })
 
-    # Create session summary
+    # Create session summary — skip if empty (no decisions and no messages)
     if snapshot:
-        summary = {
-            "kind": "session_summary",
-            "content": json.dumps({
-                "focus": snapshot.get("current_focus", ""),
-                "active_nodes": snapshot.get("active_nodes", []),
-                "pending_tasks": snapshot.get("pending_tasks", []),
-                "decisions_count": len(archived),
-                "messages_count": len(snapshot.get("recent_messages", [])),
-            }, ensure_ascii=False),
-            "source": "session_archive",
-            "ts": _utc_iso(),
-        }
-        archived.append(summary)
+        decisions_count = len(archived)
+        messages_count = len(snapshot.get("recent_messages", []))
+        if decisions_count > 0 or messages_count > 0:
+            summary = {
+                "kind": "session_summary",
+                "content": json.dumps({
+                    "focus": snapshot.get("current_focus", ""),
+                    "active_nodes": snapshot.get("active_nodes", []),
+                    "pending_tasks": snapshot.get("pending_tasks", []),
+                    "decisions_count": decisions_count,
+                    "messages_count": messages_count,
+                }, ensure_ascii=False),
+                "source": "session_archive",
+                "ts": _utc_iso(),
+            }
+            archived.append(summary)
 
     # Write to memory service
     try:

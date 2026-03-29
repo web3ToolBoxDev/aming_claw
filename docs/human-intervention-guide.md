@@ -341,6 +341,7 @@ Use `GET /api/context-snapshot/{pid}?task_id=XXX&role=coordinator` to see full c
 Run `GET /api/wf/{pid}/preflight-check` (or MCP tool `preflight_check`) before intervening. Checks system, version, graph, coverage, and queue health. Use `auto_fix=true` to auto-waive orphan nodes and fail stuck tasks.
 
 ## Changelog
+- 2026-03-28: Batch 1 flow fixes — R1: test/QA gate fail creates dev retry (降级重跑) instead of same-stage escalate; R2: _build_qa_prompt requires exactly qa_pass or reject; M3: dev success writes pattern memory; S1: session_context skips empty session_summary when decisions=0 and messages=0
 - 2026-03-28: Pre-flight self-check system, memory promote/register-pack APIs, merge memory write
 - 2026-03-28: Chain Context Phase 8 complete: auto-archive failed chains, prompt in task.created events
 - 2026-03-28: DB lock fix: auto_chain uses independent connection, guaranteed close via try/finally

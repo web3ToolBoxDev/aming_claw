@@ -218,6 +218,56 @@ def _do_chain(conn, project_id, task_id, task_type, result, metadata):
         except Exception:
             log.debug("auto_chain: audit gate.blocked failed (non-critical)", exc_info=True)
 
+        # Special cases: test failure or QA rejection → retry as dev (not same stage)
+        # Dev fixes the root cause; re-running test/qa without a code fix is wasteful
+        if task_type in ("test", "qa"):
+            failure_reason = reason
+            if task_type == "qa":
+                # Prefer specific rejection reason from QA result over gate reason
+                failure_reason = result.get("reason", reason)
+            original_prompt = metadata.get("_original_prompt", "")
+            if not original_prompt:
+                try:
+                    from .chain_context import get_store
+                    original_prompt = get_store().get_original_prompt(task_id)
+                except Exception:
+                    pass
+            if not original_prompt:
+                original_prompt = result.get("summary", "")
+            stage_retry_prompt = (
+                f"Fix {task_type} stage failures from task {task_id}.\n"
+                f"failure_reason: {failure_reason}\n"
+                f"retry_from_stage: {task_type}\n\n"
+                f"Original task: {original_prompt}"
+            )
+            from . import task_registry
+            dev_retry = task_registry.create_task(
+                conn, project_id,
+                prompt=stage_retry_prompt,
+                task_type="dev",
+                created_by="auto-chain-stage-retry",
+                metadata={
+                    **metadata,
+                    "parent_task_id": task_id,
+                    "chain_depth": depth + 1,
+                    "failure_reason": failure_reason,
+                    "retry_from_stage": task_type,
+                    "_original_prompt": original_prompt,
+                },
+            )
+            retry_id = dev_retry.get("task_id", "?")
+            log.info("auto_chain: %s failure → dev retry task %s", task_type, retry_id)
+            _publish_event("task.retry", {
+                "project_id": project_id, "task_id": retry_id,
+                "original_task_id": task_id, "reason": failure_reason,
+                "retry_from_stage": task_type,
+            })
+            return {
+                "gate_blocked": True, "stage": task_type, "reason": reason,
+                "retry_task_id": retry_id, "retry_type": "dev",
+                "retry_from_stage": task_type,
+            }
+
         # Auto-retry: create a new task at the SAME stage with gate reason injected
         # Max 2 retries per gate to prevent infinite loops
         gate_retries = metadata.get("_gate_retry_count", 0)
@@ -268,6 +318,21 @@ def _do_chain(conn, project_id, task_id, task_type, result, metadata):
             "reason": "gate_retry_exhausted", "gate_reason": reason,
         })
         return {"gate_blocked": True, "stage": task_type, "reason": reason}
+
+    # M5: Dev success + checkpoint gate pass → write success pattern memory
+    if task_type == "dev":
+        _changed_for_pattern = result.get("changed_files", metadata.get("changed_files", []))
+        _summary_for_pattern = result.get("summary", "")
+        _write_chain_memory(
+            conn, project_id, "pattern",
+            _summary_for_pattern or f"Dev completed: {', '.join(_changed_for_pattern[:3])}",
+            metadata,
+            extra_structured={
+                "task_id": task_id, "chain_stage": "dev",
+                "changed_files": _changed_for_pattern,
+                "gate": "checkpoint_pass",
+            },
+        )
 
     # Terminal stage → trigger deploy + archive chain
     if next_type is None:
@@ -628,7 +693,9 @@ def _build_qa_prompt(task_id, result, metadata):
     prompt = (
         f"QA review for {task_id}.\n"
         f"test_report: {json.dumps(report)}\n"
-        f"changed_files: {json.dumps(changed)}"
+        f"changed_files: {json.dumps(changed)}\n"
+        f"IMPORTANT: result.recommendation MUST be exactly 'qa_pass' or 'reject' "
+        f"(no other values accepted by the gate)."
     )
     return prompt, {
         **metadata,  # preserves skip_doc_check and all other original task metadata

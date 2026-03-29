@@ -503,6 +503,7 @@ Each role sees only relevant stages and result fields:
 - `task_registry.py`: auto-stores _original_prompt on create_task
 
 ## Changelog
+- 2026-03-28: Batch 1 flow fixes — R1: test/QA gate fail creates dev retry (降级重跑) instead of same-stage escalate; R2: _build_qa_prompt requires exactly qa_pass or reject; M3: dev success writes pattern memory; S1: session_context skips empty session_summary when decisions=0 and messages=0
 - 2026-03-28: DB lock fix: auto_chain independent connection + guaranteed conn.close()
 - 2026-03-28: M3-M6 Gate enhancements: skip_doc_check guard, release gate warning, version-update validation, QA dedup
 - 2026-03-28: M1+M2 Task ownership validation + observer override audit

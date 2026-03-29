@@ -739,6 +739,7 @@ _retry_on_busy(_do_write)
 ---
 
 ## Changelog
+- 2026-03-28: Batch 1 flow fixes — R1: test/QA gate fail creates dev retry (降级重跑) instead of same-stage escalate; R2: _build_qa_prompt requires exactly qa_pass or reject; M3: dev success writes pattern memory; S1: session_context skips empty session_summary when decisions=0 and messages=0
 - 2026-03-28: P1-P3 optimization — memory injection all task types; index_status tracking + flush-index; conflict_policy enforcement; TTL cleanup endpoint; orphan task recovery; role-split guides (guide-dev-agent.md, guide-tester-qa.md, guide-coordinator.md)
 - 2026-03-28: Add independent_connection() + _retry_on_busy(); use in handle_version_update/handle_version_sync
 - 2026-03-28: DB lock fix: auto_chain uses independent connection with guaranteed close
